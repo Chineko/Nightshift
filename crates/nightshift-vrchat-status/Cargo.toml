@@ -1,0 +1,10 @@
+[package]
+name = "nightshift-vrchat-status"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+nightshift-protocol = { path = "../nightshift-protocol" }
