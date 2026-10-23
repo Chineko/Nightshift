@@ -10,7 +10,7 @@ use nightshift_osc_script::{
     CURRENT_SCRIPT_VERSION, OscAction, OscScript, OscValue, ScriptTaskRegistry,
 };
 use nightshift_protocol::{
-    ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
+    ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent, WorkerReport,
 };
 use resolver::{ResolveResult, SemanticQuery, resolve_parameter};
 use rosc::{OscMessage, OscPacket, OscType};
@@ -218,6 +218,51 @@ async fn refresh_avatar_context(current: &mut Option<AvatarContext>) {
     }
 }
 
+fn runtime_report(avatar_context: Option<&AvatarContext>) -> WorkerReport {
+    WorkerReport::OscRuntime {
+        connected: true,
+        avatar_id: avatar_context.map(|context| context.avatar_id.clone()),
+        avatar_parameter_count: avatar_context
+            .map(|context| u32::try_from(context.parameters.len()).unwrap_or(u32::MAX))
+            .unwrap_or(0),
+        gogo_detected: avatar_context.is_some_and(gogo::supports_gogo_1_8),
+    }
+}
+
+async fn write_client_message(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    message: &ClientMessage,
+) -> Result<()> {
+    let mut bytes = serde_json::to_vec(message).context("serializing daemon IPC message")?;
+    bytes.push(b'\n');
+    writer
+        .write_all(&bytes)
+        .await
+        .context("writing daemon IPC message")?;
+    Ok(())
+}
+
+async fn report_runtime_if_changed(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    previous: &mut Option<WorkerReport>,
+    avatar_context: Option<&AvatarContext>,
+) -> Result<()> {
+    let report = runtime_report(avatar_context);
+    if previous.as_ref() == Some(&report) {
+        return Ok(());
+    }
+
+    write_client_message(
+        writer,
+        &ClientMessage::Report {
+            report: report.clone(),
+        },
+    )
+    .await?;
+    *previous = Some(report);
+    Ok(())
+}
+
 fn start_transition_automation(
     scripts: &mut ScriptTaskRegistry,
     socket: Arc<UdpSocket>,
@@ -300,17 +345,15 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
-    let hello = ClientMessage::Hello {
-        protocol: PROTOCOL_VERSION,
-        client: "nightshift-osc".into(),
-        client_version: env!("CARGO_PKG_VERSION").into(),
-    };
-    let mut bytes = serde_json::to_vec(&hello).context("serializing daemon hello")?;
-    bytes.push(b'\n');
-    write_half
-        .write_all(&bytes)
-        .await
-        .context("sending daemon hello")?;
+    write_client_message(
+        &mut write_half,
+        &ClientMessage::Hello {
+            protocol: PROTOCOL_VERSION,
+            client: "nightshift-osc".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+        },
+    )
+    .await?;
 
     let config = load_config().await?;
     let mut enabled = false;
@@ -318,6 +361,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut sleeping = false;
     let mut sender: Option<Arc<UdpSocket>> = None;
     let mut avatar_context: Option<AvatarContext> = None;
+    let mut last_report: Option<WorkerReport> = None;
     let mut scripts = ScriptTaskRegistry::default();
     let mut line = String::new();
 
@@ -368,6 +412,12 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     sender = None;
                     avatar_context = None;
                 }
+                report_runtime_if_changed(
+                    &mut write_half,
+                    &mut last_report,
+                    avatar_context.as_ref(),
+                )
+                .await?;
             }
             ServerMessage::Event { event } => match event {
                 StateEvent::OscChanged(state) => {
@@ -390,6 +440,12 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         sender = None;
                         avatar_context = None;
                     }
+                    report_runtime_if_changed(
+                        &mut write_half,
+                        &mut last_report,
+                        avatar_context.as_ref(),
+                    )
+                    .await?;
                 }
                 StateEvent::SettingsChanged(settings) => {
                     let was_enabled = gogo_enabled;
@@ -400,6 +456,12 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     } else if enabled && !was_enabled && gogo_enabled {
                         refresh_avatar_context(&mut avatar_context).await;
                     }
+                    report_runtime_if_changed(
+                        &mut write_half,
+                        &mut last_report,
+                        avatar_context.as_ref(),
+                    )
+                    .await?;
                 }
                 StateEvent::SleepChanged(state) => {
                     let edge = transition_edge(sleeping, state.phase);
@@ -412,6 +474,12 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                             if gogo_enabled {
                                 refresh_avatar_context(&mut avatar_context).await;
                             }
+                            report_runtime_if_changed(
+                                &mut write_half,
+                                &mut last_report,
+                                avatar_context.as_ref(),
+                            )
+                            .await?;
                             start_transition_automation(
                                 &mut scripts,
                                 sender.as_ref().expect("sender created").clone(),
@@ -520,5 +588,18 @@ mod tests {
         assert_eq!(transition_edge(true, SleepPhase::Sleeping), None);
         assert_eq!(transition_edge(true, SleepPhase::Waking), Some(false));
         assert_eq!(transition_edge(false, SleepPhase::Awake), None);
+    }
+
+    #[test]
+    fn runtime_report_without_avatar_is_connected_but_empty() {
+        assert_eq!(
+            runtime_report(None),
+            WorkerReport::OscRuntime {
+                connected: true,
+                avatar_id: None,
+                avatar_parameter_count: 0,
+                gogo_detected: false,
+            }
+        );
     }
 }
