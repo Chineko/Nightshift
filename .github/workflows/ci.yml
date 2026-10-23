@@ -27,6 +27,9 @@ jobs:
       - name: Test invite rules
         run: cargo test -p nightshift-invites
 
+      - name: Test GoGo presets
+        run: cargo test -p nightshift-gogo
+
       - name: Test daemon state machine
         run: cargo test -p nightshift-daemon
 
