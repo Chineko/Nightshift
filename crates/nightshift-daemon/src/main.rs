@@ -32,8 +32,14 @@ impl StateStore {
         }
     }
 
-    async fn snapshot(&self) -> AppState {
-        self.state.lock().await.clone()
+    async fn snapshot_and_subscribe(&self) -> (AppState, broadcast::Receiver<StateEvent>) {
+        // Mutations also hold this lock while emitting their deltas. Creating the
+        // receiver and cloning state under the same lock establishes a clean
+        // ordering boundary: the returned snapshot is authoritative, and every
+        // event delivered by the returned receiver happened after that snapshot.
+        let state = self.state.lock().await;
+        let updates = self.updates.subscribe();
+        (state.clone(), updates)
     }
 
     fn emit_changes(&self, before: &AppState, after: &AppState) {
@@ -226,10 +232,7 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
     )
     .await?;
 
-    // Subscribe before taking the snapshot so a state change cannot fall into
-    // the gap between the initial snapshot and delta delivery.
-    let mut updates = store.updates.subscribe();
-    let snapshot = store.snapshot().await;
+    let (snapshot, mut updates) = store.snapshot_and_subscribe().await;
     send_message(
         &mut write_half,
         &ServerMessage::FullState { state: snapshot },
@@ -246,9 +249,11 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
 
                 match serde_json::from_str::<ClientMessage>(line.trim_end()) {
                     Ok(ClientMessage::GetState) => {
+                        let (snapshot, new_updates) = store.snapshot_and_subscribe().await;
+                        updates = new_updates;
                         send_message(
                             &mut write_half,
-                            &ServerMessage::FullState { state: store.snapshot().await },
+                            &ServerMessage::FullState { state: snapshot },
                         ).await?;
                     }
                     Ok(ClientMessage::Command { command }) => store.apply(command).await,
@@ -272,9 +277,11 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
                         send_message(&mut write_half, &ServerMessage::Event { event }).await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let (snapshot, new_updates) = store.snapshot_and_subscribe().await;
+                        updates = new_updates;
                         send_message(
                             &mut write_half,
-                            &ServerMessage::FullState { state: store.snapshot().await },
+                            &ServerMessage::FullState { state: snapshot },
                         ).await?;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
