@@ -1,9 +1,11 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 const AVATAR_PARAMETER_PREFIX: &str = "/avatar/parameters/";
+const OSCQUERY_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const OSCQUERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AvatarContext {
@@ -75,7 +77,14 @@ pub async fn discover_avatar_context() -> Result<Option<AvatarContext>> {
 
 async fn fetch_avatar_context(host: &str, port: u16) -> Result<AvatarContext> {
     let url = format!("http://{host}:{port}/");
-    let node = reqwest::get(&url)
+    let client = reqwest::Client::builder()
+        .connect_timeout(OSCQUERY_CONNECT_TIMEOUT)
+        .timeout(OSCQUERY_REQUEST_TIMEOUT)
+        .build()
+        .context("building OSCQuery HTTP client")?;
+    let node = client
+        .get(&url)
+        .send()
         .await
         .with_context(|| format!("fetching VRChat OSCQuery tree from {url}"))?
         .error_for_status()
