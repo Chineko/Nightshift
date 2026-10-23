@@ -148,10 +148,26 @@ fn print_status(state: &AppState) {
         "  vrchat      : {}",
         if state.vrchat.connected { "connected" } else { "disconnected" }
     );
-    println!(
-        "  osc         : {}",
-        if state.osc.connected { "connected" } else if state.osc.enabled { "enabled, waiting" } else { "off" }
-    );
+
+    let osc_status = if !state.osc.enabled {
+        "off"
+    } else if state.osc.connected {
+        "running"
+    } else {
+        "enabled, worker missing"
+    };
+    println!("  osc         : {osc_status}");
+    if state.osc.connected {
+        println!(
+            "  osc avatar  : {}",
+            state.osc.avatar_id.as_deref().unwrap_or("not discovered")
+        );
+        println!("  osc params  : {}", state.osc.avatar_parameter_count);
+        println!(
+            "  gogo 1.8+   : {}",
+            if state.osc.gogo_detected { "detected" } else { "not detected" }
+        );
+    }
 }
 
 #[tokio::main]
