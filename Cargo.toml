@@ -8,6 +8,7 @@ members = [
     "crates/nightshift-osc",
     "crates/nightshift-invites",
     "crates/nightshift-gogo",
+    "crates/nightshift-osc-script",
 ]
 resolver = "2"
 
