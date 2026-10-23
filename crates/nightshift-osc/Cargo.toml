@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+nightshift-gogo = { path = "../nightshift-gogo" }
 nightshift-osc-script = { path = "../nightshift-osc-script" }
 nightshift-protocol = { path = "../nightshift-protocol" }
 oyasumivr_oscquery = { git = "https://github.com/Raphiiko/oyasumivr_oscquery.git", rev = "1bfd8ea4943822ebda2538c7c0d46a484cc5e96d" }
