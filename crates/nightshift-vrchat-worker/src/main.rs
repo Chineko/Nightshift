@@ -5,26 +5,33 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use futures_util::StreamExt;
 use nightshift_protocol::{
     ClientMessage, PROTOCOL_VERSION, ServerMessage, StateEvent, VrchatStatus, WorkerReport,
 };
-use nightshift_vrchat_api::{SessionCookies, VrchatApiClient};
+use nightshift_vrchat_api::{
+    SessionCookies, VrchatApiClient, VrchatNotification, parse_pipeline_notification, pipeline_url,
+};
 use nightshift_vrchat_session::{VrchatSession, VrchatSessionStore};
 use nightshift_vrchat_status::{
     StatusAutomationConfig, sleeping_phase, target_for_transition,
 };
+use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
     sync::mpsc,
     task::JoinHandle,
 };
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 const STATUS_DEBOUNCE: Duration = Duration::from_secs(3);
 const STATUS_MIN_INTERVAL: Duration = Duration::from_secs(10);
+const PIPELINE_RECONNECT_DELAY: Duration = Duration::from_secs(10);
+const PIPELINE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 struct AbortTask(Option<JoinHandle<()>>);
 
@@ -51,9 +58,14 @@ impl Drop for AbortTask {
     }
 }
 
+struct RuntimeRefresh {
+    report: WorkerReport,
+    pipeline_auth_token: Option<String>,
+}
+
 struct StatusTaskResult {
     generation: u64,
-    result: Result<WorkerReport>,
+    result: Result<RuntimeRefresh>,
 }
 
 fn socket_path() -> Result<PathBuf> {
@@ -68,6 +80,13 @@ fn disconnected_report() -> WorkerReport {
         connected: false,
         display_name: None,
         status: VrchatStatus::Offline,
+    }
+}
+
+fn disconnected_refresh() -> RuntimeRefresh {
+    RuntimeRefresh {
+        report: disconnected_report(),
+        pipeline_auth_token: None,
     }
 }
 
@@ -132,6 +151,111 @@ fn cancel_pending_status_on_disconnect(
     }
 }
 
+fn pipeline_error_message(frame: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(frame).ok()?;
+    let error = value.get("err")?;
+    match error {
+        Value::String(message) => Some(message.clone()),
+        Value::Object(fields) => fields
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| Some("VRChat pipeline returned an error".into())),
+        _ => Some("VRChat pipeline returned an error".into()),
+    }
+}
+
+async fn pipeline_loop(
+    auth_token: String,
+    events: mpsc::UnboundedSender<VrchatNotification>,
+) {
+    loop {
+        let url = pipeline_url(&auth_token);
+        let connection = tokio::time::timeout(
+            PIPELINE_CONNECT_TIMEOUT,
+            connect_async(url.as_str()),
+        )
+        .await;
+
+        let mut socket = match connection {
+            Ok(Ok((socket, _response))) => {
+                info!("VRChat pipeline connected");
+                socket
+            }
+            Ok(Err(error)) => {
+                warn!(%error, "VRChat pipeline connection failed");
+                tokio::time::sleep(PIPELINE_RECONNECT_DELAY).await;
+                continue;
+            }
+            Err(_) => {
+                warn!("VRChat pipeline connection timed out");
+                tokio::time::sleep(PIPELINE_RECONNECT_DELAY).await;
+                continue;
+            }
+        };
+
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    let frame = text.as_str();
+                    if let Some(message) = pipeline_error_message(frame) {
+                        warn!(%message, "VRChat pipeline rejected the connection");
+                        break;
+                    }
+
+                    match parse_pipeline_notification(frame) {
+                        Ok(Some(notification)) => {
+                            if events.send(notification).is_err() {
+                                return;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            warn!(%error, "ignored malformed VRChat pipeline frame");
+                        }
+                    }
+                }
+                Some(Ok(Message::Close(_))) => {
+                    info!("VRChat pipeline closed");
+                    break;
+                }
+                Some(Ok(_)) => {}
+                Some(Err(error)) => {
+                    warn!(%error, "VRChat pipeline read failed");
+                    break;
+                }
+                None => {
+                    info!("VRChat pipeline ended");
+                    break;
+                }
+            }
+        }
+
+        tokio::time::sleep(PIPELINE_RECONNECT_DELAY).await;
+    }
+}
+
+fn sync_pipeline_task(
+    task: &mut AbortTask,
+    current_auth_token: &mut Option<String>,
+    next_auth_token: Option<String>,
+    events: &mpsc::UnboundedSender<VrchatNotification>,
+) {
+    if current_auth_token.as_deref() == next_auth_token.as_deref() {
+        return;
+    }
+
+    task.abort();
+    *current_auth_token = next_auth_token.clone();
+
+    if let Some(auth_token) = next_auth_token {
+        let events = events.clone();
+        task.replace(tokio::spawn(async move {
+            pipeline_loop(auth_token, events).await;
+        }));
+    }
+}
+
 async fn load_session(store: VrchatSessionStore) -> Result<Option<VrchatSession>> {
     tokio::task::spawn_blocking(move || store.load())
         .await
@@ -174,20 +298,23 @@ async fn validated_user(
 async fn refresh_runtime(
     api: &VrchatApiClient,
     store: &VrchatSessionStore,
-) -> WorkerReport {
-    let (_, user) = match validated_user(api, store).await {
+) -> RuntimeRefresh {
+    let (session, user) = match validated_user(api, store).await {
         Ok(Some(value)) => value,
-        Ok(None) => return disconnected_report(),
+        Ok(None) => return disconnected_refresh(),
         Err(error) => {
             warn!(%error, "VRChat session validation failed");
-            return disconnected_report();
+            return disconnected_refresh();
         }
     };
 
-    WorkerReport::VrchatRuntime {
-        connected: true,
-        display_name: Some(user.display_name),
-        status: user.status,
+    RuntimeRefresh {
+        report: WorkerReport::VrchatRuntime {
+            connected: true,
+            display_name: Some(user.display_name),
+            status: user.status,
+        },
+        pipeline_auth_token: Some(session.auth_cookie),
     }
 }
 
@@ -195,7 +322,7 @@ async fn set_runtime_status(
     api: VrchatApiClient,
     store: VrchatSessionStore,
     target: VrchatStatus,
-) -> Result<WorkerReport> {
+) -> Result<RuntimeRefresh> {
     let Some((session, user)) = validated_user(&api, &store).await? else {
         bail!("no VRChat session is stored");
     };
@@ -205,10 +332,13 @@ async fn set_runtime_status(
             .await?;
     }
 
-    Ok(WorkerReport::VrchatRuntime {
-        connected: true,
-        display_name: Some(user.display_name),
-        status: target,
+    Ok(RuntimeRefresh {
+        report: WorkerReport::VrchatRuntime {
+            connected: true,
+            display_name: Some(user.display_name),
+            status: target,
+        },
+        pipeline_auth_token: Some(session.auth_cookie),
     })
 }
 
@@ -292,6 +422,10 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut status_task = AbortTask(None);
     let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusTaskResult>();
 
+    let mut pipeline_task = AbortTask(None);
+    let mut pipeline_auth_token: Option<String> = None;
+    let (pipeline_tx, mut pipeline_rx) = mpsc::unbounded_channel::<VrchatNotification>();
+
     loop {
         tokio::select! {
             read = reader.read_line(&mut line) => {
@@ -313,8 +447,18 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         }
                         handshake_complete = true;
                         info!(protocol, "Nightshift VRChat worker connected to daemon");
-                        let report = refresh_runtime(&api, &store).await;
+                        let refresh = refresh_runtime(&api, &store).await;
+                        let RuntimeRefresh {
+                            report,
+                            pipeline_auth_token: next_pipeline_auth_token,
+                        } = refresh;
                         (vrchat_connected, current_status) = report_runtime(&report);
+                        sync_pipeline_task(
+                            &mut pipeline_task,
+                            &mut pipeline_auth_token,
+                            next_pipeline_auth_token,
+                            &pipeline_tx,
+                        );
                         report_if_changed(&mut write_half, &mut last_report, report).await?;
                     }
                     ServerMessage::FullState { state } => {
@@ -358,6 +502,14 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                                 &mut status_generation,
                                 &mut status_task,
                             );
+                            if !vrchat_connected {
+                                sync_pipeline_task(
+                                    &mut pipeline_task,
+                                    &mut pipeline_auth_token,
+                                    None,
+                                    &pipeline_tx,
+                                );
+                            }
                         }
                         StateEvent::SleepChanged(state) => {
                             let target = target_for_transition(
@@ -389,12 +541,21 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 }
             }
             _ = interval.tick(), if handshake_complete => {
-                let report = refresh_runtime(&api, &store).await;
+                let RuntimeRefresh {
+                    report,
+                    pipeline_auth_token: next_pipeline_auth_token,
+                } = refresh_runtime(&api, &store).await;
                 (vrchat_connected, current_status) = report_runtime(&report);
                 cancel_pending_status_on_disconnect(
                     vrchat_connected,
                     &mut status_generation,
                     &mut status_task,
+                );
+                sync_pipeline_task(
+                    &mut pipeline_task,
+                    &mut pipeline_auth_token,
+                    next_pipeline_auth_token,
+                    &pipeline_tx,
                 );
                 report_if_changed(&mut write_half, &mut last_report, report).await?;
             }
@@ -404,15 +565,36 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 }
                 status_task.0 = None;
                 match task_result.result {
-                    Ok(report) => {
+                    Ok(refresh) => {
                         last_status_write = Some(Instant::now());
+                        let RuntimeRefresh {
+                            report,
+                            pipeline_auth_token: next_pipeline_auth_token,
+                        } = refresh;
                         (vrchat_connected, current_status) = report_runtime(&report);
+                        sync_pipeline_task(
+                            &mut pipeline_task,
+                            &mut pipeline_auth_token,
+                            next_pipeline_auth_token,
+                            &pipeline_tx,
+                        );
                         report_if_changed(&mut write_half, &mut last_report, report).await?;
                     }
                     Err(error) => {
                         warn!(%error, "VRChat sleep/wake status update failed");
                     }
                 }
+            }
+            Some(notification) = pipeline_rx.recv() => {
+                info!(
+                    notification_id = %notification.id,
+                    sender_user_id = %notification.sender_user_id,
+                    sender_username = notification.sender_username.as_deref().unwrap_or("<unknown>"),
+                    kind = ?notification.kind,
+                    "received VRChat invite notification"
+                );
+                // Transport gate only. The next module step bridges this typed event into
+                // nightshift-invites; networking does not make policy decisions here.
             }
         }
     }
@@ -471,6 +653,19 @@ mod tests {
                 status: VrchatStatus::Offline,
             }
         );
+    }
+
+    #[test]
+    fn pipeline_errors_extract_only_safe_message() {
+        assert_eq!(
+            pipeline_error_message(r#"{"err":"bad auth"}"#).as_deref(),
+            Some("bad auth")
+        );
+        assert_eq!(
+            pipeline_error_message(r#"{"err":{"message":"expired"}}"#).as_deref(),
+            Some("expired")
+        );
+        assert_eq!(pipeline_error_message(r#"{"type":"notification"}"#), None);
     }
 
     #[test]
