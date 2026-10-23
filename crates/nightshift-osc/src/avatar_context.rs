@@ -15,6 +15,12 @@ impl AvatarContext {
     pub fn parameter_by_canonical_address(&self, address: &str) -> Option<&AvatarParameter> {
         self.parameters.iter().find(|parameter| parameter.address == address)
     }
+
+    pub fn target_addresses_for<'a>(&'a self, address: &'a str) -> Vec<&'a str> {
+        self.parameter_by_canonical_address(address)
+            .map(AvatarParameter::target_addresses)
+            .unwrap_or_else(|| vec![address])
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,6 +255,24 @@ mod tests {
         assert_eq!(
             parameter.target_addresses(),
             vec!["/avatar/parameters/Go/Stationary"]
+        );
+    }
+
+    #[test]
+    fn context_routes_canonical_address_to_runtime_alias() {
+        let parameter = sanitize_parameter(parameter("VF123_Go/Stationary"));
+        let context = AvatarContext {
+            avatar_id: "avtr_test".into(),
+            parameters: vec![parameter],
+        };
+
+        assert_eq!(
+            context.target_addresses_for("/avatar/parameters/Go/Stationary"),
+            vec!["/avatar/parameters/VF123_Go/Stationary"]
+        );
+        assert_eq!(
+            context.target_addresses_for("/avatar/parameters/Other"),
+            vec!["/avatar/parameters/Other"]
         );
     }
 
