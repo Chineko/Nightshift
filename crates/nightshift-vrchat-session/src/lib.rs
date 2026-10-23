@@ -1,3 +1,5 @@
+use std::fmt;
+
 use anyhow::{Context, Result};
 use keyring::{Entry, Error as KeyringError};
 use serde::{Deserialize, Serialize};
@@ -5,13 +7,27 @@ use serde::{Deserialize, Serialize};
 const SERVICE: &str = "io.github.chineko.Nightshift.vrchat";
 const DEFAULT_PROFILE: &str = "active";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VrchatSession {
     pub auth_cookie: String,
     #[serde(default)]
     pub two_factor_cookie: Option<String>,
     #[serde(default)]
     pub user_id: Option<String>,
+}
+
+impl fmt::Debug for VrchatSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("VrchatSession")
+            .field("auth_cookie", &"<redacted>")
+            .field(
+                "two_factor_cookie",
+                &self.two_factor_cookie.as_ref().map(|_| "<redacted>"),
+            )
+            .field("user_id", &self.user_id)
+            .finish()
+    }
 }
 
 impl VrchatSession {
@@ -103,6 +119,19 @@ mod tests {
         let bytes = serde_json::to_vec(&session).unwrap();
         let decoded: VrchatSession = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, session);
+    }
+
+    #[test]
+    fn session_debug_output_redacts_cookies() {
+        let session = VrchatSession {
+            auth_cookie: "auth-super-secret".into(),
+            two_factor_cookie: Some("2fa-super-secret".into()),
+            user_id: Some("usr_test".into()),
+        };
+        let debug = format!("{session:?}");
+        assert!(!debug.contains("auth-super-secret"));
+        assert!(!debug.contains("2fa-super-secret"));
+        assert!(debug.contains("usr_test"));
     }
 
     #[test]
