@@ -226,13 +226,15 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
     )
     .await?;
 
+    // Subscribe before taking the snapshot so a state change cannot fall into
+    // the gap between the initial snapshot and delta delivery.
+    let mut updates = store.updates.subscribe();
+    let snapshot = store.snapshot().await;
     send_message(
         &mut write_half,
-        &ServerMessage::FullState { state: store.snapshot().await },
+        &ServerMessage::FullState { state: snapshot },
     )
     .await?;
-
-    let mut updates = store.updates.subscribe();
 
     loop {
         line.clear();
