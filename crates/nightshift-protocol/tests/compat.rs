@@ -36,7 +36,7 @@ fn new_overlay_state_round_trips_runtime_health() {
 }
 
 #[test]
-fn old_settings_state_defaults_gogo_automation_off() {
+fn old_settings_state_defaults_automations_off() {
     let old_json = r#"{
         "fade_duration_seconds": 3.0,
         "sleep_vrchat_status": "ask_me",
@@ -48,6 +48,7 @@ fn old_settings_state_defaults_gogo_automation_off() {
     assert_eq!(state.fade_duration_seconds, 3.0);
     assert_eq!(state.sleep_vrchat_status, VrchatStatus::AskMe);
     assert_eq!(state.wake_vrchat_status, VrchatStatus::Active);
+    assert!(!state.vrchat_status_automation_enabled);
     assert!(!state.gogo_automation_enabled);
 }
 
