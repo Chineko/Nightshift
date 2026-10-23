@@ -1,3 +1,9 @@
+mod invites;
+
+pub use invites::{
+    InviteRefused, NotificationKind, VrchatNotification, parse_pipeline_notification, pipeline_url,
+};
+
 use anyhow::{Context, Result, bail};
 use nightshift_protocol::VrchatStatus;
 use reqwest::{
