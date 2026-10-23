@@ -4,6 +4,8 @@ pub use invites::{
     InviteRefused, NotificationKind, VrchatNotification, parse_pipeline_notification, pipeline_url,
 };
 
+use std::{fmt, time::Duration};
+
 use anyhow::{Context, Result, bail};
 use nightshift_protocol::VrchatStatus;
 use reqwest::{
@@ -13,11 +15,26 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 
 const BASE_URL: &str = "https://api.vrchat.cloud/api/1";
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SessionCookies {
     pub auth: String,
     pub two_factor_auth: Option<String>,
+}
+
+impl fmt::Debug for SessionCookies {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SessionCookies")
+            .field("auth", &"<redacted>")
+            .field(
+                "two_factor_auth",
+                &self.two_factor_auth.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 impl SessionCookies {
@@ -100,7 +117,7 @@ struct VerifyTwoFactorResponse {
     verified: Option<bool>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct VerifyTwoFactorBody<'a> {
     code: &'a str,
 }
@@ -110,10 +127,23 @@ struct StatusChangeBody<'a> {
     status: &'a str,
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Default, PartialEq, Eq)]
 struct CapturedCookies {
     auth: Option<String>,
     two_factor_auth: Option<String>,
+}
+
+impl fmt::Debug for CapturedCookies {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CapturedCookies")
+            .field("auth", &self.auth.as_ref().map(|_| "<redacted>"))
+            .field(
+                "two_factor_auth",
+                &self.two_factor_auth.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -128,6 +158,8 @@ impl VrchatApiClient {
                 "Nightshift/{} (https://github.com/Chineko/Nightshift)",
                 env!("CARGO_PKG_VERSION")
             ))
+            .connect_timeout(HTTP_CONNECT_TIMEOUT)
+            .timeout(HTTP_REQUEST_TIMEOUT)
             .build()
             .context("building VRChat HTTP client")?;
         Ok(Self { http })
@@ -386,6 +418,18 @@ mod tests {
             .cookie_header(),
             "auth=abc"
         );
+    }
+
+    #[test]
+    fn secret_cookie_debug_output_is_redacted() {
+        let cookies = SessionCookies {
+            auth: "auth-super-secret".into(),
+            two_factor_auth: Some("2fa-super-secret".into()),
+        };
+        let debug = format!("{cookies:?}");
+        assert!(!debug.contains("auth-super-secret"));
+        assert!(!debug.contains("2fa-super-secret"));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]
