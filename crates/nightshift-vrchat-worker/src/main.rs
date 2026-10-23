@@ -7,7 +7,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use nightshift_protocol::{
-    ClientMessage, PROTOCOL_VERSION, ServerMessage, StateEvent, VrchatStatus, WorkerReport,
+    ClientMessage, InviteState, PROTOCOL_VERSION, ServerMessage, StateEvent, VrchatStatus,
+    WorkerReport,
 };
 use nightshift_vrchat_api::{
     SessionCookies, VrchatApiClient, VrchatNotification, parse_pipeline_notification, pipeline_url,
@@ -16,12 +17,18 @@ use nightshift_vrchat_session::{VrchatSession, VrchatSessionStore};
 use nightshift_vrchat_status::{
     StatusAutomationConfig, sleeping_phase, target_for_transition,
 };
+use nightshift_vrchat_worker::{
+    invite_bridge::{
+        InviteHandlingOutcome, InviteHandlingResult, handle_invite_notification,
+    },
+    invite_execute::InviteExecutionOutcome,
+};
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
     sync::mpsc,
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
@@ -61,6 +68,7 @@ impl Drop for AbortTask {
 struct RuntimeRefresh {
     report: WorkerReport,
     pipeline_auth_token: Option<String>,
+    session_cookies: Option<SessionCookies>,
 }
 
 struct StatusTaskResult {
@@ -87,6 +95,7 @@ fn disconnected_refresh() -> RuntimeRefresh {
     RuntimeRefresh {
         report: disconnected_report(),
         pipeline_auth_token: None,
+        session_cookies: None,
     }
 }
 
@@ -148,6 +157,95 @@ fn cancel_pending_status_on_disconnect(
     if !connected && status_task.is_pending() {
         *status_generation = status_generation.wrapping_add(1);
         status_task.abort();
+    }
+}
+
+fn sync_invite_session(
+    current: &mut Option<SessionCookies>,
+    next: Option<SessionCookies>,
+    tasks: &mut JoinSet<Result<InviteHandlingResult>>,
+) {
+    if current.as_ref() == next.as_ref() {
+        return;
+    }
+    tasks.abort_all();
+    *current = next;
+}
+
+fn sync_invite_state(
+    current: &mut InviteState,
+    next: InviteState,
+    tasks: &mut JoinSet<Result<InviteHandlingResult>>,
+) {
+    if current.enabled != next.enabled || current.profile != next.profile {
+        tasks.abort_all();
+    }
+    *current = next;
+}
+
+fn log_invite_result(result: InviteHandlingResult) {
+    let InviteHandlingResult {
+        notification_id,
+        sender_user_id,
+        sender_username,
+        outcome,
+    } = result;
+    let sender_username = sender_username.as_deref().unwrap_or("<unknown>");
+
+    match outcome {
+        InviteHandlingOutcome::ConfigurationUnavailable(profile) => {
+            warn!(
+                ?profile,
+                notification_id = %notification_id,
+                sender_user_id = %sender_user_id,
+                sender_username = %sender_username,
+                "invite automation profile requires configuration that is not available yet"
+            );
+        }
+        InviteHandlingOutcome::Execution(outcome) => match outcome {
+            InviteExecutionOutcome::None => {}
+            InviteExecutionOutcome::AcceptedRequest => {
+                info!(
+                    notification_id = %notification_id,
+                    sender_user_id = %sender_user_id,
+                    sender_username = %sender_username,
+                    "accepted VRChat invite request"
+                );
+            }
+            InviteExecutionOutcome::Declined => {
+                info!(
+                    notification_id = %notification_id,
+                    sender_user_id = %sender_user_id,
+                    sender_username = %sender_username,
+                    "declined VRChat invite notification"
+                );
+            }
+            InviteExecutionOutcome::InviteRefused { message } => {
+                warn!(
+                    notification_id = %notification_id,
+                    sender_user_id = %sender_user_id,
+                    sender_username = %sender_username,
+                    vrchat_message = message.as_deref().unwrap_or("<none>"),
+                    "VRChat refused invite-request acceptance; original request was left visible"
+                );
+            }
+            InviteExecutionOutcome::MissingCurrentInstance => {
+                warn!(
+                    notification_id = %notification_id,
+                    sender_user_id = %sender_user_id,
+                    sender_username = %sender_username,
+                    "invite request matched policy but current VRChat instance is unavailable"
+                );
+            }
+            InviteExecutionOutcome::UnsupportedIncomingInviteAcceptance => {
+                info!(
+                    notification_id = %notification_id,
+                    sender_user_id = %sender_user_id,
+                    sender_username = %sender_username,
+                    "incoming VRChat invite matched accept policy, but automatic joining is not implemented"
+                );
+            }
+        },
     }
 }
 
@@ -307,6 +405,7 @@ async fn refresh_runtime(
             return disconnected_refresh();
         }
     };
+    let cookies = session_cookies(&session);
 
     RuntimeRefresh {
         report: WorkerReport::VrchatRuntime {
@@ -314,7 +413,8 @@ async fn refresh_runtime(
             display_name: Some(user.display_name),
             status: user.status,
         },
-        pipeline_auth_token: Some(session.auth_cookie),
+        pipeline_auth_token: Some(cookies.auth.clone()),
+        session_cookies: Some(cookies),
     }
 }
 
@@ -326,10 +426,10 @@ async fn set_runtime_status(
     let Some((session, user)) = validated_user(&api, &store).await? else {
         bail!("no VRChat session is stored");
     };
+    let cookies = session_cookies(&session);
 
     if user.status != target {
-        api.set_status(&session_cookies(&session), &user.id, target)
-            .await?;
+        api.set_status(&cookies, &user.id, target).await?;
     }
 
     Ok(RuntimeRefresh {
@@ -338,7 +438,8 @@ async fn set_runtime_status(
             display_name: Some(user.display_name),
             status: target,
         },
-        pipeline_auth_token: Some(session.auth_cookie),
+        pipeline_auth_token: Some(cookies.auth.clone()),
+        session_cookies: Some(cookies),
     })
 }
 
@@ -426,6 +527,10 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut pipeline_auth_token: Option<String> = None;
     let (pipeline_tx, mut pipeline_rx) = mpsc::unbounded_channel::<VrchatNotification>();
 
+    let mut invite_state = InviteState::default();
+    let mut active_session: Option<SessionCookies> = None;
+    let mut invite_tasks = JoinSet::<Result<InviteHandlingResult>>::new();
+
     loop {
         tokio::select! {
             read = reader.read_line(&mut line) => {
@@ -447,12 +552,17 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         }
                         handshake_complete = true;
                         info!(protocol, "Nightshift VRChat worker connected to daemon");
-                        let refresh = refresh_runtime(&api, &store).await;
                         let RuntimeRefresh {
                             report,
                             pipeline_auth_token: next_pipeline_auth_token,
-                        } = refresh;
+                            session_cookies: next_session,
+                        } = refresh_runtime(&api, &store).await;
                         (vrchat_connected, current_status) = report_runtime(&report);
+                        sync_invite_session(
+                            &mut active_session,
+                            next_session,
+                            &mut invite_tasks,
+                        );
                         sync_pipeline_task(
                             &mut pipeline_task,
                             &mut pipeline_auth_token,
@@ -465,6 +575,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         // Snapshot is synchronization, not a fresh Sleep/Wake edge.
                         sleeping = sleeping_phase(state.sleep.phase);
                         automation = status_config(&state.settings);
+                        sync_invite_state(&mut invite_state, state.invites, &mut invite_tasks);
                     }
                     ServerMessage::Event { event } => match event {
                         StateEvent::SettingsChanged(settings) => {
@@ -503,6 +614,11 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                                 &mut status_task,
                             );
                             if !vrchat_connected {
+                                sync_invite_session(
+                                    &mut active_session,
+                                    None,
+                                    &mut invite_tasks,
+                                );
                                 sync_pipeline_task(
                                     &mut pipeline_task,
                                     &mut pipeline_auth_token,
@@ -533,6 +649,9 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                                 );
                             }
                         }
+                        StateEvent::InvitesChanged(state) => {
+                            sync_invite_state(&mut invite_state, state, &mut invite_tasks);
+                        }
                         _ => {}
                     },
                     ServerMessage::Error { message } => {
@@ -544,12 +663,18 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 let RuntimeRefresh {
                     report,
                     pipeline_auth_token: next_pipeline_auth_token,
+                    session_cookies: next_session,
                 } = refresh_runtime(&api, &store).await;
                 (vrchat_connected, current_status) = report_runtime(&report);
                 cancel_pending_status_on_disconnect(
                     vrchat_connected,
                     &mut status_generation,
                     &mut status_task,
+                );
+                sync_invite_session(
+                    &mut active_session,
+                    next_session,
+                    &mut invite_tasks,
                 );
                 sync_pipeline_task(
                     &mut pipeline_task,
@@ -570,8 +695,14 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         let RuntimeRefresh {
                             report,
                             pipeline_auth_token: next_pipeline_auth_token,
+                            session_cookies: next_session,
                         } = refresh;
                         (vrchat_connected, current_status) = report_runtime(&report);
+                        sync_invite_session(
+                            &mut active_session,
+                            next_session,
+                            &mut invite_tasks,
+                        );
                         sync_pipeline_task(
                             &mut pipeline_task,
                             &mut pipeline_auth_token,
@@ -593,8 +724,31 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     kind = ?notification.kind,
                     "received VRChat invite notification"
                 );
-                // Transport gate only. The next module step bridges this typed event into
-                // nightshift-invites; networking does not make policy decisions here.
+
+                if let Some(cookies) = active_session.clone() {
+                    let api = api.clone();
+                    let state = invite_state.clone();
+                    invite_tasks.spawn(async move {
+                        handle_invite_notification(api, cookies, state, notification).await
+                    });
+                } else {
+                    warn!(
+                        notification_id = %notification.id,
+                        "ignored VRChat invite notification because no validated session is active"
+                    );
+                }
+            }
+            Some(join_result) = invite_tasks.join_next(), if !invite_tasks.is_empty() => {
+                match join_result {
+                    Ok(Ok(result)) => log_invite_result(result),
+                    Ok(Err(error)) => {
+                        warn!(%error, "VRChat invite automation task failed without taking a fallback action");
+                    }
+                    Err(error) if error.is_cancelled() => {}
+                    Err(error) => {
+                        warn!(%error, "VRChat invite automation task stopped unexpectedly");
+                    }
+                }
             }
         }
     }
