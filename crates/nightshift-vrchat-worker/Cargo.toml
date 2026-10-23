@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 futures-util = "0.3"
+nightshift-invites = { path = "../nightshift-invites" }
 nightshift-protocol = { path = "../nightshift-protocol" }
 nightshift-vrchat-api = { path = "../nightshift-vrchat-api" }
 nightshift-vrchat-session = { path = "../nightshift-vrchat-session" }
