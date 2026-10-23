@@ -337,7 +337,13 @@ impl NightshiftApp {
             }
             let mut target = self.state.brightness.sleep_target;
             ui.label("Sleep brightness target");
-            if ui.add(egui::Slider::new(&mut target, 0.02..=1.0).percentage()).changed() {
+            if ui
+                .add(
+                    egui::Slider::new(&mut target, 0.02..=1.0)
+                        .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
+                )
+                .changed()
+            {
                 self.bridge.send(UiCommand::SetSleepBrightness(target));
             }
             let mut fade = self.state.settings.fade_duration_seconds;
