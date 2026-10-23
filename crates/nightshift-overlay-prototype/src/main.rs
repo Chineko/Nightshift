@@ -5,9 +5,7 @@ use std::sync::{
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use ash::{
-    vk::{self, Handle},
-};
+use ash::vk::{self, Handle};
 use openxr as xr;
 use xr::OverlaySessionCreateFlagsEXTX;
 use xr::sys::Handle as XrHandle;
@@ -19,7 +17,9 @@ const DEFAULT_PLACEMENT: u32 = 4;
 const DEFAULT_BRIGHTNESS: f32 = 0.20;
 
 fn main() -> Result<()> {
-    let brightness = parse_flag_f32("--brightness")?.unwrap_or(DEFAULT_BRIGHTNESS).clamp(0.0, 1.0);
+    let brightness = parse_flag_f32("--brightness")?
+        .unwrap_or(DEFAULT_BRIGHTNESS)
+        .clamp(0.0, 1.0);
     let placement = parse_flag_u32("--placement")?.unwrap_or(DEFAULT_PLACEMENT);
     let alpha = 1.0 - brightness;
 
@@ -55,7 +55,7 @@ fn parse_flag_u32(name: &str) -> Result<Option<u32>> {
     })
 }
 
-fn parse_flag<T>(name: &str, parse: impl FnOnce(&str) -> Result<T> + Copy) -> Result<Option<T>> {
+fn parse_flag<T>(name: &str, parse: impl Fn(&str) -> Result<T>) -> Result<Option<T>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut index = 0;
 
@@ -146,30 +146,27 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
             .application_version(1)
             .engine_version(1)
             .api_version(vk_target_version);
+        let vk_instance_info = vk::InstanceCreateInfo::default().application_info(&vk_app_info);
 
-        let vk_instance = {
-            let vk_instance_info = vk::InstanceCreateInfo::default().application_info(&vk_app_info);
-            let raw = xr_instance
-                .create_vulkan_instance(
-                    system,
-                    std::mem::transmute(vk_entry.static_fn().get_instance_proc_addr),
-                    (&raw const vk_instance_info).cast(),
-                )
-                .context("OpenXR creating Vulkan instance")?
-                .map_err(vk::Result::from_raw)
-                .context("Vulkan creating instance")?;
-
-            ash::Instance::load(
-                vk_entry.static_fn(),
-                vk::Instance::from_raw(raw as _),
+        let raw_vk_instance = xr_instance
+            .create_vulkan_instance(
+                system,
+                std::mem::transmute(vk_entry.static_fn().get_instance_proc_addr),
+                (&raw const vk_instance_info).cast(),
             )
-        };
+            .context("OpenXR creating Vulkan instance")?
+            .map_err(vk::Result::from_raw)
+            .context("Vulkan creating instance")?;
 
-        let vk_physical_device = vk::PhysicalDevice::from_raw(
-            xr_instance
-                .vulkan_graphics_device(system, vk_instance.handle().as_raw() as _)
-                .context("getting OpenXR Vulkan physical device")? as _,
+        let vk_instance = ash::Instance::load(
+            vk_entry.static_fn(),
+            vk::Instance::from_raw(raw_vk_instance as u64),
         );
+
+        let raw_physical_device = xr_instance
+            .vulkan_graphics_device(system, vk_instance.handle().as_raw() as _)
+            .context("getting OpenXR Vulkan physical device")?;
+        let vk_physical_device = vk::PhysicalDevice::from_raw(raw_physical_device as u64);
 
         let queue_family_index = vk_instance
             .get_physical_device_queue_family_properties(vk_physical_device)
@@ -183,49 +180,47 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
             .ok_or_else(|| anyhow!("Vulkan device has no graphics queue"))?;
 
         let priorities = [1.0_f32];
-        let queue_info = [vk::DeviceQueueCreateInfo::default()
+        let queue_infos = [vk::DeviceQueueCreateInfo::default()
             .queue_family_index(queue_family_index)
             .queue_priorities(&priorities)];
-        let mut multiview = vk::PhysicalDeviceMultiviewFeatures {
-            multiview: vk::TRUE,
-            ..Default::default()
-        };
-        let device_info = vk::DeviceCreateInfo::default()
-            .queue_create_infos(&queue_info)
-            .push_next(&mut multiview);
+        let vk_device_info = vk::DeviceCreateInfo::default().queue_create_infos(&queue_infos);
 
-        let vk_device = {
-            let raw = xr_instance
-                .create_vulkan_device(
-                    system,
-                    std::mem::transmute(vk_entry.static_fn().get_instance_proc_addr),
-                    vk_physical_device.as_raw() as _,
-                    (&raw const device_info).cast(),
-                )
-                .context("OpenXR creating Vulkan device")?
-                .map_err(vk::Result::from_raw)
-                .context("Vulkan creating device")?;
+        let raw_vk_device = xr_instance
+            .create_vulkan_device(
+                system,
+                std::mem::transmute(vk_entry.static_fn().get_instance_proc_addr),
+                vk_physical_device.as_raw() as _,
+                (&raw const vk_device_info).cast(),
+            )
+            .context("OpenXR creating Vulkan device")?
+            .map_err(vk::Result::from_raw)
+            .context("Vulkan creating device")?;
 
-            ash::Device::load(vk_instance.fp_v1_0(), vk::Device::from_raw(raw as _))
-        };
-
+        let vk_device = ash::Device::load(
+            vk_instance.fp_v1_0(),
+            vk::Device::from_raw(raw_vk_device as u64),
+        );
         let queue = vk_device.get_device_queue(queue_family_index, 0);
 
-        let (session, mut frame_waiter, mut frame_stream) = {
-            let raw_session = create_overlay_session(
-                &xr_instance,
-                system,
-                &xr::vulkan::SessionCreateInfo {
-                    instance: vk_instance.handle().as_raw() as _,
-                    physical_device: vk_physical_device.as_raw() as _,
-                    device: vk_device.handle().as_raw() as _,
-                    queue_family_index,
-                    queue_index: 0,
-                },
-                placement,
-            )?;
-            xr::Session::from_raw(xr_instance.clone(), raw_session, Box::new(()))
-        };
+        let raw_session = create_overlay_session(
+            &xr_instance,
+            system,
+            &xr::vulkan::SessionCreateInfo {
+                instance: vk_instance.handle().as_raw() as _,
+                physical_device: vk_physical_device.as_raw() as _,
+                device: vk_device.handle().as_raw() as _,
+                queue_family_index,
+                queue_index: 0,
+            },
+            placement,
+        )?;
+
+        let (session, mut frame_waiter, mut frame_stream) =
+            xr::Session::<xr::Vulkan>::from_raw(
+                xr_instance.clone(),
+                raw_session,
+                Box::new(()),
+            );
 
         let local_space = session
             .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
@@ -237,44 +232,11 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
         let format = choose_color_format(&formats)?;
         println!("Vulkan format: {}", format.as_raw());
 
-        let view_masks = [0b11];
-        let correlation_masks = [0b11];
-        let mut multiview_info = vk::RenderPassMultiviewCreateInfo::default()
-            .view_masks(&view_masks)
-            .correlation_masks(&correlation_masks);
-        let color_attachment = [vk::AttachmentDescription {
-            format,
-            samples: vk::SampleCountFlags::TYPE_1,
-            load_op: vk::AttachmentLoadOp::CLEAR,
-            store_op: vk::AttachmentStoreOp::STORE,
-            stencil_load_op: vk::AttachmentLoadOp::DONT_CARE,
-            stencil_store_op: vk::AttachmentStoreOp::DONT_CARE,
-            initial_layout: vk::ImageLayout::UNDEFINED,
-            final_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            ..Default::default()
-        }];
-        let color_ref = [vk::AttachmentReference {
-            attachment: 0,
-            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        }];
-        let subpass = [vk::SubpassDescription::default()
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .color_attachments(&color_ref)];
-
-        let render_pass = vk_device
-            .create_render_pass(
-                &vk::RenderPassCreateInfo::default()
-                    .attachments(&color_attachment)
-                    .subpasses(&subpass)
-                    .push_next(&mut multiview_info),
-                None,
-            )
-            .context("creating Vulkan render pass")?;
-
         let mut swapchain = session
             .create_swapchain(&xr::SwapchainCreateInfo {
                 create_flags: xr::SwapchainCreateFlags::EMPTY,
-                usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
+                usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
+                    | xr::SwapchainUsageFlags::TRANSFER_DST,
                 format: i64::from(format.as_raw()),
                 sample_count: 1,
                 width: TEST_TEXTURE_SIZE,
@@ -287,45 +249,10 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
 
         let images = swapchain
             .enumerate_images()
-            .context("enumerating swapchain images")?;
-        let mut image_views = Vec::with_capacity(images.len());
-        let mut framebuffers = Vec::with_capacity(images.len());
-
-        for raw_image in images {
-            let image = vk::Image::from_raw(raw_image);
-            let image_view = vk_device
-                .create_image_view(
-                    &vk::ImageViewCreateInfo::default()
-                        .image(image)
-                        .view_type(vk::ImageViewType::TYPE_2D_ARRAY)
-                        .format(format)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: VIEW_COUNT,
-                        }),
-                    None,
-                )
-                .context("creating swapchain image view")?;
-
-            let attachments = [image_view];
-            let framebuffer = vk_device
-                .create_framebuffer(
-                    &vk::FramebufferCreateInfo::default()
-                        .render_pass(render_pass)
-                        .attachments(&attachments)
-                        .width(TEST_TEXTURE_SIZE)
-                        .height(TEST_TEXTURE_SIZE)
-                        .layers(1),
-                    None,
-                )
-                .context("creating framebuffer")?;
-
-            image_views.push(image_view);
-            framebuffers.push(framebuffer);
-        }
+            .context("enumerating swapchain images")?
+            .into_iter()
+            .map(vk::Image::from_raw)
+            .collect::<Vec<_>>();
 
         let command_pool = vk_device
             .create_command_pool(
@@ -357,6 +284,13 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
                 width: TEST_TEXTURE_SIZE as i32,
                 height: TEST_TEXTURE_SIZE as i32,
             },
+        };
+        let subresource = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: VIEW_COUNT,
         };
 
         'main_loop: while running.load(Ordering::Relaxed) {
@@ -415,10 +349,16 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
                 .wait_image(xr::Duration::INFINITE)
                 .context("waiting for dimmer image")?;
 
+            let image = *images
+                .get(image_index as usize)
+                .ok_or_else(|| anyhow!("runtime returned invalid swapchain image index {image_index}"))?;
+
             vk_device
                 .wait_for_fences(&[fence], true, u64::MAX)
-                .context("waiting for render fence")?;
-            vk_device.reset_fences(&[fence]).context("resetting render fence")?;
+                .context("waiting for previous dimmer submission")?;
+            vk_device
+                .reset_fences(&[fence])
+                .context("resetting dimmer fence")?;
             vk_device
                 .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
                 .context("resetting command buffer")?;
@@ -430,36 +370,70 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
                 )
                 .context("beginning command buffer")?;
 
-            let clear = [vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0 - brightness],
-                },
-            }];
-            vk_device.cmd_begin_render_pass(
+            let to_transfer = [vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(subresource)];
+            vk_device.cmd_pipeline_barrier(
                 command_buffer,
-                &vk::RenderPassBeginInfo::default()
-                    .render_pass(render_pass)
-                    .framebuffer(framebuffers[image_index as usize])
-                    .render_area(vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: vk::Extent2D {
-                            width: TEST_TEXTURE_SIZE,
-                            height: TEST_TEXTURE_SIZE,
-                        },
-                    })
-                    .clear_values(&clear),
-                vk::SubpassContents::INLINE,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_transfer,
             );
-            vk_device.cmd_end_render_pass(command_buffer);
+
+            let clear_color = vk::ClearColorValue {
+                float32: [0.0, 0.0, 0.0, 1.0 - brightness],
+            };
+            vk_device.cmd_clear_color_image(
+                command_buffer,
+                image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &clear_color,
+                &[subresource],
+            );
+
+            let to_compositor = [vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(image)
+                .subresource_range(subresource)];
+            vk_device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &to_compositor,
+            );
+
             vk_device
                 .end_command_buffer(command_buffer)
                 .context("ending command buffer")?;
-
             let command_buffers = [command_buffer];
-            let submit = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
+            let submits = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
             vk_device
-                .queue_submit(queue, &submit, fence)
+                .queue_submit(queue, &submits, fence)
                 .context("submitting dimmer clear")?;
+
+            // OpenXR owns the image again after release_image(), so the GPU must be done first.
+            // Otherwise the compositor and our command buffer can race over the same four pixels,
+            // which is an impressively efficient way to invent modern art.
+            vk_device
+                .wait_for_fences(&[fence], true, u64::MAX)
+                .context("waiting for dimmer clear to finish")?;
             swapchain.release_image().context("releasing dimmer image")?;
 
             let projection_views = [
@@ -502,17 +476,15 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
 
         vk_device.device_wait_idle().ok();
 
-        drop((swapchain, local_space, session, frame_waiter, frame_stream));
+        // Destroy OpenXR objects before destroying the Vulkan device they refer to.
+        drop(swapchain);
+        drop(local_space);
+        drop(frame_stream);
+        drop(frame_waiter);
+        drop(session);
 
         vk_device.destroy_fence(fence, None);
         vk_device.destroy_command_pool(command_pool, None);
-        for framebuffer in framebuffers {
-            vk_device.destroy_framebuffer(framebuffer, None);
-        }
-        for image_view in image_views {
-            vk_device.destroy_image_view(image_view, None);
-        }
-        vk_device.destroy_render_pass(render_pass, None);
         vk_device.destroy_device(None);
         vk_instance.destroy_instance(None);
     }
@@ -531,7 +503,7 @@ fn choose_color_format(formats: &[i64]) -> Result<vk::Format> {
 
     preferred
         .into_iter()
-        .find(|candidate| formats.contains(&(candidate.as_raw() as i64)))
+        .find(|candidate| formats.contains(&i64::from(candidate.as_raw())))
         .ok_or_else(|| anyhow!("runtime exposes no simple RGBA8 swapchain format: {formats:?}"))
 }
 
