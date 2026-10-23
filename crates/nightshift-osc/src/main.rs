@@ -265,6 +265,14 @@ async fn report_runtime_if_changed(
     Ok(())
 }
 
+fn custom_transition_script(config: &OscAutomationConfig, sleeping: bool) -> OscScript {
+    if sleeping {
+        config.on_sleep.to_script()
+    } else {
+        config.on_wake.to_script()
+    }
+}
+
 fn start_transition_automation(
     scripts: &mut ScriptTaskRegistry,
     socket: Arc<UdpSocket>,
@@ -274,15 +282,7 @@ fn start_transition_automation(
     avatar_context: Option<AvatarContext>,
 ) {
     let publish_sleep_parameter = config.publish_sleep_parameter;
-    let custom_script = if gogo_enabled {
-        if sleeping {
-            config.on_sleep.to_script()
-        } else {
-            config.on_wake.to_script()
-        }
-    } else {
-        OscScript::default()
-    };
+    let custom_script = custom_transition_script(config, sleeping);
 
     let gogo_script = if gogo_enabled {
         match avatar_context.as_ref() {
@@ -637,6 +637,32 @@ mod tests {
         let config: OscAutomationConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.on_sleep.to_script().version, CURRENT_SCRIPT_VERSION);
         assert_eq!(config.on_sleep.to_script().actions.len(), 1);
+    }
+
+    #[test]
+    fn custom_transition_scripts_are_independent_of_gogo() {
+        let config: OscAutomationConfig = serde_json::from_str(
+            r#"{
+                "on_sleep": [
+                    {
+                        "type": "send",
+                        "address": "/avatar/parameters/UserSleep",
+                        "value": { "type": "bool", "value": true }
+                    }
+                ],
+                "on_wake": [
+                    {
+                        "type": "send",
+                        "address": "/avatar/parameters/UserSleep",
+                        "value": { "type": "bool", "value": false }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(custom_transition_script(&config, true).actions.len(), 1);
+        assert_eq!(custom_transition_script(&config, false).actions.len(), 1);
     }
 
     #[test]
