@@ -67,6 +67,30 @@ impl From<OscValue> for OscType {
     }
 }
 
+#[derive(Default)]
+struct AutomationTask {
+    handle: Option<JoinHandle<()>>,
+}
+
+impl AutomationTask {
+    fn replace(&mut self, handle: JoinHandle<()>) {
+        self.abort();
+        self.handle = Some(handle);
+    }
+
+    fn abort(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for AutomationTask {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
 fn default_true() -> bool {
     true
 }
@@ -146,18 +170,30 @@ fn sleeping_phase(phase: SleepPhase) -> bool {
     matches!(phase, SleepPhase::EnteringSleep | SleepPhase::Sleeping)
 }
 
-fn start_automation(
-    active: &mut Option<JoinHandle<()>>,
+fn transition_edge(previous_sleeping: bool, phase: SleepPhase) -> Option<bool> {
+    let sleeping = sleeping_phase(phase);
+    (sleeping != previous_sleeping).then_some(sleeping)
+}
+
+async fn sync_sleep_parameter(
+    socket: &UdpSocket,
+    config: &OscAutomationConfig,
+    sleeping: bool,
+) {
+    if config.publish_sleep_parameter {
+        if let Err(error) = send_sleep_parameter(socket, sleeping).await {
+            warn!(%error, "failed to synchronize NightshiftSleeping OSC parameter");
+        }
+    }
+}
+
+fn start_transition_automation(
+    active: &mut AutomationTask,
     socket: Arc<UdpSocket>,
     config: &OscAutomationConfig,
-    phase: SleepPhase,
+    sleeping: bool,
     gogo_enabled: bool,
 ) {
-    if let Some(task) = active.take() {
-        task.abort();
-    }
-
-    let sleeping = sleeping_phase(phase);
     let publish_sleep_parameter = config.publish_sleep_parameter;
     let steps = if gogo_enabled {
         if sleeping {
@@ -169,7 +205,7 @@ fn start_automation(
         Vec::new()
     };
 
-    *active = Some(tokio::spawn(async move {
+    active.replace(tokio::spawn(async move {
         if publish_sleep_parameter {
             if let Err(error) = send_sleep_parameter(&socket, sleeping).await {
                 warn!(%error, "failed to publish NightshiftSleeping OSC parameter");
@@ -217,9 +253,9 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let config = load_config().await?;
     let mut enabled = false;
     let mut gogo_enabled = false;
-    let mut phase = SleepPhase::Awake;
+    let mut sleeping = false;
     let mut sender: Option<Arc<UdpSocket>> = None;
-    let mut active_automation: Option<JoinHandle<()>> = None;
+    let mut active_automation = AutomationTask::default();
     let mut line = String::new();
 
     loop {
@@ -249,75 +285,64 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
             ServerMessage::FullState { state } => {
                 enabled = state.osc.enabled;
                 gogo_enabled = state.settings.gogo_automation_enabled;
-                phase = state.sleep.phase;
+                sleeping = sleeping_phase(state.sleep.phase);
+
+                active_automation.abort();
                 if enabled {
                     if sender.is_none() {
                         sender = Some(osc_sender().await?);
                     }
-                    start_automation(
-                        &mut active_automation,
-                        sender.as_ref().expect("sender created").clone(),
+                    sync_sleep_parameter(
+                        sender.as_ref().expect("sender created"),
                         &config,
-                        phase,
-                        gogo_enabled,
-                    );
+                        sleeping,
+                    )
+                    .await;
                 } else {
-                    if let Some(task) = active_automation.take() {
-                        task.abort();
-                    }
                     sender = None;
                 }
             }
             ServerMessage::Event { event } => match event {
                 StateEvent::OscChanged(state) => {
                     enabled = state.enabled;
+                    active_automation.abort();
                     if enabled {
                         if sender.is_none() {
                             sender = Some(osc_sender().await?);
                         }
-                        start_automation(
-                            &mut active_automation,
-                            sender.as_ref().expect("sender created").clone(),
+                        sync_sleep_parameter(
+                            sender.as_ref().expect("sender created"),
                             &config,
-                            phase,
-                            gogo_enabled,
-                        );
+                            sleeping,
+                        )
+                        .await;
                     } else {
-                        if let Some(task) = active_automation.take() {
-                            task.abort();
-                        }
                         sender = None;
                     }
                 }
                 StateEvent::SettingsChanged(settings) => {
                     let was_enabled = gogo_enabled;
                     gogo_enabled = settings.gogo_automation_enabled;
-                    if enabled && gogo_enabled != was_enabled {
-                        if sender.is_none() {
-                            sender = Some(osc_sender().await?);
-                        }
-                        start_automation(
-                            &mut active_automation,
-                            sender.as_ref().expect("sender created").clone(),
-                            &config,
-                            phase,
-                            gogo_enabled,
-                        );
+                    if was_enabled && !gogo_enabled {
+                        active_automation.abort();
                     }
                 }
                 StateEvent::SleepChanged(state) => {
-                    phase = state.phase;
+                    let edge = transition_edge(sleeping, state.phase);
+                    sleeping = sleeping_phase(state.phase);
                     if enabled {
-                        if sender.is_none() {
-                            sender = Some(osc_sender().await?);
+                        if let Some(new_sleeping) = edge {
+                            if sender.is_none() {
+                                sender = Some(osc_sender().await?);
+                            }
+                            start_transition_automation(
+                                &mut active_automation,
+                                sender.as_ref().expect("sender created").clone(),
+                                &config,
+                                new_sleeping,
+                                gogo_enabled,
+                            );
                         }
-                        start_automation(
-                            &mut active_automation,
-                            sender.as_ref().expect("sender created").clone(),
-                            &config,
-                            phase,
-                            gogo_enabled,
-                        );
                     }
                 }
                 _ => {}
@@ -385,5 +410,13 @@ mod tests {
         assert!(config.publish_sleep_parameter);
         assert_eq!(config.on_sleep.len(), 3);
         assert!(config.on_wake.is_empty());
+    }
+
+    #[test]
+    fn only_logical_sleep_edges_trigger_sequences() {
+        assert_eq!(transition_edge(false, SleepPhase::EnteringSleep), Some(true));
+        assert_eq!(transition_edge(true, SleepPhase::Sleeping), None);
+        assert_eq!(transition_edge(true, SleepPhase::Waking), Some(false));
+        assert_eq!(transition_edge(false, SleepPhase::Awake), None);
     }
 }
