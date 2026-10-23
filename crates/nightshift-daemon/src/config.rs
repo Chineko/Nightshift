@@ -13,6 +13,7 @@ pub struct PersistedConfig {
     pub sleep_detection: bool,
     pub osc_automation: bool,
     pub gogo_automation: bool,
+    pub vrchat_status_automation: bool,
     pub sleep_vrchat_status: VrchatStatus,
     pub wake_vrchat_status: VrchatStatus,
     pub invite_automation: bool,
@@ -36,6 +37,7 @@ impl PersistedConfig {
             sleep_detection: state.sleep.detection_enabled,
             osc_automation: state.osc.enabled,
             gogo_automation: state.settings.gogo_automation_enabled,
+            vrchat_status_automation: state.settings.vrchat_status_automation_enabled,
             sleep_vrchat_status: state.settings.sleep_vrchat_status,
             wake_vrchat_status: state.settings.wake_vrchat_status,
             invite_automation: state.invites.enabled,
@@ -52,6 +54,7 @@ impl PersistedConfig {
         state.sleep.detection_enabled = self.sleep_detection;
         state.osc.enabled = self.osc_automation;
         state.settings.gogo_automation_enabled = self.gogo_automation;
+        state.settings.vrchat_status_automation_enabled = self.vrchat_status_automation;
         state.settings.sleep_vrchat_status = self.sleep_vrchat_status;
         state.settings.wake_vrchat_status = self.wake_vrchat_status;
         state.invites.enabled = self.invite_automation;
