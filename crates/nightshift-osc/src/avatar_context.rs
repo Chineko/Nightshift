@@ -26,11 +26,12 @@ pub struct AvatarParameter {
 }
 
 impl AvatarParameter {
-    pub fn runtime_addresses(&self) -> impl Iterator<Item = &str> {
-        self.aliases
-            .iter()
-            .map(String::as_str)
-            .chain(std::iter::once(self.address.as_str()))
+    pub fn target_addresses(&self) -> Vec<&str> {
+        if self.aliases.is_empty() {
+            vec![self.address.as_str()]
+        } else {
+            self.aliases.iter().map(String::as_str).collect()
+        }
     }
 }
 
@@ -122,11 +123,7 @@ fn collect_parameters(node: &OscQueryNode, out: &mut Vec<AvatarParameter>) {
     let Some(name) = address.strip_prefix(AVATAR_PARAMETER_PREFIX) else {
         return;
     };
-    let Some(value_type) = node
-        .value_type
-        .as_deref()
-        .and_then(map_oscquery_type)
-    else {
+    let Some(value_type) = node.value_type.as_deref().and_then(map_oscquery_type) else {
         return;
     };
 
@@ -222,6 +219,10 @@ mod tests {
             parameter.aliases,
             vec!["/avatar/parameters/VF123_Go/Stationary"]
         );
+        assert_eq!(
+            parameter.target_addresses(),
+            vec!["/avatar/parameters/VF123_Go/Stationary"]
+        );
     }
 
     #[test]
@@ -233,6 +234,10 @@ mod tests {
             parameter.aliases,
             vec!["/avatar/parameters/Go/Stationary$$Internal_42"]
         );
+        assert_eq!(
+            parameter.target_addresses(),
+            vec!["/avatar/parameters/Go/Stationary$$Internal_42"]
+        );
     }
 
     #[test]
@@ -241,6 +246,10 @@ mod tests {
         assert_eq!(parameter.name, "Go/Stationary");
         assert_eq!(parameter.address, "/avatar/parameters/Go/Stationary");
         assert!(parameter.aliases.is_empty());
+        assert_eq!(
+            parameter.target_addresses(),
+            vec!["/avatar/parameters/Go/Stationary"]
+        );
     }
 
     #[test]
