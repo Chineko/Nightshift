@@ -1,4 +1,9 @@
-use std::{env, path::PathBuf, sync::Arc};
+use std::{
+    env,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use nightshift_protocol::{
@@ -65,9 +70,30 @@ impl StateStore {
         }
     }
 
+    async fn complete_transition(
+        &self,
+        expected_phase: SleepPhase,
+        final_phase: SleepPhase,
+        final_brightness: f32,
+    ) {
+        let mut state = self.state.lock().await;
+        if state.sleep.phase != expected_phase {
+            return;
+        }
+
+        let before = state.clone();
+        state.sleep.phase = final_phase;
+        state.brightness.current = final_brightness;
+        state.brightness.target = final_brightness;
+        state.brightness.transitioning = false;
+        state.brightness.manual_override = false;
+        self.emit_changes(&before, &state);
+    }
+
     async fn apply(&self, command: UiCommand) {
         let mut state = self.state.lock().await;
         let before = state.clone();
+        let mut transition = None;
 
         match command {
             UiCommand::EnterSleep => {
@@ -75,12 +101,24 @@ impl StateStore {
                 state.brightness.target = state.brightness.sleep_target;
                 state.brightness.transitioning = true;
                 state.brightness.manual_override = false;
+                transition = Some((
+                    SleepPhase::EnteringSleep,
+                    SleepPhase::Sleeping,
+                    state.brightness.sleep_target,
+                    state.settings.fade_duration_seconds,
+                ));
             }
             UiCommand::Wake => {
                 state.sleep.phase = SleepPhase::Waking;
                 state.brightness.target = 1.0;
                 state.brightness.transitioning = true;
                 state.brightness.manual_override = false;
+                transition = Some((
+                    SleepPhase::Waking,
+                    SleepPhase::Awake,
+                    1.0,
+                    state.settings.fade_duration_seconds,
+                ));
             }
             UiCommand::SetBrightness(value) => {
                 let value = value.clamp(0.02, 1.0);
@@ -108,6 +146,17 @@ impl StateStore {
 
         if *state != before {
             self.emit_changes(&before, &state);
+        }
+        drop(state);
+
+        if let Some((expected_phase, final_phase, final_brightness, seconds)) = transition {
+            let store = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs_f32(seconds.max(0.0))).await;
+                store
+                    .complete_transition(expected_phase, final_phase, final_brightness)
+                    .await;
+            });
         }
     }
 }
@@ -244,7 +293,21 @@ async fn main() -> Result<()> {
     tokio::fs::create_dir_all(parent).await?;
 
     if tokio::fs::try_exists(&path).await? {
-        tokio::fs::remove_file(&path).await?;
+        match UnixStream::connect(&path).await {
+            Ok(_) => bail!("Nightshift daemon is already running at {}", path.display()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                tokio::fs::remove_file(&path).await?;
+            }
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to validate existing socket {}", path.display()));
+            }
+        }
     }
 
     let listener = UnixListener::bind(&path)
