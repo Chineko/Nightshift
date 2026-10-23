@@ -10,7 +10,8 @@ use nightshift_osc_script::{
     CURRENT_SCRIPT_VERSION, OscAction, OscScript, OscValue, ScriptTaskRegistry,
 };
 use nightshift_protocol::{
-    ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent, WorkerReport,
+    ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, SleepingPose, StateEvent,
+    WorkerReport,
 };
 use resolver::{ResolveResult, SemanticQuery, resolve_parameter};
 use rosc::{OscMessage, OscPacket, OscType};
@@ -25,6 +26,7 @@ const VRCHAT_OSC_ADDR: &str = "127.0.0.1:9000";
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const SLEEP_PARAMETER: &str = "/avatar/parameters/NightshiftSleeping";
 const SLEEP_TRANSITION_GROUP: &str = "sleep_transition";
+const SLEEP_POSE_GROUP: &str = "sleep_pose";
 
 #[derive(Clone, Debug, Deserialize)]
 struct OscAutomationConfig {
@@ -327,6 +329,29 @@ fn start_transition_automation(
     );
 }
 
+fn start_pose_automation(
+    scripts: &mut ScriptTaskRegistry,
+    socket: Arc<UdpSocket>,
+    pose: SleepingPose,
+    avatar_context: Option<AvatarContext>,
+) {
+    let Some(context) = avatar_context else {
+        return;
+    };
+    let Some(script) = gogo::pose_change_script(&context, pose) else {
+        return;
+    };
+
+    scripts.replace(
+        SLEEP_POSE_GROUP,
+        tokio::spawn(async move {
+            if let Err(error) = execute_script(socket, script, Some(context)).await {
+                warn!(%error, "GoGo sleeping-pose automation failed");
+            }
+        }),
+    );
+}
+
 fn log_example_semantic_resolution() {
     let empty: [&str; 0] = [];
     let result = resolve_parameter(
@@ -359,6 +384,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut enabled = false;
     let mut gogo_enabled = false;
     let mut sleeping = false;
+    let mut pose = SleepingPose::Unknown;
     let mut sender: Option<Arc<UdpSocket>> = None;
     let mut avatar_context: Option<AvatarContext> = None;
     let mut last_report: Option<WorkerReport> = None;
@@ -393,6 +419,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 enabled = state.osc.enabled;
                 gogo_enabled = state.settings.gogo_automation_enabled;
                 sleeping = sleeping_phase(state.sleep.phase);
+                pose = state.sleep.pose;
 
                 scripts.abort_all();
                 if enabled {
@@ -452,6 +479,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     gogo_enabled = settings.gogo_automation_enabled;
                     if was_enabled && !gogo_enabled {
                         scripts.abort(SLEEP_TRANSITION_GROUP);
+                        scripts.abort(SLEEP_POSE_GROUP);
                         avatar_context = None;
                     } else if enabled && !was_enabled && gogo_enabled {
                         refresh_avatar_context(&mut avatar_context).await;
@@ -465,9 +493,15 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 }
                 StateEvent::SleepChanged(state) => {
                     let edge = transition_edge(sleeping, state.phase);
+                    let pose_changed = pose != state.pose;
                     sleeping = sleeping_phase(state.phase);
+                    pose = state.pose;
+
                     if enabled {
                         if let Some(new_sleeping) = edge {
+                            if !new_sleeping {
+                                scripts.abort(SLEEP_POSE_GROUP);
+                            }
                             if sender.is_none() {
                                 sender = Some(osc_sender().await?);
                             }
@@ -486,6 +520,29 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                                 &config,
                                 new_sleeping,
                                 gogo_enabled,
+                                avatar_context.clone(),
+                            );
+                        }
+
+                        if pose_changed
+                            && sleeping
+                            && gogo_enabled
+                            && pose != SleepingPose::Unknown
+                        {
+                            if sender.is_none() {
+                                sender = Some(osc_sender().await?);
+                            }
+                            refresh_avatar_context(&mut avatar_context).await;
+                            report_runtime_if_changed(
+                                &mut write_half,
+                                &mut last_report,
+                                avatar_context.as_ref(),
+                            )
+                            .await?;
+                            start_pose_automation(
+                                &mut scripts,
+                                sender.as_ref().expect("sender created").clone(),
+                                pose,
                                 avatar_context.clone(),
                             );
                         }
