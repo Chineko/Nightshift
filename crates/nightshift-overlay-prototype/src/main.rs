@@ -1,11 +1,20 @@
+use std::env;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
+    mpsc::{self, Receiver, Sender},
 };
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use ash::vk::{self, Handle};
+use nightshift_protocol::{
+    AppState, ClientMessage, PROTOCOL_VERSION, ServerMessage, StateEvent,
+};
 use openxr as xr;
 use xr::OverlaySessionCreateFlagsEXTX;
 use xr::sys::Handle as XrHandle;
@@ -14,27 +23,57 @@ const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_
 const VIEW_COUNT: u32 = 2;
 const TEST_TEXTURE_SIZE: u32 = 4;
 const DEFAULT_PLACEMENT: u32 = 4;
-const DEFAULT_BRIGHTNESS: f32 = 0.20;
-const DEFAULT_TRANSITION_SECONDS: f32 = 10.0;
+const DEFAULT_TRANSITION_SECONDS: f32 = 3.0;
+const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug)]
+struct OverlayTarget {
+    brightness: f32,
+    transition_seconds: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Fade {
+    start: f32,
+    target: f32,
+    started: Instant,
+    duration_seconds: f32,
+}
+
+impl Fade {
+    fn new(start: f32, target: f32, duration_seconds: f32) -> Self {
+        Self {
+            start,
+            target,
+            started: Instant::now(),
+            duration_seconds: duration_seconds.max(0.0),
+        }
+    }
+
+    fn sample(self) -> (f32, f32, bool) {
+        if self.duration_seconds <= f32::EPSILON {
+            return (self.target, 1.0, true);
+        }
+
+        let linear = (self.started.elapsed().as_secs_f32() / self.duration_seconds).clamp(0.0, 1.0);
+        let smooth = linear * linear * (3.0 - 2.0 * linear);
+        let brightness = self.start + (self.target - self.start) * smooth;
+        (brightness, linear, linear >= 1.0)
+    }
+}
 
 fn main() -> Result<()> {
-    let brightness = parse_flag_f32("--brightness")?
-        .unwrap_or(DEFAULT_BRIGHTNESS)
-        .clamp(0.0, 1.0);
-    let transition_seconds = parse_flag_f32("--transition")?
-        .unwrap_or(DEFAULT_TRANSITION_SECONDS)
-        .clamp(0.0, 120.0);
     let placement = parse_flag_u32("--placement")?.unwrap_or(DEFAULT_PLACEMENT);
     let hydra_mode = has_flag("--hydra-mode");
 
-    println!("Nightshift OpenXR dimmer prototype");
+    println!("Nightshift integrated OpenXR prototype");
     println!("  placement  : {placement}");
-    println!("  target     : {:.0}%", brightness * 100.0);
-    println!("  transition : {transition_seconds:.2}s");
+    println!("  daemon IPC : enabled");
+    println!("  fallback fade default : {DEFAULT_TRANSITION_SECONDS:.1}s");
     println!("  hydra mode : {}", if hydra_mode { "AWAKENED" } else { "sleeping" });
     println!("  Ctrl+C to stop");
     println!();
-    println!("If VRChat dims but WayVR stays bright, the tiny evil square has succeeded.");
+    println!("The tiny evil square now takes orders from the daemon.");
     if hydra_mode {
         println!("Hydra has entered the chat. Terminal dignity is no longer guaranteed.");
     }
@@ -44,32 +83,13 @@ fn main() -> Result<()> {
     ctrlc::set_handler(move || signal.store(false, Ordering::Relaxed))
         .context("installing Ctrl+C handler")?;
 
-    run_overlay(
-        running,
-        brightness,
-        transition_seconds,
-        placement,
-        hydra_mode,
-    )
-}
+    let (updates_tx, updates_rx) = mpsc::channel();
+    spawn_ipc_client(running.clone(), updates_tx, hydra_mode);
 
-fn parse_flag_f32(name: &str) -> Result<Option<f32>> {
-    parse_flag(name, |value| {
-        value
-            .parse::<f32>()
-            .map_err(|e| anyhow!("invalid {name} value {value:?}: {e}"))
-    })
+    run_overlay(running, updates_rx, placement, hydra_mode)
 }
 
 fn parse_flag_u32(name: &str) -> Result<Option<u32>> {
-    parse_flag(name, |value| {
-        value
-            .parse::<u32>()
-            .map_err(|e| anyhow!("invalid {name} value {value:?}: {e}"))
-    })
-}
-
-fn parse_flag<T>(name: &str, parse: impl Fn(&str) -> Result<T>) -> Result<Option<T>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     let mut index = 0;
 
@@ -79,11 +99,17 @@ fn parse_flag<T>(name: &str, parse: impl Fn(&str) -> Result<T>) -> Result<Option
             let value = args
                 .get(index + 1)
                 .ok_or_else(|| anyhow!("{name} requires a value"))?;
-            return parse(value).map(Some);
+            return value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|error| anyhow!("invalid {name} value {value:?}: {error}"));
         }
 
         if let Some(value) = arg.strip_prefix(&format!("{name}=")) {
-            return parse(value).map(Some);
+            return value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|error| anyhow!("invalid {name} value {value:?}: {error}"));
         }
 
         index += 1;
@@ -96,22 +122,198 @@ fn has_flag(name: &str) -> bool {
     std::env::args().skip(1).any(|arg| arg == name)
 }
 
-fn transition_brightness(target: f32, elapsed: Duration, duration_seconds: f32) -> (f32, f32) {
-    if duration_seconds <= f32::EPSILON {
-        return (target, 1.0);
+fn socket_path() -> Result<PathBuf> {
+    let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .context("XDG_RUNTIME_DIR is not set")?;
+    Ok(runtime_dir.join("nightshift").join("nightshift.sock"))
+}
+
+fn spawn_ipc_client(
+    running: Arc<AtomicBool>,
+    updates: Sender<OverlayTarget>,
+    hydra_mode: bool,
+) {
+    thread::spawn(move || {
+        let path = match socket_path() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("Nightshift overlay IPC disabled: {error:#}");
+                return;
+            }
+        };
+
+        let mut announced_waiting = false;
+
+        while running.load(Ordering::Relaxed) {
+            match UnixStream::connect(&path) {
+                Ok(stream) => {
+                    announced_waiting = false;
+                    println!("Nightshift overlay connected to daemon IPC.");
+                    if let Err(error) = run_ipc_connection(stream, &updates, &running, hydra_mode) {
+                        if running.load(Ordering::Relaxed) {
+                            eprintln!("Nightshift overlay IPC disconnected: {error:#}");
+                        }
+                    }
+                }
+                Err(error) => {
+                    if !announced_waiting {
+                        eprintln!(
+                            "Nightshift overlay waiting for daemon at {} ({error})",
+                            path.display()
+                        );
+                        announced_waiting = true;
+                    }
+                }
+            }
+
+            if running.load(Ordering::Relaxed) {
+                thread::sleep(RECONNECT_DELAY);
+            }
+        }
+    });
+}
+
+fn run_ipc_connection(
+    stream: UnixStream,
+    updates: &Sender<OverlayTarget>,
+    running: &AtomicBool,
+    hydra_mode: bool,
+) -> Result<()> {
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .context("setting daemon IPC read timeout")?;
+
+    let mut writer = stream.try_clone().context("cloning daemon IPC socket")?;
+    let hello = ClientMessage::Hello {
+        protocol: PROTOCOL_VERSION,
+        client: "nightshift-overlay-prototype".into(),
+        client_version: env!("CARGO_PKG_VERSION").into(),
+    };
+    let mut hello_json = serde_json::to_vec(&hello).context("serializing daemon hello")?;
+    hello_json.push(b'\n');
+    writer
+        .write_all(&hello_json)
+        .context("sending daemon hello")?;
+    writer.flush().context("flushing daemon hello")?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    let mut fade_seconds = DEFAULT_TRANSITION_SECONDS;
+
+    while running.load(Ordering::Relaxed) {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => bail!("daemon closed the socket"),
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error).context("reading daemon IPC"),
+        }
+
+        let message: ServerMessage =
+            serde_json::from_str(line.trim_end()).context("decoding daemon IPC message")?;
+
+        match message {
+            ServerMessage::Hello { protocol, .. } => {
+                if protocol != PROTOCOL_VERSION {
+                    bail!(
+                        "daemon protocol mismatch: overlay={}, daemon={protocol}",
+                        PROTOCOL_VERSION
+                    );
+                }
+                if hydra_mode {
+                    println!("[Hydra/IPC] handshake=accepted protocol={protocol}");
+                }
+            }
+            ServerMessage::FullState { state } => {
+                fade_seconds = state.settings.fade_duration_seconds;
+                send_state_target(updates, &state, fade_seconds)?;
+                if hydra_mode {
+                    println!(
+                        "[Hydra/IPC] snapshot target={:.2}% fade={:.2}s",
+                        state.brightness.target * 100.0,
+                        fade_seconds
+                    );
+                }
+            }
+            ServerMessage::Event { event } => match event {
+                StateEvent::BrightnessChanged(brightness) => {
+                    let target = if brightness.transitioning {
+                        brightness.target
+                    } else {
+                        brightness.current
+                    };
+                    let transition_seconds = if brightness.transitioning {
+                        fade_seconds
+                    } else {
+                        0.0
+                    };
+                    updates
+                        .send(OverlayTarget {
+                            brightness: target.clamp(0.02, 1.0),
+                            transition_seconds,
+                        })
+                        .map_err(|_| anyhow!("overlay renderer stopped"))?;
+
+                    if hydra_mode {
+                        println!(
+                            "[Hydra/IPC] brightness target={:.2}% transition={:.2}s daemon_transitioning={}",
+                            target * 100.0,
+                            transition_seconds,
+                            brightness.transitioning
+                        );
+                    }
+                }
+                StateEvent::SettingsChanged(settings) => {
+                    fade_seconds = settings.fade_duration_seconds;
+                    if hydra_mode {
+                        println!("[Hydra/IPC] fade default={fade_seconds:.2}s");
+                    }
+                }
+                _ => {}
+            },
+            ServerMessage::Error { message } => bail!("daemon rejected overlay: {message}"),
+        }
     }
 
-    let linear = (elapsed.as_secs_f32() / duration_seconds).clamp(0.0, 1.0);
-    let smooth = linear * linear * (3.0 - 2.0 * linear);
-    let brightness = 1.0 + (target - 1.0) * smooth;
-    (brightness, linear)
+    Ok(())
+}
+
+fn send_state_target(
+    updates: &Sender<OverlayTarget>,
+    state: &AppState,
+    fade_seconds: f32,
+) -> Result<()> {
+    let target = if state.brightness.transitioning {
+        state.brightness.target
+    } else {
+        state.brightness.current
+    };
+    let transition_seconds = if state.brightness.transitioning {
+        fade_seconds
+    } else {
+        0.0
+    };
+
+    updates
+        .send(OverlayTarget {
+            brightness: target.clamp(0.02, 1.0),
+            transition_seconds,
+        })
+        .map_err(|_| anyhow!("overlay renderer stopped"))
 }
 
 #[allow(clippy::too_many_lines)]
 fn run_overlay(
     running: Arc<AtomicBool>,
-    target_brightness: f32,
-    transition_seconds: f32,
+    updates: Receiver<OverlayTarget>,
     placement: u32,
     hydra_mode: bool,
 ) -> Result<()> {
@@ -312,7 +514,8 @@ fn run_overlay(
 
         let mut event_storage = xr::EventDataBuffer::new();
         let mut session_running = false;
-        let mut transition_started = None;
+        let mut current_brightness = 1.0_f32;
+        let mut fade: Option<Fade> = None;
         let mut hydra_frame = 0_u64;
         let rect = xr::Rect2Di {
             offset: xr::Offset2Di { x: 0, y: 0 },
@@ -339,13 +542,11 @@ fn run_overlay(
                         xr::SessionState::READY => {
                             session.begin(VIEW_TYPE).context("beginning overlay session")?;
                             session_running = true;
-                            transition_started = Some(Instant::now());
                             println!("Overlay session running. Tiny evil square deployed.");
                         }
                         xr::SessionState::STOPPING => {
                             session.end().context("ending overlay session")?;
                             session_running = false;
-                            transition_started = None;
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
                             break 'main_loop;
@@ -361,7 +562,7 @@ fn run_overlay(
             }
 
             if !session_running {
-                std::thread::sleep(Duration::from_millis(50));
+                thread::sleep(Duration::from_millis(50));
                 continue;
             }
 
@@ -375,20 +576,44 @@ fn run_overlay(
                 continue;
             }
 
-            let transition_started = transition_started.get_or_insert_with(Instant::now);
-            let (brightness, progress) = transition_brightness(
-                target_brightness,
-                transition_started.elapsed(),
-                transition_seconds,
-            );
+            while let Ok(update) = updates.try_recv() {
+                if let Some(active_fade) = fade {
+                    let (sampled, _, _) = active_fade.sample();
+                    current_brightness = sampled;
+                }
+
+                let target = update.brightness.clamp(0.02, 1.0);
+                if update.transition_seconds <= f32::EPSILON {
+                    current_brightness = target;
+                    fade = None;
+                } else {
+                    fade = Some(Fade::new(
+                        current_brightness,
+                        target,
+                        update.transition_seconds,
+                    ));
+                }
+            }
+
+            let mut progress = 1.0_f32;
+            if let Some(active_fade) = fade {
+                let (sampled, sampled_progress, finished) = active_fade.sample();
+                current_brightness = sampled;
+                progress = sampled_progress;
+                if finished {
+                    current_brightness = active_fade.target;
+                    fade = None;
+                    progress = 1.0;
+                }
+            }
 
             if hydra_mode {
                 hydra_frame += 1;
                 println!(
                     "[Hydra/OpenXR] frame={hydra_frame:06} progress={:6.2}% | [Hydra/Vulkan] brightness={:6.2}% alpha={:6.2}% | [Hydra/Rustc] clipboards=0",
                     progress * 100.0,
-                    brightness * 100.0,
-                    (1.0 - brightness) * 100.0,
+                    current_brightness * 100.0,
+                    (1.0 - current_brightness) * 100.0,
                 );
             }
 
@@ -445,7 +670,7 @@ fn run_overlay(
             );
 
             let clear_color = vk::ClearColorValue {
-                float32: [0.0, 0.0, 0.0, 1.0 - brightness],
+                float32: [0.0, 0.0, 0.0, 1.0 - current_brightness],
             };
             vk_device.cmd_clear_color_image(
                 command_buffer,
@@ -483,9 +708,6 @@ fn run_overlay(
                 .queue_submit(queue, &submits, fence)
                 .context("submitting dimmer clear")?;
 
-            // OpenXR owns the image again after release_image(), so the GPU must be done first.
-            // Otherwise the compositor and our command buffer can race over the same four pixels,
-            // which is an impressively efficient way to invent modern art.
             vk_device
                 .wait_for_fences(&[fence], true, u64::MAX)
                 .context("waiting for dimmer clear to finish")?;
@@ -531,7 +753,6 @@ fn run_overlay(
 
         vk_device.device_wait_idle().ok();
 
-        // Destroy OpenXR objects before destroying the Vulkan device they refer to.
         drop(swapchain);
         drop(local_space);
         drop(frame_stream);
