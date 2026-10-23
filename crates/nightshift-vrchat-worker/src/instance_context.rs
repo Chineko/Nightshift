@@ -105,9 +105,12 @@ fn latest_log_path() -> Option<PathBuf> {
         .filter_map(|entry| {
             let path = entry.path();
             let metadata = entry.metadata().ok()?;
-            if !metadata.is_file() || metadata.len() == 0 {
+            if !metadata.is_file() {
                 return None;
             }
+            // Keep empty logs in the candidate set. A freshly started VRChat creates the new
+            // output log before it necessarily writes a location line; falling back to the older
+            // non-empty log during that window could expose the previous session's instance.
             let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             Some((modified, path))
         })
