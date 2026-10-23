@@ -45,6 +45,9 @@ jobs:
       - name: Test BLE heart-rate provider
         run: cargo test -p nightshift-hr-ble
 
+      - name: Check heart-rate worker
+        run: cargo check -p nightshift-hr-worker
+
       - name: Test daemon state machine
         run: cargo test -p nightshift-daemon
 
