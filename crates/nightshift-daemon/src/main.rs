@@ -7,14 +7,15 @@ use std::{
         Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, bail};
 use config::PersistedConfig;
+use nightshift_hr::{CalmPeriodDetector, DetectionState};
 use nightshift_protocol::{
-    AppState, Capability, ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, SleepingPose,
-    StateEvent, UiCommand, WorkerReport,
+    AppState, Capability, ClientMessage, HrStatus, PROTOCOL_VERSION, ServerMessage, SleepPhase,
+    SleepingPose, StateEvent, UiCommand, WorkerReport,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -31,8 +32,11 @@ struct StateStore {
     updates: broadcast::Sender<StateEvent>,
     overlay_clients: Arc<AtomicUsize>,
     osc_clients: Arc<AtomicUsize>,
+    hr_clients: Arc<AtomicUsize>,
     transition_generation: Arc<AtomicU64>,
     config_updates: watch::Sender<PersistedConfig>,
+    hr_detector: Arc<Mutex<CalmPeriodDetector>>,
+    started: Instant,
 }
 
 impl StateStore {
@@ -56,9 +60,16 @@ impl StateStore {
             updates,
             overlay_clients: Arc::new(AtomicUsize::new(0)),
             osc_clients: Arc::new(AtomicUsize::new(0)),
+            hr_clients: Arc::new(AtomicUsize::new(0)),
             transition_generation: Arc::new(AtomicU64::new(0)),
             config_updates,
+            hr_detector: Arc::new(Mutex::new(CalmPeriodDetector::default())),
+            started: Instant::now(),
         }
+    }
+
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
     async fn snapshot_and_subscribe(&self) -> (AppState, broadcast::Receiver<StateEvent>) {
@@ -141,6 +152,84 @@ impl StateStore {
         }
     }
 
+    async fn set_hr_runtime(&self, connected: bool, bpm: Option<u16>) {
+        if !connected {
+            let mut state = self.state.lock().await;
+            let before = state.clone();
+            state.heart_rate.connected = false;
+            state.heart_rate.bpm = None;
+            state.heart_rate.status = HrStatus::Unknown;
+            if *state != before {
+                self.emit_changes(&before, &state);
+            }
+            return;
+        }
+
+        let Some(bpm) = bpm else {
+            let mut state = self.state.lock().await;
+            let before = state.clone();
+            state.heart_rate.connected = true;
+            state.heart_rate.bpm = None;
+            state.heart_rate.status = HrStatus::Unknown;
+            if *state != before {
+                self.emit_changes(&before, &state);
+            }
+            return;
+        };
+
+        let (sleeping, monitoring_enabled, detection_enabled) = {
+            let state = self.state.lock().await;
+            (
+                matches!(
+                    state.sleep.phase,
+                    SleepPhase::EnteringSleep | SleepPhase::Sleeping
+                ),
+                state.heart_rate.enabled,
+                state.sleep.detection_enabled,
+            )
+        };
+
+        let detection = self
+            .hr_detector
+            .lock()
+            .await
+            .observe(self.now_ms(), bpm, sleeping);
+        let status = match detection {
+            DetectionState::AboveThreshold => HrStatus::Normal,
+            DetectionState::StaleReset => HrStatus::Unknown,
+            DetectionState::Calming { .. }
+            | DetectionState::ManualWakeCooldown { .. }
+            | DetectionState::RetriggerSuppressed { .. }
+            | DetectionState::AlreadySleeping => HrStatus::Resting,
+            DetectionState::SleepCandidate => HrStatus::SleepCandidate,
+        };
+
+        {
+            let mut state = self.state.lock().await;
+            let before = state.clone();
+            state.heart_rate.connected = true;
+            state.heart_rate.bpm = Some(bpm);
+            state.heart_rate.status = status;
+            if *state != before {
+                self.emit_changes(&before, &state);
+            }
+        }
+
+        if detection == DetectionState::SleepCandidate
+            && monitoring_enabled
+            && detection_enabled
+            && !sleeping
+        {
+            self.apply(UiCommand::EnterSleep).await;
+            let mut state = self.state.lock().await;
+            let before = state.clone();
+            state.sleep.detected_by_hr = true;
+            if *state != before {
+                self.emit_changes(&before, &state);
+            }
+        }
+    }
+
     async fn apply_worker_report(&self, client: &str, report: WorkerReport) -> bool {
         match report {
             WorkerReport::OscRuntime {
@@ -165,6 +254,10 @@ impl StateStore {
                 ) =>
             {
                 self.set_sleeping_pose(pose).await;
+                true
+            }
+            WorkerReport::HeartRateRuntime { connected, bpm } if client == "nightshift-hr" => {
+                self.set_hr_runtime(connected, bpm).await;
                 true
             }
             _ => false,
@@ -215,11 +308,13 @@ impl StateStore {
         let mut state = self.state.lock().await;
         let before = state.clone();
         let mut transition = None;
+        let mut manual_wake = false;
 
         match command {
             UiCommand::EnterSleep => {
                 if !matches!(state.sleep.phase, SleepPhase::EnteringSleep | SleepPhase::Sleeping) {
                     let transition_id = self.transition_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                    state.sleep.detected_by_hr = false;
                     state.sleep.phase = SleepPhase::EnteringSleep;
                     state.brightness.target = state.brightness.sleep_target;
                     state.brightness.transitioning = true;
@@ -236,10 +331,12 @@ impl StateStore {
             UiCommand::Wake => {
                 if !matches!(state.sleep.phase, SleepPhase::Waking | SleepPhase::Awake) {
                     let transition_id = self.transition_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                    state.sleep.detected_by_hr = false;
                     state.sleep.phase = SleepPhase::Waking;
                     state.brightness.target = 1.0;
                     state.brightness.transitioning = true;
                     state.brightness.manual_override = false;
+                    manual_wake = true;
                     transition = Some((
                         transition_id,
                         SleepPhase::Waking,
@@ -282,6 +379,13 @@ impl StateStore {
                 .send_replace(PersistedConfig::from_state(&state));
         }
         drop(state);
+
+        if manual_wake {
+            self.hr_detector
+                .lock()
+                .await
+                .note_sleep_disabled(self.now_ms());
+        }
 
         if let Some((transition_id, expected_phase, final_phase, final_brightness, seconds)) = transition {
             let store = self.clone();
@@ -330,6 +434,23 @@ impl Drop for OscClientGuard {
             tokio::spawn(async move {
                 store.set_osc_runtime(false, None, 0, false).await;
                 info!("Nightshift OSC worker disconnected");
+            });
+        }
+    }
+}
+
+struct HrClientGuard {
+    store: StateStore,
+}
+
+impl Drop for HrClientGuard {
+    fn drop(&mut self) {
+        let previous = self.store.hr_clients.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 {
+            let store = self.store.clone();
+            tokio::spawn(async move {
+                store.set_hr_runtime(false, None).await;
+                info!("Nightshift heart-rate worker disconnected");
             });
         }
     }
@@ -411,6 +532,16 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
     let _osc_guard = if is_osc_worker {
         store.osc_clients.fetch_add(1, Ordering::AcqRel);
         Some(OscClientGuard {
+            store: store.clone(),
+        })
+    } else {
+        None
+    };
+
+    let is_hr_worker = client == "nightshift-hr";
+    let _hr_guard = if is_hr_worker {
+        store.hr_clients.fetch_add(1, Ordering::AcqRel);
+        Some(HrClientGuard {
             store: store.clone(),
         })
     } else {
@@ -671,5 +802,36 @@ mod tests {
 
         let (snapshot, _) = store.snapshot_and_subscribe().await;
         assert_eq!(snapshot.sleep.pose, SleepingPose::Left);
+    }
+
+    #[tokio::test]
+    async fn heart_rate_reports_are_worker_scoped() {
+        let store = StateStore::new(AppState::default());
+        assert!(
+            store
+                .apply_worker_report(
+                    "nightshift-hr",
+                    WorkerReport::HeartRateRuntime {
+                        connected: true,
+                        bpm: Some(55),
+                    },
+                )
+                .await
+        );
+        assert!(
+            !store
+                .apply_worker_report(
+                    "nightshift-osc",
+                    WorkerReport::HeartRateRuntime {
+                        connected: true,
+                        bpm: Some(90),
+                    },
+                )
+                .await
+        );
+
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert!(snapshot.heart_rate.connected);
+        assert_eq!(snapshot.heart_rate.bpm, Some(55));
     }
 }
