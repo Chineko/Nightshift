@@ -266,7 +266,7 @@ mod tests {
         );
         assert_eq!(
             parse_pipeline_notification(
-                r#"{"type":"notification","content":"{\"id\":\"not_3\",\"type\":\"friendRequest\",\"senderUserId\":\"usr_x\",\"senderUsername\":\"X\"}"}"
+                r#"{"type":"notification","content":"{\"id\":\"not_3\",\"type\":\"friendRequest\",\"senderUserId\":\"usr_x\",\"senderUsername\":\"X\"}"}"#
             )
             .unwrap(),
             None
