@@ -1,4 +1,4 @@
-use nightshift_protocol::{OverlaySpawnMode, OverlayState, SettingsState, VrchatStatus};
+use nightshift_protocol::{OscState, OverlaySpawnMode, OverlayState, SettingsState, VrchatStatus};
 
 #[test]
 fn old_overlay_state_defaults_runtime_health() {
@@ -47,4 +47,20 @@ fn old_settings_state_defaults_gogo_automation_off() {
     assert_eq!(state.sleep_vrchat_status, VrchatStatus::AskMe);
     assert_eq!(state.wake_vrchat_status, VrchatStatus::Active);
     assert!(!state.gogo_automation_enabled);
+}
+
+#[test]
+fn old_osc_state_defaults_runtime_details() {
+    let old_json = r#"{
+        "enabled": true,
+        "connected": false
+    }"#;
+
+    let state: OscState = serde_json::from_str(old_json).expect("old OSC state must decode");
+
+    assert!(state.enabled);
+    assert!(!state.connected);
+    assert_eq!(state.avatar_id, None);
+    assert_eq!(state.avatar_parameter_count, 0);
+    assert!(!state.gogo_detected);
 }
