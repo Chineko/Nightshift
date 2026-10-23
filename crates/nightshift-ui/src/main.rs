@@ -84,8 +84,6 @@ async fn connection_loop(
     updates: mpsc::Sender<UiUpdate>,
 ) {
     loop {
-        // Commands are only meaningful for the session in which the user issued them.
-        // Never replay input that accumulated while the daemon was unavailable.
         if !discard_queued_commands(&mut commands) {
             return;
         }
@@ -119,8 +117,6 @@ async fn connection_loop(
             continue;
         }
 
-        // The socket is not considered connected until the daemon has completed
-        // the versioned handshake.
         let mut line = String::new();
         match reader.read_line(&mut line).await {
             Ok(0) | Err(_) => continue,
@@ -398,6 +394,25 @@ impl NightshiftApp {
             if ui.checkbox(&mut osc, "OSC automation").changed() {
                 self.send_command(UiCommand::SetOscAutomation(osc));
             }
+
+            let mut gogo = self.state.settings.gogo_automation_enabled;
+            let gogo_response = ui.add_enabled(
+                osc,
+                egui::Checkbox::new(&mut gogo, "GoGo Loco automation"),
+            );
+            if gogo_response.changed() {
+                self.send_command(UiCommand::SetGogoAutomation(gogo));
+            }
+            ui.label(
+                RichText::new(if osc {
+                    "Off by default. Allows Nightshift to run configured GoGo pose/feet-lock sequences."
+                } else {
+                    "Enable OSC automation first. GoGo automation remains off by default."
+                })
+                .color(MUTED)
+                .small(),
+            );
+
             let mut invites = self.state.invites.enabled;
             if ui.checkbox(&mut invites, "Invite automation").changed() {
                 self.send_command(UiCommand::SetInviteAutomation(invites));
