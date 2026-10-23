@@ -1,4 +1,8 @@
-use std::{env, path::PathBuf, time::{Duration, Instant}};
+use std::{
+    env,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use nightshift_protocol::{
@@ -34,6 +38,10 @@ impl AbortTask {
         if let Some(task) = self.0.take() {
             task.abort();
         }
+    }
+
+    fn is_pending(&self) -> bool {
+        self.0.is_some()
     }
 }
 
@@ -92,6 +100,25 @@ fn status_update_delay(last_write: Option<Instant>) -> Duration {
         .map(|last| STATUS_MIN_INTERVAL.saturating_sub(last.elapsed()))
         .unwrap_or_default();
     STATUS_DEBOUNCE.max(rate_limit_wait)
+}
+
+fn pending_retarget(
+    pending: bool,
+    sleeping: bool,
+    connected: bool,
+    current_status: VrchatStatus,
+    automation: StatusAutomationConfig,
+) -> Option<VrchatStatus> {
+    if !pending || !automation.enabled || !connected {
+        return None;
+    }
+
+    let target = if sleeping {
+        automation.sleep_status
+    } else {
+        automation.wake_status
+    };
+    (target != current_status).then_some(target)
 }
 
 async fn load_session(store: VrchatSessionStore) -> Result<Option<VrchatSession>> {
@@ -286,10 +313,30 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     }
                     ServerMessage::Event { event } => match event {
                         StateEvent::SettingsChanged(settings) => {
+                            let previous = automation;
+                            let pending = status_task.is_pending();
                             automation = status_config(&settings);
-                            if !automation.enabled {
+
+                            if pending && automation != previous {
                                 status_generation = status_generation.wrapping_add(1);
                                 status_task.abort();
+                                if let Some(target) = pending_retarget(
+                                    true,
+                                    sleeping,
+                                    vrchat_connected,
+                                    current_status,
+                                    automation,
+                                ) {
+                                    schedule_status_update(
+                                        &mut status_task,
+                                        status_tx.clone(),
+                                        api.clone(),
+                                        store.clone(),
+                                        target,
+                                        last_status_write,
+                                        status_generation,
+                                    );
+                                }
                             }
                         }
                         StateEvent::VrchatChanged(state) => {
@@ -418,6 +465,78 @@ mod tests {
                 sleep_status: VrchatStatus::Busy,
                 wake_status: VrchatStatus::JoinMe,
             }
+        );
+    }
+
+    #[test]
+    fn pending_sleep_write_retargets_to_new_sleep_status() {
+        assert_eq!(
+            pending_retarget(
+                true,
+                true,
+                true,
+                VrchatStatus::Active,
+                StatusAutomationConfig {
+                    enabled: true,
+                    sleep_status: VrchatStatus::Busy,
+                    wake_status: VrchatStatus::Active,
+                },
+            ),
+            Some(VrchatStatus::Busy)
+        );
+    }
+
+    #[test]
+    fn settings_change_without_pending_edge_does_not_create_write() {
+        assert_eq!(
+            pending_retarget(
+                false,
+                true,
+                true,
+                VrchatStatus::Active,
+                StatusAutomationConfig {
+                    enabled: true,
+                    sleep_status: VrchatStatus::Busy,
+                    wake_status: VrchatStatus::Active,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn disabling_automation_cancels_pending_retarget() {
+        assert_eq!(
+            pending_retarget(
+                true,
+                true,
+                true,
+                VrchatStatus::Active,
+                StatusAutomationConfig {
+                    enabled: false,
+                    sleep_status: VrchatStatus::Busy,
+                    wake_status: VrchatStatus::Active,
+                },
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn pending_retarget_skips_already_matching_status() {
+        assert_eq!(
+            pending_retarget(
+                true,
+                true,
+                true,
+                VrchatStatus::Busy,
+                StatusAutomationConfig {
+                    enabled: true,
+                    sleep_status: VrchatStatus::Busy,
+                    wake_status: VrchatStatus::Active,
+                },
+            ),
+            None
         );
     }
 
