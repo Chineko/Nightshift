@@ -12,6 +12,7 @@ use nightshift_protocol::{
     AppState, ClientMessage, InviteProfile, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
     UiCommand, VrchatStatus,
 };
+use nightshift_ui::vrchat_auth_ui::VrchatAuthUi;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -183,6 +184,7 @@ struct NightshiftApp {
     state: AppState,
     daemon_connected: bool,
     bridge: Bridge,
+    vrchat_auth: VrchatAuthUi,
     brightness_send_at: Instant,
 }
 
@@ -192,7 +194,8 @@ impl NightshiftApp {
             page: Page::Home,
             state: AppState::default(),
             daemon_connected: false,
-            bridge: Bridge::spawn(ctx),
+            bridge: Bridge::spawn(ctx.clone()),
+            vrchat_auth: VrchatAuthUi::new(ctx),
             brightness_send_at: Instant::now() - Duration::from_secs(1),
         }
     }
@@ -204,6 +207,7 @@ impl NightshiftApp {
     }
 
     fn drain_updates(&mut self) {
+        self.vrchat_auth.drain_updates();
         while let Ok(update) = self.bridge.updates.try_recv() {
             match update {
                 UiUpdate::Connected(connected) => self.daemon_connected = connected,
@@ -389,6 +393,45 @@ impl NightshiftApp {
         });
 
         ui.add_space(12.0);
+        setting_card(ui, "VRChat", |ui| {
+            let runtime_name = if self.state.vrchat.connected {
+                self.state.vrchat.display_name.as_deref()
+            } else {
+                None
+            };
+            self.vrchat_auth.render(ui, runtime_name);
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            let mut status_automation = self.state.settings.vrchat_status_automation_enabled;
+            if ui
+                .checkbox(&mut status_automation, "Sleep/wake status automation")
+                .changed()
+            {
+                self.send_command(UiCommand::SetVrchatStatusAutomation(status_automation));
+            }
+            ui.label(
+                RichText::new(
+                    "Off by default. When enabled, Nightshift changes only your configured VRChat presence on sleep/wake edges.",
+                )
+                .color(MUTED)
+                .small(),
+            );
+
+            let mut sleep_status = self.state.settings.sleep_vrchat_status;
+            if vrchat_status_picker(ui, "Sleep status", "vrchat_sleep_status", &mut sleep_status) {
+                self.send_command(UiCommand::SetVrchatSleepStatus(sleep_status));
+            }
+
+            let mut wake_status = self.state.settings.wake_vrchat_status;
+            if vrchat_status_picker(ui, "Wake status", "vrchat_wake_status", &mut wake_status) {
+                self.send_command(UiCommand::SetVrchatWakeStatus(wake_status));
+            }
+        });
+
+        ui.add_space(12.0);
         setting_card(ui, "Automation", |ui| {
             let mut osc = self.state.osc.enabled;
             if ui.checkbox(&mut osc, "OSC automation").changed() {
@@ -470,6 +513,30 @@ fn setting_card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut e
         ui.add_space(10.0);
         add_contents(ui);
     });
+}
+
+fn vrchat_status_picker(
+    ui: &mut egui::Ui,
+    label: &str,
+    id: &str,
+    status: &mut VrchatStatus,
+) -> bool {
+    let before = *status;
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(vrchat_status_name(*status))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(status, VrchatStatus::Active, "Active");
+                    ui.selectable_value(status, VrchatStatus::JoinMe, "Join Me");
+                    ui.selectable_value(status, VrchatStatus::AskMe, "Ask Me");
+                    ui.selectable_value(status, VrchatStatus::Busy, "Busy");
+                    ui.selectable_value(status, VrchatStatus::Offline, "Offline");
+                });
+        });
+    });
+    before != *status
 }
 
 fn invite_profile_name(profile: InviteProfile) -> &'static str {
