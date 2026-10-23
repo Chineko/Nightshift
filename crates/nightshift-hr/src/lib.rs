@@ -127,43 +127,47 @@ mod tests {
 
     #[test]
     fn first_sample_starts_a_fresh_calm_period() {
-        let mut detector = detector();
-        assert_eq!(detector.observe(1_000, 55, false), DetectionState::StaleReset);
+        let mut tracker = detector();
+        assert_eq!(tracker.observe(1_000, 55, false), DetectionState::StaleReset);
         assert_eq!(
-            detector.observe(2_000, 55, false),
+            tracker.observe(2_000, 55, false),
             DetectionState::Calming { remaining_ms: 119_000 }
         );
     }
 
     #[test]
     fn above_threshold_resets_calm_period() {
-        let mut detector = detector();
-        detector.observe(1_000, 55, false);
-        detector.observe(61_000, 55, false);
-        assert_eq!(detector.observe(62_000, 70, false), DetectionState::AboveThreshold);
+        let mut tracker = detector();
+        tracker.observe(1_000, 55, false);
+        tracker.observe(61_000, 55, false);
+        assert_eq!(tracker.observe(62_000, 70, false), DetectionState::AboveThreshold);
         assert_eq!(
-            detector.observe(63_000, 55, false),
+            tracker.observe(63_000, 55, false),
             DetectionState::Calming { remaining_ms: 119_000 }
         );
     }
 
     #[test]
     fn stale_gap_resets_calm_period() {
-        let mut detector = detector();
-        detector.observe(1_000, 55, false);
-        assert_eq!(detector.observe(25_000, 55, false), DetectionState::StaleReset);
+        let mut tracker = detector();
+        tracker.observe(1_000, 55, false);
+        assert_eq!(tracker.observe(25_000, 55, false), DetectionState::StaleReset);
     }
 
     #[test]
     fn calm_period_produces_sleep_candidate() {
-        let mut detector = detector();
-        detector.observe(1_000, 55, false);
-        assert_eq!(detector.observe(121_000, 55, false), DetectionState::StaleReset);
+        let mut stale_tracker = detector();
+        stale_tracker.observe(1_000, 55, false);
+        assert_eq!(
+            stale_tracker.observe(121_000, 55, false),
+            DetectionState::StaleReset
+        );
+
         // Keep samples fresh during the actual calm window.
-        let mut detector = detector();
-        detector.observe(0, 55, false);
+        let mut calm_tracker = detector();
+        calm_tracker.observe(0, 55, false);
         for now in (10_000..=120_000).step_by(10_000) {
-            let state = detector.observe(now, 55, false);
+            let state = calm_tracker.observe(now, 55, false);
             if now < 120_000 {
                 assert!(matches!(state, DetectionState::Calming { .. }));
             } else {
@@ -174,11 +178,11 @@ mod tests {
 
     #[test]
     fn manual_wake_blocks_immediate_reentry() {
-        let mut detector = detector();
-        detector.note_sleep_disabled(0);
-        detector.observe(0, 55, false);
+        let mut tracker = detector();
+        tracker.note_sleep_disabled(0);
+        tracker.observe(0, 55, false);
         for now in (10_000..=120_000).step_by(10_000) {
-            let state = detector.observe(now, 55, false);
+            let state = tracker.observe(now, 55, false);
             if now == 120_000 {
                 assert!(matches!(state, DetectionState::ManualWakeCooldown { .. }));
             }
@@ -187,10 +191,10 @@ mod tests {
 
     #[test]
     fn detector_does_not_trigger_when_already_sleeping() {
-        let mut detector = detector();
-        detector.observe(0, 55, true);
+        let mut tracker = detector();
+        tracker.observe(0, 55, true);
         for now in (10_000..=120_000).step_by(10_000) {
-            let state = detector.observe(now, 55, true);
+            let state = tracker.observe(now, 55, true);
             if now == 120_000 {
                 assert_eq!(state, DetectionState::AlreadySleeping);
             }
@@ -199,13 +203,13 @@ mod tests {
 
     #[test]
     fn candidate_sets_retrigger_suppression() {
-        let mut detector = detector();
-        detector.observe(0, 55, false);
+        let mut tracker = detector();
+        tracker.observe(0, 55, false);
         for now in (10_000..=120_000).step_by(10_000) {
-            detector.observe(now, 55, false);
+            tracker.observe(now, 55, false);
         }
         assert!(matches!(
-            detector.observe(130_000, 55, false),
+            tracker.observe(130_000, 55, false),
             DetectionState::RetriggerSuppressed { .. }
         ));
     }
