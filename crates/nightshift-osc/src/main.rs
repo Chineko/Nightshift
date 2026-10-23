@@ -1,4 +1,5 @@
 mod avatar_context;
+mod gogo;
 mod resolver;
 
 use std::{env, path::PathBuf, sync::Arc, time::Duration};
@@ -226,7 +227,7 @@ fn start_transition_automation(
     avatar_context: Option<AvatarContext>,
 ) {
     let publish_sleep_parameter = config.publish_sleep_parameter;
-    let script = if gogo_enabled {
+    let custom_script = if gogo_enabled {
         if sleeping {
             config.on_sleep.to_script()
         } else {
@@ -234,6 +235,27 @@ fn start_transition_automation(
         }
     } else {
         OscScript::default()
+    };
+
+    let gogo_script = if gogo_enabled {
+        match avatar_context.as_ref() {
+            Some(context) => {
+                let script = gogo::sleep_transition_script(context, sleeping);
+                if script.is_none() {
+                    warn!(
+                        avatar_id = %context.avatar_id,
+                        "GoGo automation enabled, but the current avatar does not expose a complete GoGo Loco 1.8+ parameter set"
+                    );
+                }
+                script
+            }
+            None => {
+                warn!("GoGo automation enabled, but no VRChat OSCQuery avatar context is available");
+                None
+            }
+        }
+    } else {
+        None
     };
 
     scripts.replace(
@@ -245,9 +267,15 @@ fn start_transition_automation(
                 }
             }
 
-            if !script.actions.is_empty() {
-                if let Err(error) = execute_script(socket, script, avatar_context).await {
-                    warn!(%error, "sleep transition OSC automation script failed");
+            if let Some(script) = gogo_script {
+                if let Err(error) = execute_script(socket.clone(), script, avatar_context.clone()).await {
+                    warn!(%error, "built-in GoGo sleep transition script failed");
+                }
+            }
+
+            if !custom_script.actions.is_empty() {
+                if let Err(error) = execute_script(socket, custom_script, avatar_context).await {
+                    warn!(%error, "custom sleep transition OSC script failed");
                 }
             }
         }),
