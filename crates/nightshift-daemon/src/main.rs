@@ -13,8 +13,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use config::PersistedConfig;
 use nightshift_protocol::{
-    AppState, Capability, ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
-    UiCommand, WorkerReport,
+    AppState, Capability, ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, SleepingPose,
+    StateEvent, UiCommand, WorkerReport,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -112,6 +112,16 @@ impl StateStore {
         }
     }
 
+    async fn set_sleeping_pose(&self, pose: SleepingPose) {
+        let mut state = self.state.lock().await;
+        let before = state.clone();
+        state.sleep.pose = pose;
+
+        if *state != before {
+            self.emit_changes(&before, &state);
+        }
+    }
+
     async fn set_osc_runtime(
         &self,
         connected: bool,
@@ -131,14 +141,14 @@ impl StateStore {
         }
     }
 
-    async fn apply_worker_report(&self, report: WorkerReport) {
+    async fn apply_worker_report(&self, client: &str, report: WorkerReport) -> bool {
         match report {
             WorkerReport::OscRuntime {
                 connected,
                 avatar_id,
                 avatar_parameter_count,
                 gogo_detected,
-            } => {
+            } if client == "nightshift-osc" => {
                 self.set_osc_runtime(
                     connected,
                     avatar_id,
@@ -146,7 +156,18 @@ impl StateStore {
                     gogo_detected,
                 )
                 .await;
+                true
             }
+            WorkerReport::SleepingPose { pose }
+                if matches!(
+                    client,
+                    "nightshift-overlay" | "nightshift-overlay-prototype"
+                ) =>
+            {
+                self.set_sleeping_pose(pose).await;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -290,6 +311,7 @@ impl Drop for OverlayClientGuard {
             let store = self.store.clone();
             tokio::spawn(async move {
                 store.set_overlay_runtime(false, None).await;
+                store.set_sleeping_pose(SleepingPose::Unknown).await;
                 info!("Nightshift overlay runtime disconnected");
             });
         }
@@ -434,15 +456,15 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
                             store.apply(command).await;
                             ClientStep::Continue
                         }
-                        Ok(ClientMessage::Report { report }) if is_osc_worker => {
-                            store.apply_worker_report(report).await;
-                            ClientStep::Continue
-                        }
-                        Ok(ClientMessage::Report { .. }) => {
-                            send_message(
-                                &mut write_half,
-                                &ServerMessage::Error { message: "client is not authorized to report worker state".into() },
-                            ).await?;
+                        Ok(ClientMessage::Report { report }) => {
+                            if !store.apply_worker_report(&client, report).await {
+                                send_message(
+                                    &mut write_half,
+                                    &ServerMessage::Error {
+                                        message: "client is not authorized for this worker report".into(),
+                                    },
+                                ).await?;
+                            }
                             ClientStep::Continue
                         }
                         Ok(ClientMessage::Hello { .. }) => {
@@ -602,19 +624,52 @@ mod tests {
     #[tokio::test]
     async fn osc_worker_report_updates_runtime_state() {
         let store = StateStore::new(AppState::default());
-        store
-            .apply_worker_report(WorkerReport::OscRuntime {
-                connected: true,
-                avatar_id: Some("avtr_test".into()),
-                avatar_parameter_count: 42,
-                gogo_detected: true,
-            })
-            .await;
+        assert!(
+            store
+                .apply_worker_report(
+                    "nightshift-osc",
+                    WorkerReport::OscRuntime {
+                        connected: true,
+                        avatar_id: Some("avtr_test".into()),
+                        avatar_parameter_count: 42,
+                        gogo_detected: true,
+                    },
+                )
+                .await
+        );
 
         let (snapshot, _) = store.snapshot_and_subscribe().await;
         assert!(snapshot.osc.connected);
         assert_eq!(snapshot.osc.avatar_id.as_deref(), Some("avtr_test"));
         assert_eq!(snapshot.osc.avatar_parameter_count, 42);
         assert!(snapshot.osc.gogo_detected);
+    }
+
+    #[tokio::test]
+    async fn overlay_can_report_pose_but_osc_worker_cannot() {
+        let store = StateStore::new(AppState::default());
+        assert!(
+            store
+                .apply_worker_report(
+                    "nightshift-overlay",
+                    WorkerReport::SleepingPose {
+                        pose: SleepingPose::Left,
+                    },
+                )
+                .await
+        );
+        assert!(
+            !store
+                .apply_worker_report(
+                    "nightshift-osc",
+                    WorkerReport::SleepingPose {
+                        pose: SleepingPose::Right,
+                    },
+                )
+                .await
+        );
+
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.sleep.pose, SleepingPose::Left);
     }
 }
