@@ -3,8 +3,11 @@ mod resolver;
 
 use std::{env, path::PathBuf, sync::Arc, time::Duration};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use avatar_context::{AvatarContext, discover_avatar_context};
+use nightshift_osc_script::{
+    CURRENT_SCRIPT_VERSION, OscAction, OscScript, OscValue, ScriptTaskRegistry,
+};
 use nightshift_protocol::{
     ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
 };
@@ -14,82 +17,56 @@ use serde::Deserialize;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UdpSocket, UnixStream},
-    task::JoinHandle,
 };
 use tracing::{info, warn};
 
 const VRCHAT_OSC_ADDR: &str = "127.0.0.1:9000";
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const SLEEP_PARAMETER: &str = "/avatar/parameters/NightshiftSleeping";
+const SLEEP_TRANSITION_GROUP: &str = "sleep_transition";
 
 #[derive(Clone, Debug, Deserialize)]
 struct OscAutomationConfig {
     #[serde(default = "default_true")]
     publish_sleep_parameter: bool,
     #[serde(default)]
-    on_sleep: Vec<OscStep>,
+    on_sleep: ConfigScript,
     #[serde(default)]
-    on_wake: Vec<OscStep>,
+    on_wake: ConfigScript,
 }
 
 impl Default for OscAutomationConfig {
     fn default() -> Self {
         Self {
             publish_sleep_parameter: true,
-            on_sleep: Vec::new(),
-            on_wake: Vec::new(),
+            on_sleep: ConfigScript::default(),
+            on_wake: ConfigScript::default(),
         }
     }
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum OscStep {
-    Send { address: String, value: OscValue },
-    Delay { milliseconds: u64 },
+#[serde(untagged)]
+enum ConfigScript {
+    Versioned(OscScript),
+    Legacy(Vec<OscAction>),
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "type", content = "value", rename_all = "snake_case")]
-enum OscValue {
-    Bool(bool),
-    Int(i32),
-    Float(f32),
-    String(String),
+impl Default for ConfigScript {
+    fn default() -> Self {
+        Self::Versioned(OscScript::default())
+    }
 }
 
-impl From<OscValue> for OscType {
-    fn from(value: OscValue) -> Self {
-        match value {
-            OscValue::Bool(value) => Self::Bool(value),
-            OscValue::Int(value) => Self::Int(value),
-            OscValue::Float(value) => Self::Float(value),
-            OscValue::String(value) => Self::String(value),
+impl ConfigScript {
+    fn to_script(&self) -> OscScript {
+        match self {
+            Self::Versioned(script) => script.clone(),
+            Self::Legacy(actions) => OscScript {
+                version: CURRENT_SCRIPT_VERSION,
+                actions: actions.clone(),
+            },
         }
-    }
-}
-
-#[derive(Default)]
-struct AutomationTask {
-    handle: Option<JoinHandle<()>>,
-}
-
-impl AutomationTask {
-    fn replace(&mut self, handle: JoinHandle<()>) {
-        self.abort();
-        self.handle = Some(handle);
-    }
-
-    fn abort(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.abort();
-        }
-    }
-}
-
-impl Drop for AutomationTask {
-    fn drop(&mut self) {
-        self.abort();
     }
 }
 
@@ -137,10 +114,19 @@ async fn osc_sender() -> Result<Arc<UdpSocket>> {
     Ok(Arc::new(socket))
 }
 
+fn osc_type(value: OscValue) -> OscType {
+    match value {
+        OscValue::Bool(value) => OscType::Bool(value),
+        OscValue::Int(value) => OscType::Int(value),
+        OscValue::Float(value) => OscType::Float(value),
+        OscValue::String(value) => OscType::String(value),
+    }
+}
+
 async fn send_value(socket: &UdpSocket, address: &str, value: OscValue) -> Result<()> {
     let packet = OscPacket::Message(OscMessage {
         addr: address.to_string(),
-        args: vec![value.into()],
+        args: vec![osc_type(value)],
     });
     let bytes = rosc::encoder::encode(&packet).context("encoding OSC packet")?;
     socket
@@ -154,13 +140,31 @@ async fn send_sleep_parameter(socket: &UdpSocket, sleeping: bool) -> Result<()> 
     send_value(socket, SLEEP_PARAMETER, OscValue::Bool(sleeping)).await
 }
 
-async fn execute_sequence(socket: Arc<UdpSocket>, steps: Vec<OscStep>) -> Result<()> {
-    for step in steps {
-        match step {
-            OscStep::Send { address, value } => {
-                send_value(&socket, &address, value).await?;
+async fn execute_script(
+    socket: Arc<UdpSocket>,
+    script: OscScript,
+    avatar_context: Option<AvatarContext>,
+) -> Result<()> {
+    if script.version != CURRENT_SCRIPT_VERSION {
+        bail!(
+            "unsupported OSC script version {}; expected {}",
+            script.version,
+            CURRENT_SCRIPT_VERSION
+        );
+    }
+
+    for action in script.actions {
+        match action {
+            OscAction::Send { address, value } => {
+                let targets = avatar_context
+                    .as_ref()
+                    .map(|context| context.target_addresses_for(&address))
+                    .unwrap_or_else(|| vec![address.as_str()]);
+                for target in targets {
+                    send_value(&socket, target, value.clone()).await?;
+                }
             }
-            OscStep::Delay { milliseconds } => {
+            OscAction::Delay { milliseconds } => {
                 tokio::time::sleep(Duration::from_millis(milliseconds)).await;
             }
         }
@@ -214,36 +218,40 @@ async fn refresh_avatar_context(current: &mut Option<AvatarContext>) {
 }
 
 fn start_transition_automation(
-    active: &mut AutomationTask,
+    scripts: &mut ScriptTaskRegistry,
     socket: Arc<UdpSocket>,
     config: &OscAutomationConfig,
     sleeping: bool,
     gogo_enabled: bool,
+    avatar_context: Option<AvatarContext>,
 ) {
     let publish_sleep_parameter = config.publish_sleep_parameter;
-    let steps = if gogo_enabled {
+    let script = if gogo_enabled {
         if sleeping {
-            config.on_sleep.clone()
+            config.on_sleep.to_script()
         } else {
-            config.on_wake.clone()
+            config.on_wake.to_script()
         }
     } else {
-        Vec::new()
+        OscScript::default()
     };
 
-    active.replace(tokio::spawn(async move {
-        if publish_sleep_parameter {
-            if let Err(error) = send_sleep_parameter(&socket, sleeping).await {
-                warn!(%error, "failed to publish NightshiftSleeping OSC parameter");
+    scripts.replace(
+        SLEEP_TRANSITION_GROUP,
+        tokio::spawn(async move {
+            if publish_sleep_parameter {
+                if let Err(error) = send_sleep_parameter(&socket, sleeping).await {
+                    warn!(%error, "failed to publish NightshiftSleeping OSC parameter");
+                }
             }
-        }
 
-        if !steps.is_empty() {
-            if let Err(error) = execute_sequence(socket, steps).await {
-                warn!(%error, "GoGo OSC automation sequence failed");
+            if !script.actions.is_empty() {
+                if let Err(error) = execute_script(socket, script, avatar_context).await {
+                    warn!(%error, "sleep transition OSC automation script failed");
+                }
             }
-        }
-    }));
+        }),
+    );
 }
 
 fn log_example_semantic_resolution() {
@@ -282,7 +290,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut sleeping = false;
     let mut sender: Option<Arc<UdpSocket>> = None;
     let mut avatar_context: Option<AvatarContext> = None;
-    let mut active_automation = AutomationTask::default();
+    let mut scripts = ScriptTaskRegistry::default();
     let mut line = String::new();
 
     loop {
@@ -314,7 +322,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 gogo_enabled = state.settings.gogo_automation_enabled;
                 sleeping = sleeping_phase(state.sleep.phase);
 
-                active_automation.abort();
+                scripts.abort_all();
                 if enabled {
                     if sender.is_none() {
                         sender = Some(osc_sender().await?);
@@ -336,7 +344,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
             ServerMessage::Event { event } => match event {
                 StateEvent::OscChanged(state) => {
                     enabled = state.enabled;
-                    active_automation.abort();
+                    scripts.abort_all();
                     if enabled {
                         if sender.is_none() {
                             sender = Some(osc_sender().await?);
@@ -359,7 +367,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     let was_enabled = gogo_enabled;
                     gogo_enabled = settings.gogo_automation_enabled;
                     if was_enabled && !gogo_enabled {
-                        active_automation.abort();
+                        scripts.abort(SLEEP_TRANSITION_GROUP);
                         avatar_context = None;
                     } else if enabled && !was_enabled && gogo_enabled {
                         refresh_avatar_context(&mut avatar_context).await;
@@ -377,11 +385,12 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                                 refresh_avatar_context(&mut avatar_context).await;
                             }
                             start_transition_automation(
-                                &mut active_automation,
+                                &mut scripts,
                                 sender.as_ref().expect("sender created").clone(),
                                 &config,
                                 new_sleeping,
                                 gogo_enabled,
+                                avatar_context.clone(),
                             );
                         }
                     }
@@ -426,7 +435,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_generic_sleep_sequence() {
+    fn parses_legacy_sleep_sequence() {
         let json = r#"
         {
           "publish_sleep_parameter": true,
@@ -449,8 +458,32 @@ mod tests {
 
         let config: OscAutomationConfig = serde_json::from_str(json).unwrap();
         assert!(config.publish_sleep_parameter);
-        assert_eq!(config.on_sleep.len(), 3);
-        assert!(config.on_wake.is_empty());
+        assert_eq!(config.on_sleep.to_script().actions.len(), 3);
+        assert!(config.on_wake.to_script().actions.is_empty());
+    }
+
+    #[test]
+    fn parses_versioned_sleep_script() {
+        let json = r#"
+        {
+          "publish_sleep_parameter": true,
+          "on_sleep": {
+            "version": 1,
+            "actions": [
+              {
+                "type": "send",
+                "address": "/avatar/parameters/Go/Stationary",
+                "value": { "type": "bool", "value": true }
+              }
+            ]
+          },
+          "on_wake": { "version": 1, "actions": [] }
+        }
+        "#;
+
+        let config: OscAutomationConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.on_sleep.to_script().version, CURRENT_SCRIPT_VERSION);
+        assert_eq!(config.on_sleep.to_script().actions.len(), 1);
     }
 
     #[test]
