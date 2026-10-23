@@ -151,6 +151,7 @@ fn start_automation(
     socket: Arc<UdpSocket>,
     config: &OscAutomationConfig,
     phase: SleepPhase,
+    gogo_enabled: bool,
 ) {
     if let Some(task) = active.take() {
         task.abort();
@@ -158,10 +159,14 @@ fn start_automation(
 
     let sleeping = sleeping_phase(phase);
     let publish_sleep_parameter = config.publish_sleep_parameter;
-    let steps = if sleeping {
-        config.on_sleep.clone()
+    let steps = if gogo_enabled {
+        if sleeping {
+            config.on_sleep.clone()
+        } else {
+            config.on_wake.clone()
+        }
     } else {
-        config.on_wake.clone()
+        Vec::new()
     };
 
     *active = Some(tokio::spawn(async move {
@@ -171,16 +176,15 @@ fn start_automation(
             }
         }
 
-        if let Err(error) = execute_sequence(socket, steps).await {
-            warn!(%error, "OSC automation sequence failed");
+        if !steps.is_empty() {
+            if let Err(error) = execute_sequence(socket, steps).await {
+                warn!(%error, "GoGo OSC automation sequence failed");
+            }
         }
     }));
 }
 
 fn log_example_semantic_resolution() {
-    // The worker does not yet have avatar parameter discovery wired in. Keeping the
-    // resolver exercised here documents the intended semantic interface without
-    // guessing any runtime GoGo Loco parameter names.
     let empty: [&str; 0] = [];
     let result = resolve_parameter(
         empty,
@@ -212,6 +216,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
 
     let config = load_config().await?;
     let mut enabled = false;
+    let mut gogo_enabled = false;
     let mut phase = SleepPhase::Awake;
     let mut sender: Option<Arc<UdpSocket>> = None;
     let mut active_automation: Option<JoinHandle<()>> = None;
@@ -243,6 +248,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
             }
             ServerMessage::FullState { state } => {
                 enabled = state.osc.enabled;
+                gogo_enabled = state.settings.gogo_automation_enabled;
                 phase = state.sleep.phase;
                 if enabled {
                     if sender.is_none() {
@@ -253,6 +259,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         sender.as_ref().expect("sender created").clone(),
                         &config,
                         phase,
+                        gogo_enabled,
                     );
                 } else {
                     if let Some(task) = active_automation.take() {
@@ -273,12 +280,29 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                             sender.as_ref().expect("sender created").clone(),
                             &config,
                             phase,
+                            gogo_enabled,
                         );
                     } else {
                         if let Some(task) = active_automation.take() {
                             task.abort();
                         }
                         sender = None;
+                    }
+                }
+                StateEvent::SettingsChanged(settings) => {
+                    let was_enabled = gogo_enabled;
+                    gogo_enabled = settings.gogo_automation_enabled;
+                    if enabled && gogo_enabled != was_enabled {
+                        if sender.is_none() {
+                            sender = Some(osc_sender().await?);
+                        }
+                        start_automation(
+                            &mut active_automation,
+                            sender.as_ref().expect("sender created").clone(),
+                            &config,
+                            phase,
+                            gogo_enabled,
+                        );
                     }
                 }
                 StateEvent::SleepChanged(state) => {
@@ -292,6 +316,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                             sender.as_ref().expect("sender created").clone(),
                             &config,
                             phase,
+                            gogo_enabled,
                         );
                     }
                 }
