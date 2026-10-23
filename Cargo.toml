@@ -2,6 +2,7 @@
 members = [
     "crates/nightshift-protocol",
     "crates/nightshift-daemon",
+    "crates/nightshift-ui",
 ]
 resolver = "2"
 
