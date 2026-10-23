@@ -326,6 +326,7 @@ impl StateStore {
                 | UiCommand::SetSleepDetection(_)
                 | UiCommand::SetOscAutomation(_)
                 | UiCommand::SetGogoAutomation(_)
+                | UiCommand::SetVrchatStatusAutomation(_)
                 | UiCommand::SetVrchatSleepStatus(_)
                 | UiCommand::SetVrchatWakeStatus(_)
                 | UiCommand::SetInviteAutomation(_)
@@ -390,6 +391,9 @@ impl StateStore {
             UiCommand::SetSleepDetection(enabled) => state.sleep.detection_enabled = enabled,
             UiCommand::SetOscAutomation(enabled) => state.osc.enabled = enabled,
             UiCommand::SetGogoAutomation(enabled) => state.settings.gogo_automation_enabled = enabled,
+            UiCommand::SetVrchatStatusAutomation(enabled) => {
+                state.settings.vrchat_status_automation_enabled = enabled;
+            }
             UiCommand::SetVrchatSleepStatus(status) => state.settings.sleep_vrchat_status = status,
             UiCommand::SetVrchatWakeStatus(status) => state.settings.wake_vrchat_status = status,
             UiCommand::SetInviteAutomation(enabled) => state.invites.enabled = enabled,
