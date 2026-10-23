@@ -1,0 +1,13 @@
+[package]
+name = "nightshift-vrchat-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+nightshift-protocol = { path = "../nightshift-protocol" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde.workspace = true
