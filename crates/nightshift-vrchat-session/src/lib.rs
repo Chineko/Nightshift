@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 const SERVICE: &str = "io.github.chineko.Nightshift.vrchat";
 const DEFAULT_PROFILE: &str = "active";
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VrchatSession {
     pub auth_cookie: String,
     #[serde(default)]
