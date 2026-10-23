@@ -1,0 +1,25 @@
+/target/
+**/*.rs.bk
+
+# IDEs
+.idea/
+.vscode/
+
+# OS/editor junk
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Local runtime/config
+.env
+.env.*
+config.local.*
+*.local.toml
+
+# Logs
+*.log
+
+# Build/package output
+dist/
+build/
