@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use config::PersistedConfig;
 use nightshift_protocol::{
     AppState, Capability, ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
-    UiCommand,
+    UiCommand, WorkerReport,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -30,6 +30,7 @@ struct StateStore {
     state: Arc<Mutex<AppState>>,
     updates: broadcast::Sender<StateEvent>,
     overlay_clients: Arc<AtomicUsize>,
+    osc_clients: Arc<AtomicUsize>,
     transition_generation: Arc<AtomicU64>,
     config_updates: watch::Sender<PersistedConfig>,
 }
@@ -54,6 +55,7 @@ impl StateStore {
             state: Arc::new(Mutex::new(initial_state)),
             updates,
             overlay_clients: Arc::new(AtomicUsize::new(0)),
+            osc_clients: Arc::new(AtomicUsize::new(0)),
             transition_generation: Arc::new(AtomicU64::new(0)),
             config_updates,
         }
@@ -107,6 +109,44 @@ impl StateStore {
 
         if *state != before {
             self.emit_changes(&before, &state);
+        }
+    }
+
+    async fn set_osc_runtime(
+        &self,
+        connected: bool,
+        avatar_id: Option<String>,
+        avatar_parameter_count: u32,
+        gogo_detected: bool,
+    ) {
+        let mut state = self.state.lock().await;
+        let before = state.clone();
+        state.osc.connected = connected;
+        state.osc.avatar_id = if connected { avatar_id } else { None };
+        state.osc.avatar_parameter_count = if connected { avatar_parameter_count } else { 0 };
+        state.osc.gogo_detected = connected && gogo_detected;
+
+        if *state != before {
+            self.emit_changes(&before, &state);
+        }
+    }
+
+    async fn apply_worker_report(&self, report: WorkerReport) {
+        match report {
+            WorkerReport::OscRuntime {
+                connected,
+                avatar_id,
+                avatar_parameter_count,
+                gogo_detected,
+            } => {
+                self.set_osc_runtime(
+                    connected,
+                    avatar_id,
+                    avatar_parameter_count,
+                    gogo_detected,
+                )
+                .await;
+            }
         }
     }
 
@@ -256,6 +296,23 @@ impl Drop for OverlayClientGuard {
     }
 }
 
+struct OscClientGuard {
+    store: StateStore,
+}
+
+impl Drop for OscClientGuard {
+    fn drop(&mut self) {
+        let previous = self.store.osc_clients.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 {
+            let store = self.store.clone();
+            tokio::spawn(async move {
+                store.set_osc_runtime(false, None, 0, false).await;
+                info!("Nightshift OSC worker disconnected");
+            });
+        }
+    }
+}
+
 fn socket_path() -> Result<PathBuf> {
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -328,6 +385,16 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
         None
     };
 
+    let is_osc_worker = client == "nightshift-osc";
+    let _osc_guard = if is_osc_worker {
+        store.osc_clients.fetch_add(1, Ordering::AcqRel);
+        Some(OscClientGuard {
+            store: store.clone(),
+        })
+    } else {
+        None
+    };
+
     send_message(
         &mut write_half,
         &ServerMessage::Hello {
@@ -341,6 +408,7 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
                 Capability::VrchatStatus,
                 Capability::InviteRules,
                 Capability::Overlay,
+                Capability::WorkerReports,
             ],
         },
     )
@@ -364,6 +432,17 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
                         Ok(ClientMessage::GetState) => ClientStep::Resync,
                         Ok(ClientMessage::Command { command }) => {
                             store.apply(command).await;
+                            ClientStep::Continue
+                        }
+                        Ok(ClientMessage::Report { report }) if is_osc_worker => {
+                            store.apply_worker_report(report).await;
+                            ClientStep::Continue
+                        }
+                        Ok(ClientMessage::Report { .. }) => {
+                            send_message(
+                                &mut write_half,
+                                &ServerMessage::Error { message: "client is not authorized to report worker state".into() },
+                            ).await?;
                             ClientStep::Continue
                         }
                         Ok(ClientMessage::Hello { .. }) => {
@@ -518,5 +597,24 @@ mod tests {
         let (snapshot, _) = store.snapshot_and_subscribe().await;
         assert_eq!(snapshot.sleep.phase, SleepPhase::EnteringSleep);
         assert!(snapshot.brightness.transitioning);
+    }
+
+    #[tokio::test]
+    async fn osc_worker_report_updates_runtime_state() {
+        let store = StateStore::new(AppState::default());
+        store
+            .apply_worker_report(WorkerReport::OscRuntime {
+                connected: true,
+                avatar_id: Some("avtr_test".into()),
+                avatar_parameter_count: 42,
+                gogo_detected: true,
+            })
+            .await;
+
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert!(snapshot.osc.connected);
+        assert_eq!(snapshot.osc.avatar_id.as_deref(), Some("avtr_test"));
+        assert_eq!(snapshot.osc.avatar_parameter_count, 42);
+        assert!(snapshot.osc.gogo_detected);
     }
 }
