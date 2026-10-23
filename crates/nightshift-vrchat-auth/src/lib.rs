@@ -1,13 +1,28 @@
 use anyhow::{Context, Result};
 use nightshift_vrchat_api::{
-    AuthenticatedSession, CurrentUserSummary, LoginResult, PendingTwoFactor, VrchatApiClient,
+    AuthenticatedSession, CurrentUserSummary, LoginResult, PendingTwoFactor, TwoFactorMethod,
+    VrchatApiClient,
 };
 use nightshift_vrchat_session::{VrchatSession, VrchatSessionStore};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingAuth {
+    inner: PendingTwoFactor,
+}
+
+impl PendingAuth {
+    pub fn method_name(&self) -> &'static str {
+        match self.inner.method {
+            TwoFactorMethod::Totp => "Authenticator code",
+            TwoFactorMethod::EmailOtp => "Email code",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthStep {
     Authenticated(CurrentUserSummary),
-    TwoFactorRequired(PendingTwoFactor),
+    TwoFactorRequired(PendingAuth),
 }
 
 #[derive(Clone)]
@@ -39,17 +54,17 @@ impl VrchatAuthService {
                 Ok(AuthStep::Authenticated(user))
             }
             LoginResult::TwoFactorRequired(pending) => {
-                Ok(AuthStep::TwoFactorRequired(pending))
+                Ok(AuthStep::TwoFactorRequired(PendingAuth { inner: pending }))
             }
         }
     }
 
     pub async fn verify_two_factor(
         &self,
-        pending: PendingTwoFactor,
+        pending: PendingAuth,
         code: &str,
     ) -> Result<CurrentUserSummary> {
-        let session = self.api.verify_two_factor(pending, code).await?;
+        let session = self.api.verify_two_factor(pending.inner, code).await?;
         let user = session.user.clone();
         self.persist(session).await?;
         Ok(user)
@@ -89,7 +104,7 @@ fn stored_session(session: AuthenticatedSession) -> VrchatSession {
 mod tests {
     use super::*;
     use nightshift_protocol::VrchatStatus;
-    use nightshift_vrchat_api::SessionCookies;
+    use nightshift_vrchat_api::{SessionCookies, TwoFactorMethod};
 
     #[test]
     fn authenticated_result_becomes_keyring_session_without_credentials() {
@@ -108,5 +123,19 @@ mod tests {
         assert_eq!(stored.auth_cookie, "auth-cookie");
         assert_eq!(stored.two_factor_cookie.as_deref(), Some("2fa-cookie"));
         assert_eq!(stored.user_id.as_deref(), Some("usr_test"));
+    }
+
+    #[test]
+    fn pending_auth_exposes_method_but_not_session_cookie_fields() {
+        let pending = PendingAuth {
+            inner: PendingTwoFactor {
+                method: TwoFactorMethod::Totp,
+                cookies: SessionCookies {
+                    auth: "secret".into(),
+                    two_factor_auth: None,
+                },
+            },
+        };
+        assert_eq!(pending.method_name(), "Authenticator code");
     }
 }
