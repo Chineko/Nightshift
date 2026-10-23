@@ -39,14 +39,27 @@ pub enum ConnectionState { Connecting, #[default] Connected, Degraded, Disconnec
 #[serde(rename_all = "snake_case")]
 pub enum SleepPhase { #[default] Awake, EnteringSleep, Sleeping, Waking }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SleepingPose { #[default] Unknown, Front, Back, Left, Right }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SleepState {
     pub phase: SleepPhase,
     pub detection_enabled: bool,
     pub detected_by_hr: bool,
+    #[serde(default)]
+    pub pose: SleepingPose,
 }
 impl Default for SleepState {
-    fn default() -> Self { Self { phase: SleepPhase::Awake, detection_enabled: false, detected_by_hr: false } }
+    fn default() -> Self {
+        Self {
+            phase: SleepPhase::Awake,
+            detection_enabled: false,
+            detected_by_hr: false,
+            pose: SleepingPose::Unknown,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -197,6 +210,7 @@ pub enum WorkerReport {
         avatar_parameter_count: u32,
         gogo_detected: bool,
     },
+    SleepingPose { pose: SleepingPose },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
