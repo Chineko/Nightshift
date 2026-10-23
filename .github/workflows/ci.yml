@@ -54,6 +54,9 @@ jobs:
       - name: Test VRChat session storage
         run: cargo test -p nightshift-vrchat-session
 
+      - name: Check VRChat runtime worker
+        run: cargo test -p nightshift-vrchat-worker
+
       - name: Test daemon state machine
         run: cargo test -p nightshift-daemon
 
