@@ -285,12 +285,14 @@ mod tests {
               "CONTENTS": {
                 "change": { "VALUE": ["avtr_test"] },
                 "parameters": {
-                  "VF123_Go": {
-                    "CONTENTS": {
-                      "Stationary": {
-                        "FULL_PATH": "/avatar/parameters/VF123_Go/Stationary",
-                        "TYPE": "T",
-                        "VALUE": [true]
+                  "CONTENTS": {
+                    "VF123_Go": {
+                      "CONTENTS": {
+                        "Stationary": {
+                          "FULL_PATH": "/avatar/parameters/VF123_Go/Stationary",
+                          "TYPE": "T",
+                          "VALUE": [true]
+                        }
                       }
                     }
                   }
