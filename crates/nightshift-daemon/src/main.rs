@@ -32,7 +32,7 @@ impl StateStore {
     }
 
     fn emit_changes(&self, before: &AppState, after: &AppState) {
-        let mut emit = |event| {
+        let emit = |event| {
             let _ = self.updates.send(event);
         };
 
