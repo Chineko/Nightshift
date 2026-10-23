@@ -68,12 +68,20 @@ fn socket_path() -> Option<PathBuf> {
         .map(|path| path.join("nightshift").join("nightshift.sock"))
 }
 
+fn discard_queued_commands(commands: &mut tokio_mpsc::UnboundedReceiver<UiCommand>) {
+    while commands.try_recv().is_ok() {}
+}
+
 async fn connection_loop(
     ctx: egui::Context,
     mut commands: tokio_mpsc::UnboundedReceiver<UiCommand>,
     updates: mpsc::Sender<UiUpdate>,
 ) {
     loop {
+        // Commands are only meaningful for the session in which the user issued them.
+        // Never replay input that accumulated while the daemon was unavailable.
+        discard_queued_commands(&mut commands);
+
         let Some(path) = socket_path() else {
             let _ = updates.send(UiUpdate::Connected(false));
             ctx.request_repaint();
@@ -91,9 +99,6 @@ async fn connection_loop(
             }
         };
 
-        let _ = updates.send(UiUpdate::Connected(true));
-        ctx.request_repaint();
-
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);
         let hello = ClientMessage::Hello {
@@ -106,7 +111,22 @@ async fn connection_loop(
             continue;
         }
 
+        // The socket is not considered connected until the daemon has completed
+        // the versioned handshake.
         let mut line = String::new();
+        match reader.read_line(&mut line).await {
+            Ok(0) | Err(_) => continue,
+            Ok(_) => match serde_json::from_str::<ServerMessage>(line.trim_end()) {
+                Ok(ServerMessage::Hello { protocol, .. }) if protocol == PROTOCOL_VERSION => {}
+                Ok(ServerMessage::Error { .. }) | Ok(_) | Err(_) => continue,
+            },
+        }
+
+        if updates.send(UiUpdate::Connected(true)).is_err() {
+            return;
+        }
+        ctx.request_repaint();
+
         loop {
             line.clear();
             tokio::select! {
@@ -170,6 +190,12 @@ impl NightshiftApp {
             daemon_connected: false,
             bridge: Bridge::spawn(ctx),
             brightness_send_at: Instant::now() - Duration::from_secs(1),
+        }
+    }
+
+    fn send_command(&self, command: UiCommand) {
+        if self.daemon_connected {
+            self.bridge.send(command);
         }
     }
 
@@ -260,7 +286,7 @@ impl NightshiftApp {
 
                 let button_text = if sleeping { "Wake up" } else { "Enter sleep mode" };
                 if ui.add_sized([ui.available_width(), 38.0], egui::Button::new(RichText::new(button_text).strong()).fill(accent)).clicked() {
-                    self.bridge.send(if sleeping { UiCommand::Wake } else { UiCommand::EnterSleep });
+                    self.send_command(if sleeping { UiCommand::Wake } else { UiCommand::EnterSleep });
                 }
 
                 ui.add_space(16.0);
@@ -283,14 +309,19 @@ impl NightshiftApp {
             ui.add_space(8.0);
             let mut value = self.state.brightness.current;
             let response = ui.add(egui::Slider::new(&mut value, 0.02..=1.0).show_value(false));
+
             if response.changed() {
                 self.state.brightness.current = value;
-                let should_send = self.brightness_send_at.elapsed() >= Duration::from_millis(40) || response.drag_stopped();
-                if should_send {
-                    self.bridge.send(UiCommand::SetBrightness(value));
+                if !response.drag_stopped() && self.brightness_send_at.elapsed() >= Duration::from_millis(40) {
+                    self.send_command(UiCommand::SetBrightness(value));
                     self.brightness_send_at = Instant::now();
                 }
             }
+            if response.drag_stopped() {
+                self.send_command(UiCommand::SetBrightness(self.state.brightness.current));
+                self.brightness_send_at = Instant::now();
+            }
+
             let sync = if self.state.brightness.manual_override { "Manual override" } else if self.state.brightness.transitioning { "Fading" } else { "Synced" };
             ui.label(RichText::new(sync).color(MUTED).small());
         });
@@ -329,11 +360,11 @@ impl NightshiftApp {
         setting_card(ui, "Sleep", |ui| {
             let mut hr = self.state.heart_rate.enabled;
             if ui.checkbox(&mut hr, "Heart-rate monitoring").changed() {
-                self.bridge.send(UiCommand::SetHrMonitoring(hr));
+                self.send_command(UiCommand::SetHrMonitoring(hr));
             }
             let mut detection = self.state.sleep.detection_enabled;
             if ui.checkbox(&mut detection, "Sleep detection").changed() {
-                self.bridge.send(UiCommand::SetSleepDetection(detection));
+                self.send_command(UiCommand::SetSleepDetection(detection));
             }
             let mut target = self.state.brightness.sleep_target;
             ui.label("Sleep brightness target");
@@ -344,12 +375,12 @@ impl NightshiftApp {
                 )
                 .changed()
             {
-                self.bridge.send(UiCommand::SetSleepBrightness(target));
+                self.send_command(UiCommand::SetSleepBrightness(target));
             }
             let mut fade = self.state.settings.fade_duration_seconds;
             ui.label("Fade duration");
             if ui.add(egui::Slider::new(&mut fade, 0.0..=120.0).suffix(" s")).changed() {
-                self.bridge.send(UiCommand::SetFadeDuration(fade));
+                self.send_command(UiCommand::SetFadeDuration(fade));
             }
         });
 
@@ -357,11 +388,11 @@ impl NightshiftApp {
         setting_card(ui, "Automation", |ui| {
             let mut osc = self.state.osc.enabled;
             if ui.checkbox(&mut osc, "OSC automation").changed() {
-                self.bridge.send(UiCommand::SetOscAutomation(osc));
+                self.send_command(UiCommand::SetOscAutomation(osc));
             }
             let mut invites = self.state.invites.enabled;
             if ui.checkbox(&mut invites, "Invite automation").changed() {
-                self.bridge.send(UiCommand::SetInviteAutomation(invites));
+                self.send_command(UiCommand::SetInviteAutomation(invites));
             }
         });
     }
