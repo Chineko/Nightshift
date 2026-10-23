@@ -20,7 +20,7 @@ pub struct VrchatNotification {
     pub id: String,
     pub kind: NotificationKind,
     pub sender_user_id: String,
-    pub sender_username: String,
+    pub sender_username: Option<String>,
 }
 
 #[derive(Debug)]
@@ -41,14 +41,18 @@ impl fmt::Display for InviteRefused {
 impl Error for InviteRefused {}
 
 #[derive(Debug, Deserialize)]
-struct WireNotification {
-    id: String,
+struct NotificationHeader {
     #[serde(rename = "type")]
     kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WireNotification {
+    id: String,
     #[serde(rename = "senderUserId")]
     sender_user_id: String,
-    #[serde(rename = "senderUsername")]
-    sender_username: String,
+    #[serde(rename = "senderUsername", default)]
+    sender_username: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,7 +88,7 @@ pub fn pipeline_url(auth_token: &str) -> String {
 pub fn parse_pipeline_notification(frame: &str) -> Result<Option<VrchatNotification>> {
     let envelope: Value = serde_json::from_str(frame).context("decoding VRChat pipeline frame")?;
     let Some(event_type) = envelope.get("type").and_then(Value::as_str) else {
-        if envelope.get("err").and_then(Value::as_str).is_some() {
+        if envelope.get("err").is_some() {
             return Ok(None);
         }
         bail!("VRChat pipeline frame is missing an event type");
@@ -96,18 +100,25 @@ pub fn parse_pipeline_notification(frame: &str) -> Result<Option<VrchatNotificat
     let content = envelope
         .get("content")
         .context("VRChat notification frame is missing content")?;
-    let wire: WireNotification = match content {
-        Value::String(content) => {
-            serde_json::from_str(content).context("decoding stringified VRChat notification")?
-        }
-        other => serde_json::from_value(other.clone()).context("decoding VRChat notification")?,
+    let notification: Value = match content {
+        Value::String(content) => serde_json::from_str(content)
+            .context("decoding stringified VRChat notification")?,
+        other => other.clone(),
     };
 
-    let kind = match wire.kind.as_str() {
+    // Filter the notification kind before requiring invite-specific fields. VRChat sends many
+    // notification shapes through this same event type and unrelated notifications may not have
+    // senderUserId/senderUsername at all.
+    let header: NotificationHeader = serde_json::from_value(notification.clone())
+        .context("decoding VRChat notification type")?;
+    let kind = match header.kind.as_str() {
         "invite" => NotificationKind::Invite,
         "requestInvite" => NotificationKind::RequestInvite,
         _ => return Ok(None),
     };
+
+    let wire: WireNotification = serde_json::from_value(notification)
+        .context("decoding VRChat invite notification")?;
 
     Ok(Some(VrchatNotification {
         id: wire.id,
@@ -231,20 +242,19 @@ mod tests {
                 id: "not_1".into(),
                 kind: NotificationKind::RequestInvite,
                 sender_user_id: "usr_bob".into(),
-                sender_username: "Bob".into(),
+                sender_username: Some("Bob".into()),
             })
         );
     }
 
     #[test]
-    fn parses_object_invite_notification() {
+    fn parses_object_invite_notification_without_sender_username() {
         let frame = r#"{
             "type":"notification",
             "content":{
                 "id":"not_2",
                 "type":"invite",
-                "senderUserId":"usr_alice",
-                "senderUsername":"Alice"
+                "senderUserId":"usr_alice"
             }
         }"#;
         assert_eq!(
@@ -253,20 +263,20 @@ mod tests {
                 id: "not_2".into(),
                 kind: NotificationKind::Invite,
                 sender_user_id: "usr_alice".into(),
-                sender_username: "Alice".into(),
+                sender_username: None,
             })
         );
     }
 
     #[test]
-    fn ignores_unrelated_pipeline_events_and_notifications() {
+    fn ignores_unrelated_pipeline_events_and_notifications_without_invite_fields() {
         assert_eq!(
             parse_pipeline_notification(r#"{"type":"friend-online","content":"{}"}"#).unwrap(),
             None
         );
         assert_eq!(
             parse_pipeline_notification(
-                r#"{"type":"notification","content":"{\"id\":\"not_3\",\"type\":\"friendRequest\",\"senderUserId\":\"usr_x\",\"senderUsername\":\"X\"}"}"#
+                r#"{"type":"notification","content":"{\"id\":\"not_3\",\"type\":\"friendRequest\"}"}"#
             )
             .unwrap(),
             None
