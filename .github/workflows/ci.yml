@@ -36,6 +36,9 @@ jobs:
       - name: Test sleeping-pose classifier
         run: cargo test -p nightshift-pose
 
+      - name: Test heart-rate detector
+        run: cargo test -p nightshift-hr
+
       - name: Test daemon state machine
         run: cargo test -p nightshift-daemon
 
