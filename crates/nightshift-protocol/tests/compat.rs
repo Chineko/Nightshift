@@ -1,4 +1,4 @@
-use nightshift_protocol::{OverlaySpawnMode, OverlayState};
+use nightshift_protocol::{OverlaySpawnMode, OverlayState, SettingsState, VrchatStatus};
 
 #[test]
 fn old_overlay_state_defaults_runtime_health() {
@@ -31,4 +31,20 @@ fn new_overlay_state_round_trips_runtime_health() {
     let decoded: OverlayState = serde_json::from_str(&json).expect("deserialize overlay state");
 
     assert_eq!(decoded, state);
+}
+
+#[test]
+fn old_settings_state_defaults_gogo_automation_off() {
+    let old_json = r#"{
+        "fade_duration_seconds": 3.0,
+        "sleep_vrchat_status": "ask_me",
+        "wake_vrchat_status": "active"
+    }"#;
+
+    let state: SettingsState = serde_json::from_str(old_json).expect("old settings state must decode");
+
+    assert_eq!(state.fade_duration_seconds, 3.0);
+    assert_eq!(state.sleep_vrchat_status, VrchatStatus::AskMe);
+    assert_eq!(state.wake_vrchat_status, VrchatStatus::Active);
+    assert!(!state.gogo_automation_enabled);
 }
