@@ -1,9 +1,12 @@
+mod resolver;
+
 use std::{env, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
 use nightshift_protocol::{
     ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
 };
+use resolver::{ResolveResult, SemanticQuery, resolve_parameter};
 use rosc::{OscMessage, OscPacket, OscType};
 use serde::Deserialize;
 use tokio::{
@@ -174,6 +177,23 @@ fn start_automation(
     }));
 }
 
+fn log_example_semantic_resolution() {
+    // The worker does not yet have avatar parameter discovery wired in. Keeping the
+    // resolver exercised here documents the intended semantic interface without
+    // guessing any runtime GoGo Loco parameter names.
+    let empty: [&str; 0] = [];
+    let result = resolve_parameter(
+        empty,
+        &SemanticQuery {
+            required: &["feet", "lock"],
+            preferred: &["gogo", "locomotion"],
+        },
+    );
+    if !matches!(result, ResolveResult::Missing) {
+        warn!("unexpected semantic resolver result without discovered parameters");
+    }
+}
+
 async fn run_connection(stream: UnixStream) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -291,6 +311,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
+    log_example_semantic_resolution();
     let path = socket_path()?;
 
     loop {
