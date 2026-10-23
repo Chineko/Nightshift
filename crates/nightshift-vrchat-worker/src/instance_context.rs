@@ -22,6 +22,15 @@ pub struct InstanceSource {
 
 impl InstanceSource {
     pub fn poll(&mut self) -> io::Result<Option<String>> {
+        // A persisted output log is not proof that the user is still in that instance. Keep the
+        // location unavailable whenever the Proton VRChat process itself is gone.
+        if !vrchat_process_active() {
+            self.path = None;
+            self.offset = 0;
+            self.current = None;
+            return Ok(None);
+        }
+
         let next_path = latest_log_path();
         if next_path != self.path {
             self.path = next_path;
@@ -55,6 +64,32 @@ pub fn parse_instance_id(line: &str) -> Option<&str> {
     let offset = line.rfind(JOIN_MARKER)? + JOIN_MARKER.len();
     let instance_id = line.get(offset..)?.trim();
     (!instance_id.is_empty()).then_some(instance_id)
+}
+
+fn vrchat_process_active() -> bool {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return false;
+    };
+
+    entries.filter_map(Result::ok).any(|entry| {
+        let name = entry.file_name();
+        if !name.to_string_lossy().bytes().all(|byte| byte.is_ascii_digit()) {
+            return false;
+        }
+
+        let comm = fs::read_to_string(entry.path().join("comm")).unwrap_or_default();
+        if looks_like_vrchat_process(&comm) {
+            return true;
+        }
+
+        let cmdline = fs::read(entry.path().join("cmdline")).unwrap_or_default();
+        let cmdline = String::from_utf8_lossy(&cmdline);
+        looks_like_vrchat_process(&cmdline)
+    })
+}
+
+fn looks_like_vrchat_process(value: &str) -> bool {
+    value.to_ascii_lowercase().contains("vrchat.exe")
 }
 
 fn latest_log_path() -> Option<PathBuf> {
@@ -182,5 +217,15 @@ mod tests {
             parse_instance_id("2026.10.24 01:23:45 Log -  [Behaviour] Joining "),
             None
         );
+    }
+
+    #[test]
+    fn proton_process_match_is_case_insensitive_and_specific() {
+        assert!(looks_like_vrchat_process("VRChat.exe\n"));
+        assert!(looks_like_vrchat_process(
+            "C:\\Program Files (x86)\\Steam\\steamapps\\common\\VRChat\\VRChat.exe"
+        ));
+        assert!(!looks_like_vrchat_process("vrserver.exe"));
+        assert!(!looks_like_vrchat_process("nightshift-vrchat"));
     }
 }
