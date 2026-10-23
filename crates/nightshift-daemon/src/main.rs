@@ -189,6 +189,12 @@ async fn send_message(
     Ok(())
 }
 
+enum ClientStep {
+    Continue,
+    Resync,
+    Break,
+}
+
 async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -241,33 +247,31 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
 
     loop {
         line.clear();
-        tokio::select! {
+        let step = tokio::select! {
             read = reader.read_line(&mut line) => {
                 if read? == 0 {
-                    break;
-                }
-
-                match serde_json::from_str::<ClientMessage>(line.trim_end()) {
-                    Ok(ClientMessage::GetState) => {
-                        let (snapshot, new_updates) = store.snapshot_and_subscribe().await;
-                        updates = new_updates;
-                        send_message(
-                            &mut write_half,
-                            &ServerMessage::FullState { state: snapshot },
-                        ).await?;
-                    }
-                    Ok(ClientMessage::Command { command }) => store.apply(command).await,
-                    Ok(ClientMessage::Hello { .. }) => {
-                        send_message(
-                            &mut write_half,
-                            &ServerMessage::Error { message: "hello already completed".into() },
-                        ).await?;
-                    }
-                    Err(error) => {
-                        send_message(
-                            &mut write_half,
-                            &ServerMessage::Error { message: error.to_string() },
-                        ).await?;
+                    ClientStep::Break
+                } else {
+                    match serde_json::from_str::<ClientMessage>(line.trim_end()) {
+                        Ok(ClientMessage::GetState) => ClientStep::Resync,
+                        Ok(ClientMessage::Command { command }) => {
+                            store.apply(command).await;
+                            ClientStep::Continue
+                        }
+                        Ok(ClientMessage::Hello { .. }) => {
+                            send_message(
+                                &mut write_half,
+                                &ServerMessage::Error { message: "hello already completed".into() },
+                            ).await?;
+                            ClientStep::Continue
+                        }
+                        Err(error) => {
+                            send_message(
+                                &mut write_half,
+                                &ServerMessage::Error { message: error.to_string() },
+                            ).await?;
+                            ClientStep::Continue
+                        }
                     }
                 }
             }
@@ -275,18 +279,28 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
                 match event {
                     Ok(event) => {
                         send_message(&mut write_half, &ServerMessage::Event { event }).await?;
+                        ClientStep::Continue
                     }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        let (snapshot, new_updates) = store.snapshot_and_subscribe().await;
-                        updates = new_updates;
-                        send_message(
-                            &mut write_half,
-                            &ServerMessage::FullState { state: snapshot },
-                        ).await?;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Lagged(_)) => ClientStep::Resync,
+                    Err(broadcast::error::RecvError::Closed) => ClientStep::Break,
                 }
             }
+        };
+
+        match step {
+            ClientStep::Continue => {}
+            ClientStep::Resync => {
+                // Replacing the receiver after the select future has completed avoids
+                // both stale queued deltas and a receiver-borrow lifetime hazard.
+                let (snapshot, new_updates) = store.snapshot_and_subscribe().await;
+                updates = new_updates;
+                send_message(
+                    &mut write_half,
+                    &ServerMessage::FullState { state: snapshot },
+                )
+                .await?;
+            }
+            ClientStep::Break => break,
         }
     }
 
