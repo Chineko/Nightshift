@@ -2,10 +2,11 @@ mod config;
 
 use std::{
     env,
+    os::unix::fs::PermissionsExt,
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -36,6 +37,8 @@ struct StateStore {
     vrchat_clients: Arc<AtomicUsize>,
     transition_generation: Arc<AtomicU64>,
     config_updates: watch::Sender<PersistedConfig>,
+    config_save_lock: Arc<Mutex<()>>,
+    config_writer_shutdown: Arc<AtomicBool>,
     hr_detector: Arc<Mutex<CalmPeriodDetector>>,
     started: Instant,
 }
@@ -45,11 +48,19 @@ impl StateStore {
         let (updates, _) = broadcast::channel(64);
         let initial_config = PersistedConfig::from_state(&initial_state);
         let (config_updates, mut config_rx) = watch::channel(initial_config);
+        let config_save_lock = Arc::new(Mutex::new(()));
+        let config_writer_shutdown = Arc::new(AtomicBool::new(false));
+        let writer_save_lock = config_save_lock.clone();
+        let writer_shutdown = config_writer_shutdown.clone();
 
         tokio::spawn(async move {
             while config_rx.changed().await.is_ok() {
                 tokio::time::sleep(CONFIG_WRITE_DEBOUNCE).await;
                 let config = config_rx.borrow_and_update().clone();
+                let _save_guard = writer_save_lock.lock().await;
+                if writer_shutdown.load(Ordering::Acquire) {
+                    break;
+                }
                 if let Err(error) = config.save().await {
                     warn!(%error, "failed to persist Nightshift settings");
                 }
@@ -65,6 +76,8 @@ impl StateStore {
             vrchat_clients: Arc::new(AtomicUsize::new(0)),
             transition_generation: Arc::new(AtomicU64::new(0)),
             config_updates,
+            config_save_lock,
+            config_writer_shutdown,
             hr_detector: Arc::new(Mutex::new(CalmPeriodDetector::default())),
             started: Instant::now(),
         }
@@ -78,6 +91,16 @@ impl StateStore {
         let state = self.state.lock().await;
         let updates = self.updates.subscribe();
         (state.clone(), updates)
+    }
+
+    async fn flush_config(&self) -> Result<()> {
+        self.config_writer_shutdown.store(true, Ordering::Release);
+        let config = {
+            let state = self.state.lock().await;
+            PersistedConfig::from_state(&state)
+        };
+        let _save_guard = self.config_save_lock.lock().await;
+        config.save().await
     }
 
     fn emit_changes(&self, before: &AppState, after: &AppState) {
@@ -717,6 +740,9 @@ async fn main() -> Result<()> {
     let path = socket_path()?;
     let parent = path.parent().context("socket path has no parent")?;
     tokio::fs::create_dir_all(parent).await?;
+    tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+        .await
+        .with_context(|| format!("securing runtime directory {}", parent.display()))?;
 
     if tokio::fs::try_exists(&path).await? {
         match UnixStream::connect(&path).await {
@@ -738,6 +764,9 @@ async fn main() -> Result<()> {
 
     let listener = UnixListener::bind(&path)
         .with_context(|| format!("failed to bind {}", path.display()))?;
+    tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .with_context(|| format!("securing IPC socket {}", path.display()))?;
     info!(path = %path.display(), "Nightshift IPC ready");
 
     let mut initial_state = AppState::default();
@@ -770,6 +799,9 @@ async fn main() -> Result<()> {
         }
     }
 
+    if let Err(error) = store.flush_config().await {
+        warn!(%error, "failed to flush Nightshift settings during shutdown");
+    }
     let _ = tokio::fs::remove_file(&path).await;
     Ok(())
 }
