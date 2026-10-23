@@ -1,3 +1,5 @@
+mod config;
+
 use std::{
     env,
     path::PathBuf,
@@ -9,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use config::PersistedConfig;
 use nightshift_protocol::{
     AppState, Capability, ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
     UiCommand,
@@ -28,10 +31,10 @@ struct StateStore {
 }
 
 impl StateStore {
-    fn new() -> Self {
+    fn new(initial_state: AppState) -> Self {
         let (updates, _) = broadcast::channel(64);
         Self {
-            state: Arc::new(Mutex::new(AppState::default())),
+            state: Arc::new(Mutex::new(initial_state)),
             updates,
             overlay_clients: Arc::new(AtomicUsize::new(0)),
         }
@@ -118,6 +121,19 @@ impl StateStore {
     }
 
     async fn apply(&self, command: UiCommand) {
+        let persist = matches!(
+            &command,
+            UiCommand::SetSleepBrightness(_)
+                | UiCommand::SetFadeDuration(_)
+                | UiCommand::SetHrMonitoring(_)
+                | UiCommand::SetSleepDetection(_)
+                | UiCommand::SetOscAutomation(_)
+                | UiCommand::SetVrchatSleepStatus(_)
+                | UiCommand::SetVrchatWakeStatus(_)
+                | UiCommand::SetInviteAutomation(_)
+                | UiCommand::SetInviteProfile(_)
+        );
+
         let mut state = self.state.lock().await;
         let before = state.clone();
         let mut transition = None;
@@ -174,7 +190,14 @@ impl StateStore {
         if *state != before {
             self.emit_changes(&before, &state);
         }
+        let config_to_save = persist.then(|| PersistedConfig::from_state(&state));
         drop(state);
+
+        if let Some(config) = config_to_save {
+            if let Err(error) = config.save().await {
+                warn!(%error, "failed to persist Nightshift settings");
+            }
+        }
 
         if let Some((expected_phase, final_phase, final_brightness, seconds)) = transition {
             let store = self.clone();
@@ -399,7 +422,17 @@ async fn main() -> Result<()> {
         .with_context(|| format!("failed to bind {}", path.display()))?;
     info!(path = %path.display(), "Nightshift IPC ready");
 
-    let store = StateStore::new();
+    let mut initial_state = AppState::default();
+    match PersistedConfig::load().await {
+        Ok(config) => {
+            config.apply_to_state(&mut initial_state);
+            info!("loaded persisted Nightshift settings");
+        }
+        Err(error) => {
+            warn!(%error, "failed to load Nightshift settings; using defaults");
+        }
+    }
+    let store = StateStore::new(initial_state);
 
     loop {
         tokio::select! {
