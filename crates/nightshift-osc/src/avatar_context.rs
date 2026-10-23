@@ -116,7 +116,7 @@ fn child<'a>(node: &'a OscQueryNode, name: &str) -> Option<&'a OscQueryNode> {
 }
 
 fn collect_parameters(node: &OscQueryNode, out: &mut Vec<AvatarParameter>) {
-    if let Some(contents) = node.contents.as_ref() {
+    if let Some(contents) = node.contents.as_ref().filter(|contents| !contents.is_empty()) {
         for child in contents.values() {
             collect_parameters(child, out);
         }
