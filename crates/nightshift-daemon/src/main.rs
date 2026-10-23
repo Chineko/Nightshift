@@ -83,10 +83,15 @@ impl StateStore {
 
         let before = state.clone();
         state.sleep.phase = final_phase;
-        state.brightness.current = final_brightness;
-        state.brightness.target = final_brightness;
+
+        // A manual brightness change during a transition cancels the automatic
+        // brightness target, but it should not leave the sleep phase stuck.
+        if !state.brightness.manual_override {
+            state.brightness.current = final_brightness;
+            state.brightness.target = final_brightness;
+        }
         state.brightness.transitioning = false;
-        state.brightness.manual_override = false;
+
         self.emit_changes(&before, &state);
     }
 
