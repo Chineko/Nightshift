@@ -8,7 +8,6 @@ const PANEL: Color32 = Color32::from_rgb(23, 24, 30);
 const MUTED: Color32 = Color32::from_rgb(157, 159, 170);
 const PURPLE: Color32 = Color32::from_rgb(183, 141, 255);
 
-#[derive(Debug)]
 enum AuthCommand {
     Login { username: String, password: String },
     Verify { pending: PendingAuth, code: String },
