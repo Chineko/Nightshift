@@ -15,6 +15,7 @@ members = [
     "crates/nightshift-hr-worker",
     "crates/nightshift-vrchat-api",
     "crates/nightshift-vrchat-session",
+    "crates/nightshift-vrchat-worker",
 ]
 resolver = "2"
 
