@@ -2,7 +2,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use ash::vk::{self, Handle};
@@ -15,28 +15,42 @@ const VIEW_COUNT: u32 = 2;
 const TEST_TEXTURE_SIZE: u32 = 4;
 const DEFAULT_PLACEMENT: u32 = 4;
 const DEFAULT_BRIGHTNESS: f32 = 0.20;
+const DEFAULT_TRANSITION_SECONDS: f32 = 10.0;
 
 fn main() -> Result<()> {
     let brightness = parse_flag_f32("--brightness")?
         .unwrap_or(DEFAULT_BRIGHTNESS)
         .clamp(0.0, 1.0);
+    let transition_seconds = parse_flag_f32("--transition")?
+        .unwrap_or(DEFAULT_TRANSITION_SECONDS)
+        .clamp(0.0, 120.0);
     let placement = parse_flag_u32("--placement")?.unwrap_or(DEFAULT_PLACEMENT);
-    let alpha = 1.0 - brightness;
+    let hydra_mode = has_flag("--hydra-mode");
 
     println!("Nightshift OpenXR dimmer prototype");
     println!("  placement  : {placement}");
-    println!("  brightness : {:.0}%", brightness * 100.0);
-    println!("  dim alpha  : {:.0}%", alpha * 100.0);
+    println!("  target     : {:.0}%", brightness * 100.0);
+    println!("  transition : {transition_seconds:.2}s");
+    println!("  hydra mode : {}", if hydra_mode { "AWAKENED" } else { "sleeping" });
     println!("  Ctrl+C to stop");
     println!();
     println!("If VRChat dims but WayVR stays bright, the tiny evil square has succeeded.");
+    if hydra_mode {
+        println!("Hydra has entered the chat. Terminal dignity is no longer guaranteed.");
+    }
 
     let running = Arc::new(AtomicBool::new(true));
     let signal = running.clone();
     ctrlc::set_handler(move || signal.store(false, Ordering::Relaxed))
         .context("installing Ctrl+C handler")?;
 
-    run_overlay(running, brightness, placement)
+    run_overlay(
+        running,
+        brightness,
+        transition_seconds,
+        placement,
+        hydra_mode,
+    )
 }
 
 fn parse_flag_f32(name: &str) -> Result<Option<f32>> {
@@ -78,8 +92,29 @@ fn parse_flag<T>(name: &str, parse: impl Fn(&str) -> Result<T>) -> Result<Option
     Ok(None)
 }
 
+fn has_flag(name: &str) -> bool {
+    std::env::args().skip(1).any(|arg| arg == name)
+}
+
+fn transition_brightness(target: f32, elapsed: Duration, duration_seconds: f32) -> (f32, f32) {
+    if duration_seconds <= f32::EPSILON {
+        return (target, 1.0);
+    }
+
+    let linear = (elapsed.as_secs_f32() / duration_seconds).clamp(0.0, 1.0);
+    let smooth = linear * linear * (3.0 - 2.0 * linear);
+    let brightness = 1.0 + (target - 1.0) * smooth;
+    (brightness, linear)
+}
+
 #[allow(clippy::too_many_lines)]
-fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Result<()> {
+fn run_overlay(
+    running: Arc<AtomicBool>,
+    target_brightness: f32,
+    transition_seconds: f32,
+    placement: u32,
+    hydra_mode: bool,
+) -> Result<()> {
     let entry = xr::Entry::linked();
     let available = entry
         .enumerate_extensions()
@@ -277,6 +312,8 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
 
         let mut event_storage = xr::EventDataBuffer::new();
         let mut session_running = false;
+        let mut transition_started = None;
+        let mut hydra_frame = 0_u64;
         let rect = xr::Rect2Di {
             offset: xr::Offset2Di { x: 0, y: 0 },
             extent: xr::Extent2Di {
@@ -302,11 +339,13 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
                         xr::SessionState::READY => {
                             session.begin(VIEW_TYPE).context("beginning overlay session")?;
                             session_running = true;
+                            transition_started = Some(Instant::now());
                             println!("Overlay session running. Tiny evil square deployed.");
                         }
                         xr::SessionState::STOPPING => {
                             session.end().context("ending overlay session")?;
                             session_running = false;
+                            transition_started = None;
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
                             break 'main_loop;
@@ -334,6 +373,23 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
                     .end(frame_state.predicted_display_time, blend_mode, &[])
                     .context("xrEndFrame without layers")?;
                 continue;
+            }
+
+            let transition_started = transition_started.get_or_insert_with(Instant::now);
+            let (brightness, progress) = transition_brightness(
+                target_brightness,
+                transition_started.elapsed(),
+                transition_seconds,
+            );
+
+            if hydra_mode {
+                hydra_frame += 1;
+                println!(
+                    "[Hydra/OpenXR] frame={hydra_frame:06} progress={:6.2}% | [Hydra/Vulkan] brightness={:6.2}% alpha={:6.2}% | [Hydra/Rustc] clipboards=0",
+                    progress * 100.0,
+                    brightness * 100.0,
+                    (1.0 - brightness) * 100.0,
+                );
             }
 
             let (_, views) = session
