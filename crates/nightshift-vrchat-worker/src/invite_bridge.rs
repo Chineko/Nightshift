@@ -1,4 +1,6 @@
-use anyhow::{Context, Result};
+use std::sync::{Arc, Mutex};
+
+use anyhow::{Context, Result, anyhow};
 use nightshift_invites::{InviteContext, InviteRules};
 use nightshift_protocol::{InviteProfile, InviteState};
 use nightshift_vrchat_api::{NotificationKind, SessionCookies, VrchatApiClient, VrchatNotification};
@@ -48,6 +50,7 @@ pub async fn handle_invite_notification(
     api: VrchatApiClient,
     cookies: SessionCookies,
     invite_state: InviteState,
+    instance_source: Arc<Mutex<InstanceSource>>,
     notification: VrchatNotification,
 ) -> Result<InviteHandlingResult> {
     let base = |outcome| InviteHandlingResult {
@@ -87,13 +90,16 @@ pub async fn handle_invite_notification(
     let current_instance = if decision == nightshift_protocol::InviteActionKind::Accepted
         && notification.kind == NotificationKind::RequestInvite
     {
-        tokio::task::spawn_blocking(|| {
-            let mut source = InstanceSource::default();
-            source.poll()
+        tokio::task::spawn_blocking(move || -> Result<Option<String>> {
+            let mut source = instance_source
+                .lock()
+                .map_err(|_| anyhow!("VRChat instance source lock was poisoned"))?;
+            source
+                .poll()
+                .context("reading current VRChat instance from local log")
         })
         .await
-        .context("VRChat instance-context task stopped")?
-        .context("reading current VRChat instance from local log")?
+        .context("VRChat instance-context task stopped")??
     } else {
         None
     };
