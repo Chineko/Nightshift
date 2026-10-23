@@ -11,3 +11,6 @@ anyhow.workspace = true
 nightshift-vrchat-api = { path = "../nightshift-vrchat-api" }
 nightshift-vrchat-session = { path = "../nightshift-vrchat-session" }
 tokio.workspace = true
+
+[dev-dependencies]
+nightshift-protocol = { path = "../nightshift-protocol" }
