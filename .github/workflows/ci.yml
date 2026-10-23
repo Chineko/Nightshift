@@ -21,14 +21,17 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Check protocol
-        run: cargo check -p nightshift-protocol
+      - name: Test protocol compatibility
+        run: cargo test -p nightshift-protocol
 
       - name: Check daemon
         run: cargo check -p nightshift-daemon
 
       - name: Check overlay
         run: cargo check -p nightshift-overlay
+
+      - name: Check desktop UI
+        run: cargo check -p nightshift-ui
 
       - name: Check CLI
         run: cargo check -p nightshiftctl
