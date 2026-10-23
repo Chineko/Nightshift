@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use ash::vk::{self, Handle};
+use nightshift_pose::{PoseTracker, SleepingPose as DetectedPose};
 use nightshift_protocol::{
-    AppState, ClientMessage, PROTOCOL_VERSION, ServerMessage, StateEvent,
+    AppState, ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepingPose, StateEvent, WorkerReport,
 };
 use openxr as xr;
 use xr::OverlaySessionCreateFlagsEXTX;
@@ -21,7 +22,7 @@ use xr::sys::Handle as XrHandle;
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const VIEW_COUNT: u32 = 2;
-const TEST_TEXTURE_SIZE: u32 = 4;
+const DIMMER_TEXTURE_SIZE: u32 = 4;
 const DEFAULT_PLACEMENT: u32 = 4;
 const DEFAULT_TRANSITION_SECONDS: f32 = 3.0;
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
@@ -66,7 +67,7 @@ fn main() -> Result<()> {
     let placement = parse_flag_u32("--placement")?.unwrap_or(DEFAULT_PLACEMENT);
     let hydra_mode = has_flag("--hydra-mode");
 
-    println!("Nightshift integrated OpenXR prototype");
+    println!("Nightshift OpenXR overlay");
     println!("  placement  : {placement}");
     println!("  daemon IPC : enabled");
     println!("  fallback fade default : {DEFAULT_TRANSITION_SECONDS:.1}s");
@@ -84,9 +85,10 @@ fn main() -> Result<()> {
         .context("installing Ctrl+C handler")?;
 
     let (updates_tx, updates_rx) = mpsc::channel();
-    spawn_ipc_client(running.clone(), updates_tx, hydra_mode);
+    let (reports_tx, reports_rx) = mpsc::channel();
+    spawn_ipc_client(running.clone(), updates_tx, reports_rx, hydra_mode);
 
-    run_overlay(running, updates_rx, placement, hydra_mode)
+    run_overlay(running, updates_rx, reports_tx, placement, hydra_mode)
 }
 
 fn parse_flag_u32(name: &str) -> Result<Option<u32>> {
@@ -132,6 +134,7 @@ fn socket_path() -> Result<PathBuf> {
 fn spawn_ipc_client(
     running: Arc<AtomicBool>,
     updates: Sender<OverlayTarget>,
+    reports: Receiver<WorkerReport>,
     hydra_mode: bool,
 ) {
     thread::spawn(move || {
@@ -150,7 +153,9 @@ fn spawn_ipc_client(
                 Ok(stream) => {
                     announced_waiting = false;
                     println!("Nightshift overlay connected to daemon IPC.");
-                    if let Err(error) = run_ipc_connection(stream, &updates, &running, hydra_mode) {
+                    if let Err(error) =
+                        run_ipc_connection(stream, &updates, &reports, &running, hydra_mode)
+                    {
                         if running.load(Ordering::Relaxed) {
                             eprintln!("Nightshift overlay IPC disconnected: {error:#}");
                         }
@@ -174,34 +179,55 @@ fn spawn_ipc_client(
     });
 }
 
+fn write_client_message(writer: &mut UnixStream, message: &ClientMessage) -> Result<()> {
+    let mut json = serde_json::to_vec(message).context("serializing daemon IPC message")?;
+    json.push(b'\n');
+    writer.write_all(&json).context("sending daemon IPC message")?;
+    writer.flush().context("flushing daemon IPC message")?;
+    Ok(())
+}
+
+fn flush_worker_reports(
+    writer: &mut UnixStream,
+    reports: &Receiver<WorkerReport>,
+    hydra_mode: bool,
+) -> Result<()> {
+    while let Ok(report) = reports.try_recv() {
+        if hydra_mode {
+            println!("[Hydra/Pose] report={report:?}");
+        }
+        write_client_message(writer, &ClientMessage::Report { report })?;
+    }
+    Ok(())
+}
+
 fn run_ipc_connection(
     stream: UnixStream,
     updates: &Sender<OverlayTarget>,
+    reports: &Receiver<WorkerReport>,
     running: &AtomicBool,
     hydra_mode: bool,
 ) -> Result<()> {
     stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
+        .set_read_timeout(Some(Duration::from_millis(250)))
         .context("setting daemon IPC read timeout")?;
 
     let mut writer = stream.try_clone().context("cloning daemon IPC socket")?;
-    let hello = ClientMessage::Hello {
-        protocol: PROTOCOL_VERSION,
-        client: "nightshift-overlay-prototype".into(),
-        client_version: env!("CARGO_PKG_VERSION").into(),
-    };
-    let mut hello_json = serde_json::to_vec(&hello).context("serializing daemon hello")?;
-    hello_json.push(b'\n');
-    writer
-        .write_all(&hello_json)
-        .context("sending daemon hello")?;
-    writer.flush().context("flushing daemon hello")?;
+    write_client_message(
+        &mut writer,
+        &ClientMessage::Hello {
+            protocol: PROTOCOL_VERSION,
+            client: "nightshift-overlay".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+        },
+    )?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let mut fade_seconds = DEFAULT_TRANSITION_SECONDS;
 
     while running.load(Ordering::Relaxed) {
+        flush_worker_reports(&mut writer, reports, hydra_mode)?;
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => bail!("daemon closed the socket"),
@@ -310,10 +336,25 @@ fn send_state_target(
         .map_err(|_| anyhow!("overlay renderer stopped"))
 }
 
+fn protocol_pose(pose: DetectedPose) -> SleepingPose {
+    match pose {
+        DetectedPose::Unknown => SleepingPose::Unknown,
+        DetectedPose::Front => SleepingPose::Front,
+        DetectedPose::Back => SleepingPose::Back,
+        DetectedPose::Left => SleepingPose::Left,
+        DetectedPose::Right => SleepingPose::Right,
+    }
+}
+
+fn report_pose(reports: &Sender<WorkerReport>, pose: SleepingPose) {
+    let _ = reports.send(WorkerReport::SleepingPose { pose });
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_overlay(
     running: Arc<AtomicBool>,
     updates: Receiver<OverlayTarget>,
+    reports: Sender<WorkerReport>,
     placement: u32,
     hydra_mode: bool,
 ) -> Result<()> {
@@ -336,7 +377,7 @@ fn run_overlay(
     let xr_instance = entry
         .create_instance(
             &xr::ApplicationInfo {
-                application_name: "nightshift-overlay-prototype",
+                application_name: "nightshift-overlay",
                 application_version: 1,
                 engine_name: "nightshift",
                 engine_version: 1,
@@ -475,8 +516,8 @@ fn run_overlay(
                     | xr::SwapchainUsageFlags::TRANSFER_DST,
                 format: format.as_raw() as u32,
                 sample_count: 1,
-                width: TEST_TEXTURE_SIZE,
-                height: TEST_TEXTURE_SIZE,
+                width: DIMMER_TEXTURE_SIZE,
+                height: DIMMER_TEXTURE_SIZE,
                 face_count: 1,
                 array_size: VIEW_COUNT,
                 mip_count: 1,
@@ -517,11 +558,13 @@ fn run_overlay(
         let mut current_brightness = 1.0_f32;
         let mut fade: Option<Fade> = None;
         let mut hydra_frame = 0_u64;
+        let pose_clock = Instant::now();
+        let mut pose_tracker = PoseTracker::new(0);
         let rect = xr::Rect2Di {
             offset: xr::Offset2Di { x: 0, y: 0 },
             extent: xr::Extent2Di {
-                width: TEST_TEXTURE_SIZE as i32,
-                height: TEST_TEXTURE_SIZE as i32,
+                width: DIMMER_TEXTURE_SIZE as i32,
+                height: DIMMER_TEXTURE_SIZE as i32,
             },
         };
         let subresource = vk::ImageSubresourceRange {
@@ -542,18 +585,25 @@ fn run_overlay(
                         xr::SessionState::READY => {
                             session.begin(VIEW_TYPE).context("beginning overlay session")?;
                             session_running = true;
+                            let now_ms = pose_clock.elapsed().as_millis() as u64;
+                            pose_tracker = PoseTracker::new(now_ms);
                             println!("Overlay session running. Tiny evil square deployed.");
                         }
                         xr::SessionState::STOPPING => {
                             session.end().context("ending overlay session")?;
                             session_running = false;
+                            report_pose(&reports, SleepingPose::Unknown);
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
+                            report_pose(&reports, SleepingPose::Unknown);
                             break 'main_loop;
                         }
                         _ => {}
                     },
-                    xr::Event::InstanceLossPending(_) => break 'main_loop,
+                    xr::Event::InstanceLossPending(_) => {
+                        report_pose(&reports, SleepingPose::Unknown);
+                        break 'main_loop;
+                    }
                     xr::Event::EventsLost(event) => {
                         eprintln!("OpenXR reports {} lost events", event.lost_event_count());
                     }
@@ -622,6 +672,27 @@ fn run_overlay(
                 .context("locating stereo views")?;
             if views.len() != VIEW_COUNT as usize {
                 bail!("expected {VIEW_COUNT} views, runtime returned {}", views.len());
+            }
+
+            let now_ms = pose_clock.elapsed().as_millis() as u64;
+            if let Some(stable_pose) = pose_tracker.advance(now_ms) {
+                let pose = protocol_pose(stable_pose);
+                if hydra_mode {
+                    println!("[Hydra/Pose] stable={pose:?}");
+                }
+                report_pose(&reports, pose);
+            }
+            if pose_tracker.sample_due(now_ms) {
+                let orientation = views[0].pose.orientation;
+                pose_tracker.sample(
+                    now_ms,
+                    [
+                        orientation.x as f64,
+                        orientation.y as f64,
+                        orientation.z as f64,
+                        orientation.w as f64,
+                    ],
+                );
             }
 
             let image_index = swapchain.acquire_image().context("acquiring dimmer image")?;
@@ -746,6 +817,8 @@ fn run_overlay(
                 )
                 .context("submitting dimmer composition layer")?;
         }
+
+        report_pose(&reports, SleepingPose::Unknown);
 
         if session_running {
             let _ = session.request_exit();
