@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 nightshift-protocol = { path = "../nightshift-protocol" }
+oyasumivr_oscquery = { git = "https://github.com/Raphiiko/oyasumivr_oscquery.git", rev = "1bfd8ea4943822ebda2538c7c0d46a484cc5e96d" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rosc = "0.10"
 serde.workspace = true
 serde_json.workspace = true
