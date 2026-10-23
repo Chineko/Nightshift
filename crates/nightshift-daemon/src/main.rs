@@ -357,6 +357,9 @@ impl StateStore {
         );
 
         let mut state = self.state.lock().await;
+        if self.config_writer_shutdown.load(Ordering::Acquire) {
+            return;
+        }
         let before = state.clone();
         let mut transition = None;
         let mut manual_wake = false;
