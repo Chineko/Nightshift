@@ -19,9 +19,11 @@ use nightshift_protocol::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{Mutex, broadcast, mpsc},
+    sync::{Mutex, broadcast, watch},
 };
 use tracing::{info, warn};
+
+const CONFIG_WRITE_DEBOUNCE: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 struct StateStore {
@@ -29,16 +31,19 @@ struct StateStore {
     updates: broadcast::Sender<StateEvent>,
     overlay_clients: Arc<AtomicUsize>,
     transition_generation: Arc<AtomicU64>,
-    config_updates: mpsc::UnboundedSender<PersistedConfig>,
+    config_updates: watch::Sender<PersistedConfig>,
 }
 
 impl StateStore {
     fn new(initial_state: AppState) -> Self {
         let (updates, _) = broadcast::channel(64);
-        let (config_updates, mut config_rx) = mpsc::unbounded_channel::<PersistedConfig>();
+        let initial_config = PersistedConfig::from_state(&initial_state);
+        let (config_updates, mut config_rx) = watch::channel(initial_config);
 
         tokio::spawn(async move {
-            while let Some(config) = config_rx.recv().await {
+            while config_rx.changed().await.is_ok() {
+                tokio::time::sleep(CONFIG_WRITE_DEBOUNCE).await;
+                let config = config_rx.borrow_and_update().clone();
                 if let Err(error) = config.save().await {
                     warn!(%error, "failed to persist Nightshift settings");
                 }
@@ -212,10 +217,8 @@ impl StateStore {
             self.emit_changes(&before, &state);
         }
         if persist {
-            let config = PersistedConfig::from_state(&state);
-            if self.config_updates.send(config).is_err() {
-                warn!("Nightshift config writer stopped unexpectedly");
-            }
+            self.config_updates
+                .send_replace(PersistedConfig::from_state(&state));
         }
         drop(state);
 
