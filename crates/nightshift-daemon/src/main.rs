@@ -8,28 +8,61 @@ use nightshift_protocol::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{Mutex, watch},
+    sync::{Mutex, broadcast},
 };
 use tracing::{info, warn};
 
 #[derive(Clone)]
 struct StateStore {
     state: Arc<Mutex<AppState>>,
-    updates: watch::Sender<AppState>,
+    updates: broadcast::Sender<StateEvent>,
 }
 
 impl StateStore {
     fn new() -> Self {
-        let state = AppState::default();
-        let (updates, _) = watch::channel(state.clone());
+        let (updates, _) = broadcast::channel(64);
         Self {
-            state: Arc::new(Mutex::new(state)),
+            state: Arc::new(Mutex::new(AppState::default())),
             updates,
         }
     }
 
     async fn snapshot(&self) -> AppState {
         self.state.lock().await.clone()
+    }
+
+    fn emit_changes(&self, before: &AppState, after: &AppState) {
+        let mut emit = |event| {
+            let _ = self.updates.send(event);
+        };
+
+        if before.connection != after.connection {
+            emit(StateEvent::ConnectionChanged(after.connection));
+        }
+        if before.sleep != after.sleep {
+            emit(StateEvent::SleepChanged(after.sleep.clone()));
+        }
+        if before.brightness != after.brightness {
+            emit(StateEvent::BrightnessChanged(after.brightness.clone()));
+        }
+        if before.heart_rate != after.heart_rate {
+            emit(StateEvent::HeartRateChanged(after.heart_rate.clone()));
+        }
+        if before.osc != after.osc {
+            emit(StateEvent::OscChanged(after.osc.clone()));
+        }
+        if before.vrchat != after.vrchat {
+            emit(StateEvent::VrchatChanged(after.vrchat.clone()));
+        }
+        if before.invites != after.invites {
+            emit(StateEvent::InvitesChanged(after.invites.clone()));
+        }
+        if before.overlay != after.overlay {
+            emit(StateEvent::OverlayChanged(after.overlay.clone()));
+        }
+        if before.settings != after.settings {
+            emit(StateEvent::SettingsChanged(after.settings.clone()));
+        }
     }
 
     async fn apply(&self, command: UiCommand) {
@@ -59,12 +92,14 @@ impl StateStore {
             UiCommand::SetSleepBrightness(value) => {
                 state.brightness.sleep_target = value.clamp(0.02, 1.0);
             }
+            UiCommand::SetFadeDuration(seconds) => {
+                state.settings.fade_duration_seconds = seconds.clamp(0.0, 120.0);
+            }
             UiCommand::SetHrMonitoring(enabled) => state.heart_rate.enabled = enabled,
             UiCommand::SetSleepDetection(enabled) => state.sleep.detection_enabled = enabled,
             UiCommand::SetOscAutomation(enabled) => state.osc.enabled = enabled,
-            UiCommand::SetVrchatSleepStatus(status) | UiCommand::SetVrchatWakeStatus(status) => {
-                state.vrchat.status = status;
-            }
+            UiCommand::SetVrchatSleepStatus(status) => state.settings.sleep_vrchat_status = status,
+            UiCommand::SetVrchatWakeStatus(status) => state.settings.wake_vrchat_status = status,
             UiCommand::SetInviteAutomation(enabled) => state.invites.enabled = enabled,
             UiCommand::SetInviteProfile(profile) => state.invites.profile = profile,
             UiCommand::ShowOverlay => state.overlay.visible = true,
@@ -72,7 +107,7 @@ impl StateStore {
         }
 
         if *state != before {
-            self.updates.send_replace(state.clone());
+            self.emit_changes(&before, &state);
         }
     }
 }
@@ -112,9 +147,7 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
         send_message(
             &mut write_half,
             &ServerMessage::Error {
-                message: format!(
-                    "protocol mismatch: client={protocol}, server={PROTOCOL_VERSION}"
-                ),
+                message: format!("protocol mismatch: client={protocol}, server={PROTOCOL_VERSION}"),
             },
         )
         .await?;
@@ -141,9 +174,7 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
 
     send_message(
         &mut write_half,
-        &ServerMessage::FullState {
-            state: store.snapshot().await,
-        },
+        &ServerMessage::FullState { state: store.snapshot().await },
     )
     .await?;
 
@@ -179,15 +210,19 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
                     }
                 }
             }
-            changed = updates.changed() => {
-                if changed.is_err() {
-                    break;
+            event = updates.recv() => {
+                match event {
+                    Ok(event) => {
+                        send_message(&mut write_half, &ServerMessage::Event { event }).await?;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        send_message(
+                            &mut write_half,
+                            &ServerMessage::FullState { state: store.snapshot().await },
+                        ).await?;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
-                let state = updates.borrow_and_update().clone();
-                send_message(
-                    &mut write_half,
-                    &ServerMessage::Event { event: StateEvent::FullState(state) },
-                ).await?;
             }
         }
     }
