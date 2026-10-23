@@ -432,9 +432,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         sleeping,
                     )
                     .await;
-                    if gogo_enabled {
-                        refresh_avatar_context(&mut avatar_context).await;
-                    }
+                    refresh_avatar_context(&mut avatar_context).await;
                 } else {
                     sender = None;
                     avatar_context = None;
@@ -460,9 +458,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                             sleeping,
                         )
                         .await;
-                        if gogo_enabled {
-                            refresh_avatar_context(&mut avatar_context).await;
-                        }
+                        refresh_avatar_context(&mut avatar_context).await;
                     } else {
                         sender = None;
                         avatar_context = None;
@@ -478,9 +474,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     let was_enabled = gogo_enabled;
                     gogo_enabled = settings.gogo_automation_enabled;
                     if was_enabled && !gogo_enabled {
-                        scripts.abort(SLEEP_TRANSITION_GROUP);
                         scripts.abort(SLEEP_POSE_GROUP);
-                        avatar_context = None;
                     } else if enabled && !was_enabled && gogo_enabled {
                         refresh_avatar_context(&mut avatar_context).await;
                     }
@@ -505,9 +499,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                             if sender.is_none() {
                                 sender = Some(osc_sender().await?);
                             }
-                            if gogo_enabled {
-                                refresh_avatar_context(&mut avatar_context).await;
-                            }
+                            refresh_avatar_context(&mut avatar_context).await;
                             report_runtime_if_changed(
                                 &mut write_half,
                                 &mut last_report,
