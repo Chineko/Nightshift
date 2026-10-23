@@ -181,14 +181,19 @@ impl LoginApp {
 }
 
 impl eframe::App for LoginApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_updates();
+    }
 
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(24))
-            .show(ctx, |ui| {
-                ui.visuals_mut().dark_mode = true;
-                ui.visuals_mut().override_text_color = Some(Color32::from_rgb(238, 238, 242));
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui.visuals_mut().dark_mode = true;
+        ui.visuals_mut().panel_fill = BG;
+        ui.visuals_mut().override_text_color = Some(Color32::from_rgb(238, 238, 242));
+
+        egui::Frame::central_panel(ui.style())
+            .fill(BG)
+            .inner_margin(24)
+            .show(ui, |ui| {
                 ui.heading(RichText::new("Connect VRChat").size(26.0));
                 ui.label(
                     RichText::new(
