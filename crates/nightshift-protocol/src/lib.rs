@@ -211,6 +211,7 @@ pub enum WorkerReport {
         gogo_detected: bool,
     },
     SleepingPose { pose: SleepingPose },
+    HeartRateRuntime { connected: bool, bpm: Option<u16> },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
