@@ -10,6 +10,7 @@ publish = false
 anyhow.workspace = true
 ash = { version = "0.38", default-features = false, features = ["loaded"] }
 ctrlc = "3.4"
+nightshift-pose = { path = "../nightshift-pose" }
 nightshift-protocol = { path = "../nightshift-protocol" }
 openxr = { version = "0.21.1", features = ["linked"] }
 serde_json.workspace = true
