@@ -11,3 +11,4 @@ anyhow.workspace = true
 btleplug = "0.13.3"
 futures-util = "0.3"
 tokio.workspace = true
+uuid = "1"
