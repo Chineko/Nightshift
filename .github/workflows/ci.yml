@@ -54,6 +54,9 @@ jobs:
       - name: Test VRChat session storage
         run: cargo test -p nightshift-vrchat-session
 
+      - name: Test VRChat authentication service
+        run: cargo test -p nightshift-vrchat-auth
+
       - name: Test VRChat status policy
         run: cargo test -p nightshift-vrchat-status
 
