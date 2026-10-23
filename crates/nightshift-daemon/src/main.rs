@@ -19,7 +19,7 @@ use nightshift_protocol::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{Mutex, broadcast},
+    sync::{Mutex, broadcast, mpsc},
 };
 use tracing::{info, warn};
 
@@ -28,15 +28,27 @@ struct StateStore {
     state: Arc<Mutex<AppState>>,
     updates: broadcast::Sender<StateEvent>,
     overlay_clients: Arc<AtomicUsize>,
+    config_updates: mpsc::UnboundedSender<PersistedConfig>,
 }
 
 impl StateStore {
     fn new(initial_state: AppState) -> Self {
         let (updates, _) = broadcast::channel(64);
+        let (config_updates, mut config_rx) = mpsc::unbounded_channel::<PersistedConfig>();
+
+        tokio::spawn(async move {
+            while let Some(config) = config_rx.recv().await {
+                if let Err(error) = config.save().await {
+                    warn!(%error, "failed to persist Nightshift settings");
+                }
+            }
+        });
+
         Self {
             state: Arc::new(Mutex::new(initial_state)),
             updates,
             overlay_clients: Arc::new(AtomicUsize::new(0)),
+            config_updates,
         }
     }
 
@@ -190,14 +202,13 @@ impl StateStore {
         if *state != before {
             self.emit_changes(&before, &state);
         }
-        let config_to_save = persist.then(|| PersistedConfig::from_state(&state));
-        drop(state);
-
-        if let Some(config) = config_to_save {
-            if let Err(error) = config.save().await {
-                warn!(%error, "failed to persist Nightshift settings");
+        if persist {
+            let config = PersistedConfig::from_state(&state);
+            if self.config_updates.send(config).is_err() {
+                warn!("Nightshift config writer stopped unexpectedly");
             }
         }
+        drop(state);
 
         if let Some((expected_phase, final_phase, final_brightness, seconds)) = transition {
             let store = self.clone();
