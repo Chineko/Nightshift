@@ -27,8 +27,8 @@ jobs:
       - name: Test invite rules
         run: cargo test -p nightshift-invites
 
-      - name: Check daemon
-        run: cargo check -p nightshift-daemon
+      - name: Test daemon state machine
+        run: cargo test -p nightshift-daemon
 
       - name: Check overlay
         run: cargo check -p nightshift-overlay
