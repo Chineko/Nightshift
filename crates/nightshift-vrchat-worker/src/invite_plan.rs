@@ -1,6 +1,8 @@
 use nightshift_protocol::InviteActionKind;
 use nightshift_vrchat_api::{NotificationKind, VrchatNotification};
 
+pub const DEFAULT_DECLINE_RESPONSE_SLOT: u8 = 0;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InviteExecutionPlan {
     None,
@@ -11,7 +13,10 @@ pub enum InviteExecutionPlan {
         instance_id: String,
     },
     /// Declines are sent through VRChat's invite-response endpoint, then hidden after success.
-    Decline { notification_id: String },
+    Decline {
+        notification_id: String,
+        response_slot: u8,
+    },
     /// A request was policy-accepted but we cannot safely invite without a live instance.
     MissingCurrentInstance,
     /// Normal incoming invites need a separate join policy; never reinterpret Accepted as join.
@@ -27,6 +32,7 @@ pub fn plan_invite_action(
         InviteActionKind::Ignored | InviteActionKind::Asked => InviteExecutionPlan::None,
         InviteActionKind::Declined => InviteExecutionPlan::Decline {
             notification_id: notification.id.clone(),
+            response_slot: DEFAULT_DECLINE_RESPONSE_SLOT,
         },
         InviteActionKind::Accepted => match notification.kind {
             NotificationKind::RequestInvite => match current_instance {
@@ -92,12 +98,13 @@ mod tests {
     }
 
     #[test]
-    fn decline_works_for_both_notification_kinds() {
+    fn decline_works_for_both_notification_kinds_with_default_slot() {
         for kind in [NotificationKind::Invite, NotificationKind::RequestInvite] {
             assert_eq!(
                 plan_invite_action(&notification(kind), InviteActionKind::Declined, None),
                 InviteExecutionPlan::Decline {
                     notification_id: "not_test".into(),
+                    response_slot: 0,
                 }
             );
         }
