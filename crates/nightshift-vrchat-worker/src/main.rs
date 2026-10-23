@@ -43,6 +43,11 @@ impl Drop for AbortTask {
     }
 }
 
+struct StatusTaskResult {
+    generation: u64,
+    result: Result<WorkerReport>,
+}
+
 fn socket_path() -> Result<PathBuf> {
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -203,17 +208,18 @@ async fn report_if_changed(
 
 fn schedule_status_update(
     task: &mut AbortTask,
-    result_tx: mpsc::UnboundedSender<Result<WorkerReport>>,
+    result_tx: mpsc::UnboundedSender<StatusTaskResult>,
     api: VrchatApiClient,
     store: VrchatSessionStore,
     target: VrchatStatus,
     last_write: Option<Instant>,
+    generation: u64,
 ) {
     let delay = status_update_delay(last_write);
     task.replace(tokio::spawn(async move {
         tokio::time::sleep(delay).await;
         let result = set_runtime_status(api, store, target).await;
-        let _ = result_tx.send(result);
+        let _ = result_tx.send(StatusTaskResult { generation, result });
     }));
 }
 
@@ -244,8 +250,9 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut current_status = VrchatStatus::Offline;
     let mut automation = StatusAutomationConfig::default();
     let mut last_status_write: Option<Instant> = None;
+    let mut status_generation = 0_u64;
     let mut status_task = AbortTask(None);
-    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<Result<WorkerReport>>();
+    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<StatusTaskResult>();
 
     loop {
         tokio::select! {
@@ -281,6 +288,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         StateEvent::SettingsChanged(settings) => {
                             automation = status_config(&settings);
                             if !automation.enabled {
+                                status_generation = status_generation.wrapping_add(1);
                                 status_task.abort();
                             }
                         }
@@ -298,6 +306,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                             );
                             sleeping = sleeping_phase(state.phase);
                             if let Some(target) = target {
+                                status_generation = status_generation.wrapping_add(1);
                                 schedule_status_update(
                                     &mut status_task,
                                     status_tx.clone(),
@@ -305,6 +314,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                                     store.clone(),
                                     target,
                                     last_status_write,
+                                    status_generation,
                                 );
                             }
                         }
@@ -320,9 +330,12 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 (vrchat_connected, current_status) = report_runtime(&report);
                 report_if_changed(&mut write_half, &mut last_report, report).await?;
             }
-            Some(result) = status_rx.recv() => {
+            Some(task_result) = status_rx.recv() => {
+                if task_result.generation != status_generation {
+                    continue;
+                }
                 status_task.0 = None;
-                match result {
+                match task_result.result {
                     Ok(report) => {
                         last_status_write = Some(Instant::now());
                         (vrchat_connected, current_status) = report_runtime(&report);
