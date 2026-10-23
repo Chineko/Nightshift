@@ -1,4 +1,6 @@
-use nightshift_protocol::{OscState, OverlaySpawnMode, OverlayState, SettingsState, VrchatStatus};
+use nightshift_protocol::{
+    OscState, OverlaySpawnMode, OverlayState, SettingsState, SleepState, SleepingPose, VrchatStatus,
+};
 
 #[test]
 fn old_overlay_state_defaults_runtime_health() {
@@ -63,4 +65,17 @@ fn old_osc_state_defaults_runtime_details() {
     assert_eq!(state.avatar_id, None);
     assert_eq!(state.avatar_parameter_count, 0);
     assert!(!state.gogo_detected);
+}
+
+#[test]
+fn old_sleep_state_defaults_pose_to_unknown() {
+    let old_json = r#"{
+        "phase": "sleeping",
+        "detection_enabled": false,
+        "detected_by_hr": false
+    }"#;
+
+    let state: SleepState = serde_json::from_str(old_json).expect("old sleep state must decode");
+
+    assert_eq!(state.pose, SleepingPose::Unknown);
 }
