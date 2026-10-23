@@ -121,6 +121,17 @@ fn pending_retarget(
     (target != current_status).then_some(target)
 }
 
+fn cancel_pending_status_on_disconnect(
+    connected: bool,
+    status_generation: &mut u64,
+    status_task: &mut AbortTask,
+) {
+    if !connected && status_task.is_pending() {
+        *status_generation = status_generation.wrapping_add(1);
+        status_task.abort();
+    }
+}
+
 async fn load_session(store: VrchatSessionStore) -> Result<Option<VrchatSession>> {
     tokio::task::spawn_blocking(move || store.load())
         .await
@@ -342,6 +353,11 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         StateEvent::VrchatChanged(state) => {
                             vrchat_connected = state.connected;
                             current_status = state.status;
+                            cancel_pending_status_on_disconnect(
+                                vrchat_connected,
+                                &mut status_generation,
+                                &mut status_task,
+                            );
                         }
                         StateEvent::SleepChanged(state) => {
                             let target = target_for_transition(
@@ -375,6 +391,11 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
             _ = interval.tick(), if handshake_complete => {
                 let report = refresh_runtime(&api, &store).await;
                 (vrchat_connected, current_status) = report_runtime(&report);
+                cancel_pending_status_on_disconnect(
+                    vrchat_connected,
+                    &mut status_generation,
+                    &mut status_task,
+                );
                 report_if_changed(&mut write_half, &mut last_report, report).await?;
             }
             Some(task_result) = status_rx.recv() => {
@@ -538,6 +559,24 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn disconnect_aborts_pending_status_task() {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = ran.clone();
+        let mut task = AbortTask(Some(tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            flag.store(true, std::sync::atomic::Ordering::Release);
+        })));
+        let mut generation = 7;
+
+        cancel_pending_status_on_disconnect(false, &mut generation, &mut task);
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert_eq!(generation, 8);
+        assert!(!task.is_pending());
+        assert!(!ran.load(std::sync::atomic::Ordering::Acquire));
     }
 
     #[test]
