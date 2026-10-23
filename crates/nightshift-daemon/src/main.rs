@@ -1,7 +1,10 @@
 use std::{
     env,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -21,6 +24,7 @@ use tracing::{info, warn};
 struct StateStore {
     state: Arc<Mutex<AppState>>,
     updates: broadcast::Sender<StateEvent>,
+    overlay_clients: Arc<AtomicUsize>,
 }
 
 impl StateStore {
@@ -29,6 +33,7 @@ impl StateStore {
         Self {
             state: Arc::new(Mutex::new(AppState::default())),
             updates,
+            overlay_clients: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -73,6 +78,17 @@ impl StateStore {
         }
         if before.settings != after.settings {
             emit(StateEvent::SettingsChanged(after.settings.clone()));
+        }
+    }
+
+    async fn set_overlay_runtime(&self, connected: bool, client_version: Option<String>) {
+        let mut state = self.state.lock().await;
+        let before = state.clone();
+        state.overlay.runtime_connected = connected;
+        state.overlay.runtime_client_version = if connected { client_version } else { None };
+
+        if *state != before {
+            self.emit_changes(&before, &state);
         }
     }
 
@@ -172,6 +188,23 @@ impl StateStore {
     }
 }
 
+struct OverlayClientGuard {
+    store: StateStore,
+}
+
+impl Drop for OverlayClientGuard {
+    fn drop(&mut self) {
+        let previous = self.store.overlay_clients.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 {
+            let store = self.store.clone();
+            tokio::spawn(async move {
+                store.set_overlay_runtime(false, None).await;
+                info!("Nightshift overlay runtime disconnected");
+            });
+        }
+    }
+}
+
 fn socket_path() -> Result<PathBuf> {
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -205,7 +238,12 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
     }
 
     let hello: ClientMessage = serde_json::from_str(line.trim_end())?;
-    let ClientMessage::Hello { protocol, .. } = hello else {
+    let ClientMessage::Hello {
+        protocol,
+        client,
+        client_version,
+    } = hello
+    else {
         bail!("first client message must be hello");
     };
 
@@ -219,6 +257,25 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
         .await?;
         return Ok(());
     }
+
+    let is_overlay = matches!(
+        client.as_str(),
+        "nightshift-overlay" | "nightshift-overlay-prototype"
+    );
+    let _overlay_guard = if is_overlay {
+        let previous = store.overlay_clients.fetch_add(1, Ordering::AcqRel);
+        store
+            .set_overlay_runtime(true, Some(client_version.clone()))
+            .await;
+        if previous == 0 {
+            info!(version = %client_version, "Nightshift overlay runtime connected");
+        }
+        Some(OverlayClientGuard {
+            store: store.clone(),
+        })
+    } else {
+        None
+    };
 
     send_message(
         &mut write_half,
