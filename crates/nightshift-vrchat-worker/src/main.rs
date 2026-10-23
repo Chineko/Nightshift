@@ -1,19 +1,47 @@
-use std::{env, path::PathBuf, time::Duration};
+use std::{env, path::PathBuf, time::{Duration, Instant}};
 
 use anyhow::{Context, Result, bail};
 use nightshift_protocol::{
-    ClientMessage, PROTOCOL_VERSION, ServerMessage, VrchatStatus, WorkerReport,
+    ClientMessage, PROTOCOL_VERSION, ServerMessage, StateEvent, VrchatStatus, WorkerReport,
 };
 use nightshift_vrchat_api::{SessionCookies, VrchatApiClient};
 use nightshift_vrchat_session::{VrchatSession, VrchatSessionStore};
+use nightshift_vrchat_status::{
+    StatusAutomationConfig, sleeping_phase, target_for_transition,
+};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
+    sync::mpsc,
+    task::JoinHandle,
 };
 use tracing::{info, warn};
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const STATUS_DEBOUNCE: Duration = Duration::from_secs(3);
+const STATUS_MIN_INTERVAL: Duration = Duration::from_secs(10);
+
+struct AbortTask(Option<JoinHandle<()>>);
+
+impl AbortTask {
+    fn replace(&mut self, task: JoinHandle<()>) {
+        self.abort();
+        self.0 = Some(task);
+    }
+
+    fn abort(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for AbortTask {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
 
 fn socket_path() -> Result<PathBuf> {
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
@@ -37,6 +65,30 @@ fn session_cookies(session: &VrchatSession) -> SessionCookies {
     }
 }
 
+fn status_config(settings: &nightshift_protocol::SettingsState) -> StatusAutomationConfig {
+    StatusAutomationConfig {
+        enabled: settings.vrchat_status_automation_enabled,
+        sleep_status: settings.sleep_vrchat_status,
+        wake_status: settings.wake_vrchat_status,
+    }
+}
+
+fn report_runtime(report: &WorkerReport) -> (bool, VrchatStatus) {
+    match report {
+        WorkerReport::VrchatRuntime {
+            connected, status, ..
+        } => (*connected, *status),
+        _ => (false, VrchatStatus::Offline),
+    }
+}
+
+fn status_update_delay(last_write: Option<Instant>) -> Duration {
+    let rate_limit_wait = last_write
+        .map(|last| STATUS_MIN_INTERVAL.saturating_sub(last.elapsed()))
+        .unwrap_or_default();
+    STATUS_DEBOUNCE.max(rate_limit_wait)
+}
+
 async fn load_session(store: VrchatSessionStore) -> Result<Option<VrchatSession>> {
     tokio::task::spawn_blocking(move || store.load())
         .await
@@ -49,48 +101,72 @@ async fn save_session(store: VrchatSessionStore, session: VrchatSession) -> Resu
         .context("VRChat session keyring task stopped")?
 }
 
+async fn validated_user(
+    api: &VrchatApiClient,
+    store: &VrchatSessionStore,
+) -> Result<Option<(VrchatSession, nightshift_vrchat_api::CurrentUserSummary)>> {
+    let mut session = match load_session(store.clone()).await? {
+        Some(session) => session,
+        None => return Ok(None),
+    };
+    let user = api.current_user(&session_cookies(&session)).await?;
+
+    if let Some(expected_user_id) = session.user_id.as_deref() {
+        if expected_user_id != user.id {
+            bail!(
+                "VRChat keyring session account mismatch: expected {expected_user_id}, got {}",
+                user.id
+            );
+        }
+    } else {
+        session.user_id = Some(user.id.clone());
+        if let Err(error) = save_session(store.clone(), session.clone()).await {
+            warn!(%error, "failed to attach VRChat user id to stored session");
+        }
+    }
+
+    Ok(Some((session, user)))
+}
+
 async fn refresh_runtime(
     api: &VrchatApiClient,
     store: &VrchatSessionStore,
 ) -> WorkerReport {
-    let mut session = match load_session(store.clone()).await {
-        Ok(Some(session)) => session,
+    let (_, user) = match validated_user(api, store).await {
+        Ok(Some(value)) => value,
         Ok(None) => return disconnected_report(),
-        Err(error) => {
-            warn!(%error, "failed to read VRChat session from desktop keyring");
-            return disconnected_report();
-        }
-    };
-
-    let user = match api.current_user(&session_cookies(&session)).await {
-        Ok(user) => user,
         Err(error) => {
             warn!(%error, "VRChat session validation failed");
             return disconnected_report();
         }
     };
 
-    if let Some(expected_user_id) = session.user_id.as_deref() {
-        if expected_user_id != user.id {
-            warn!(
-                expected_user_id,
-                actual_user_id = %user.id,
-                "VRChat keyring session resolved to an unexpected account"
-            );
-            return disconnected_report();
-        }
-    } else {
-        session.user_id = Some(user.id.clone());
-        if let Err(error) = save_session(store.clone(), session).await {
-            warn!(%error, "failed to attach VRChat user id to stored session");
-        }
-    }
-
     WorkerReport::VrchatRuntime {
         connected: true,
         display_name: Some(user.display_name),
         status: user.status,
     }
+}
+
+async fn set_runtime_status(
+    api: VrchatApiClient,
+    store: VrchatSessionStore,
+    target: VrchatStatus,
+) -> Result<WorkerReport> {
+    let Some((session, user)) = validated_user(&api, &store).await? else {
+        bail!("no VRChat session is stored");
+    };
+
+    if user.status != target {
+        api.set_status(&session_cookies(&session), &user.id, target)
+            .await?;
+    }
+
+    Ok(WorkerReport::VrchatRuntime {
+        connected: true,
+        display_name: Some(user.display_name),
+        status: target,
+    })
 }
 
 async fn write_client_message(
@@ -125,6 +201,22 @@ async fn report_if_changed(
     Ok(())
 }
 
+fn schedule_status_update(
+    task: &mut AbortTask,
+    result_tx: mpsc::UnboundedSender<Result<WorkerReport>>,
+    api: VrchatApiClient,
+    store: VrchatSessionStore,
+    target: VrchatStatus,
+    last_write: Option<Instant>,
+) {
+    let delay = status_update_delay(last_write);
+    task.replace(tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let result = set_runtime_status(api, store, target).await;
+        let _ = result_tx.send(result);
+    }));
+}
+
 async fn run_connection(stream: UnixStream) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -146,6 +238,14 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut line = String::new();
     let mut handshake_complete = false;
+
+    let mut sleeping = false;
+    let mut vrchat_connected = false;
+    let mut current_status = VrchatStatus::Offline;
+    let mut automation = StatusAutomationConfig::default();
+    let mut last_status_write: Option<Instant> = None;
+    let mut status_task = AbortTask(None);
+    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<Result<WorkerReport>>();
 
     loop {
         tokio::select! {
@@ -169,9 +269,47 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         handshake_complete = true;
                         info!(protocol, "Nightshift VRChat worker connected to daemon");
                         let report = refresh_runtime(&api, &store).await;
+                        (vrchat_connected, current_status) = report_runtime(&report);
                         report_if_changed(&mut write_half, &mut last_report, report).await?;
                     }
-                    ServerMessage::FullState { .. } | ServerMessage::Event { .. } => {}
+                    ServerMessage::FullState { state } => {
+                        // Snapshot is synchronization, not a fresh Sleep/Wake edge.
+                        sleeping = sleeping_phase(state.sleep.phase);
+                        automation = status_config(&state.settings);
+                    }
+                    ServerMessage::Event { event } => match event {
+                        StateEvent::SettingsChanged(settings) => {
+                            automation = status_config(&settings);
+                            if !automation.enabled {
+                                status_task.abort();
+                            }
+                        }
+                        StateEvent::VrchatChanged(state) => {
+                            vrchat_connected = state.connected;
+                            current_status = state.status;
+                        }
+                        StateEvent::SleepChanged(state) => {
+                            let target = target_for_transition(
+                                sleeping,
+                                state.phase,
+                                vrchat_connected,
+                                current_status,
+                                automation,
+                            );
+                            sleeping = sleeping_phase(state.phase);
+                            if let Some(target) = target {
+                                schedule_status_update(
+                                    &mut status_task,
+                                    status_tx.clone(),
+                                    api.clone(),
+                                    store.clone(),
+                                    target,
+                                    last_status_write,
+                                );
+                            }
+                        }
+                        _ => {}
+                    },
                     ServerMessage::Error { message } => {
                         warn!(%message, "daemon rejected VRChat worker message");
                     }
@@ -179,7 +317,21 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
             }
             _ = interval.tick(), if handshake_complete => {
                 let report = refresh_runtime(&api, &store).await;
+                (vrchat_connected, current_status) = report_runtime(&report);
                 report_if_changed(&mut write_half, &mut last_report, report).await?;
+            }
+            Some(result) = status_rx.recv() => {
+                status_task.0 = None;
+                match result {
+                    Ok(report) => {
+                        last_status_write = Some(Instant::now());
+                        (vrchat_connected, current_status) = report_runtime(&report);
+                        report_if_changed(&mut write_half, &mut last_report, report).await?;
+                    }
+                    Err(error) => {
+                        warn!(%error, "VRChat sleep/wake status update failed");
+                    }
+                }
             }
         }
     }
@@ -213,6 +365,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nightshift_protocol::SettingsState;
 
     #[test]
     fn converts_stored_session_to_vrchat_cookie_names() {
@@ -237,5 +390,33 @@ mod tests {
                 status: VrchatStatus::Offline,
             }
         );
+    }
+
+    #[test]
+    fn settings_map_to_status_policy() {
+        let mut settings = SettingsState::default();
+        settings.vrchat_status_automation_enabled = true;
+        settings.sleep_vrchat_status = VrchatStatus::Busy;
+        settings.wake_vrchat_status = VrchatStatus::JoinMe;
+        assert_eq!(
+            status_config(&settings),
+            StatusAutomationConfig {
+                enabled: true,
+                sleep_status: VrchatStatus::Busy,
+                wake_status: VrchatStatus::JoinMe,
+            }
+        );
+    }
+
+    #[test]
+    fn status_writes_wait_at_least_for_debounce() {
+        assert!(status_update_delay(None) >= STATUS_DEBOUNCE);
+    }
+
+    #[test]
+    fn recent_status_write_extends_delay_for_rate_limit() {
+        let delay = status_update_delay(Some(Instant::now() - Duration::from_secs(5)));
+        assert!(delay >= Duration::from_secs(4));
+        assert!(delay <= Duration::from_secs(6));
     }
 }
