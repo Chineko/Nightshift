@@ -53,10 +53,6 @@ impl StateStore {
     }
 
     async fn snapshot_and_subscribe(&self) -> (AppState, broadcast::Receiver<StateEvent>) {
-        // Mutations also hold this lock while emitting their deltas. Creating the
-        // receiver and cloning state under the same lock establishes a clean
-        // ordering boundary: the returned snapshot is authoritative, and every
-        // event delivered by the returned receiver happened after that snapshot.
         let state = self.state.lock().await;
         let updates = self.updates.subscribe();
         (state.clone(), updates)
@@ -121,8 +117,6 @@ impl StateStore {
         let before = state.clone();
         state.sleep.phase = final_phase;
 
-        // A manual brightness change during a transition cancels the automatic
-        // brightness target, but it should not leave the sleep phase stuck.
         if !state.brightness.manual_override {
             state.brightness.current = final_brightness;
             state.brightness.target = final_brightness;
@@ -140,6 +134,7 @@ impl StateStore {
                 | UiCommand::SetHrMonitoring(_)
                 | UiCommand::SetSleepDetection(_)
                 | UiCommand::SetOscAutomation(_)
+                | UiCommand::SetGogoAutomation(_)
                 | UiCommand::SetVrchatSleepStatus(_)
                 | UiCommand::SetVrchatWakeStatus(_)
                 | UiCommand::SetInviteAutomation(_)
@@ -191,6 +186,7 @@ impl StateStore {
             UiCommand::SetHrMonitoring(enabled) => state.heart_rate.enabled = enabled,
             UiCommand::SetSleepDetection(enabled) => state.sleep.detection_enabled = enabled,
             UiCommand::SetOscAutomation(enabled) => state.osc.enabled = enabled,
+            UiCommand::SetGogoAutomation(enabled) => state.settings.gogo_automation_enabled = enabled,
             UiCommand::SetVrchatSleepStatus(status) => state.settings.sleep_vrchat_status = status,
             UiCommand::SetVrchatWakeStatus(status) => state.settings.wake_vrchat_status = status,
             UiCommand::SetInviteAutomation(enabled) => state.invites.enabled = enabled,
@@ -381,8 +377,6 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
         match step {
             ClientStep::Continue => {}
             ClientStep::Resync => {
-                // Replacing the receiver after the select future has completed avoids
-                // both stale queued deltas and a receiver-borrow lifetime hazard.
                 let (snapshot, new_updates) = store.snapshot_and_subscribe().await;
                 updates = new_updates;
                 send_message(
