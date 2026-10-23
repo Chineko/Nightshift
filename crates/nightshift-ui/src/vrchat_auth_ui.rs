@@ -6,7 +6,6 @@ use nightshift_vrchat_auth::{AuthStep, PendingAuth, VrchatAuthService};
 const MUTED: Color32 = Color32::from_rgb(157, 159, 170);
 const PURPLE: Color32 = Color32::from_rgb(183, 141, 255);
 
-#[derive(Debug)]
 enum AuthCommand {
     Login { username: String, password: String },
     Verify { pending: PendingAuth, code: String },
@@ -218,23 +217,20 @@ impl VrchatAuthUi {
         if self.busy {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(RichText::new("Talking to VRChat…").color(MUTED));
+                ui.label("Contacting VRChat...");
             });
         }
 
         if let Some((message, success)) = &self.message {
-            let color = if *success {
-                Color32::from_rgb(102, 220, 145)
-            } else {
-                Color32::from_rgb(235, 112, 112)
-            };
-            ui.label(RichText::new(message).color(color));
+            ui.label(RichText::new(message).color(if *success { PURPLE } else { Color32::RED }));
         }
 
+        ui.add_space(8.0);
         if ui
             .add_enabled(!self.busy, egui::Button::new("Forget stored session"))
             .clicked()
         {
+            self.message = None;
             self.bridge.send(AuthCommand::ClearSession);
         }
     }
