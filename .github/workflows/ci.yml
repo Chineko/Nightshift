@@ -33,6 +33,9 @@ jobs:
       - name: Test OSC script engine
         run: cargo test -p nightshift-osc-script
 
+      - name: Test sleeping-pose classifier
+        run: cargo test -p nightshift-pose
+
       - name: Test daemon state machine
         run: cargo test -p nightshift-daemon
 
