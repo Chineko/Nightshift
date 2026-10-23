@@ -51,6 +51,9 @@ jobs:
       - name: Test VRChat API transport
         run: cargo test -p nightshift-vrchat-api
 
+      - name: Test VRChat session storage
+        run: cargo test -p nightshift-vrchat-session
+
       - name: Test daemon state machine
         run: cargo test -p nightshift-daemon
 
