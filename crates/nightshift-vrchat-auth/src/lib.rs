@@ -61,10 +61,14 @@ impl VrchatAuthService {
 
     pub async fn verify_two_factor(
         &self,
-        pending: PendingAuth,
+        pending: &PendingAuth,
         code: &str,
     ) -> Result<CurrentUserSummary> {
-        let session = self.api.verify_two_factor(pending.inner, code).await?;
+        // Keep the opaque pending session in the caller so an invalid code can be retried.
+        let session = self
+            .api
+            .verify_two_factor(pending.inner.clone(), code)
+            .await?;
         let user = session.user.clone();
         self.persist(session).await?;
         Ok(user)
