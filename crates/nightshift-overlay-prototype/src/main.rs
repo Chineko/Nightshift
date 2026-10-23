@@ -215,12 +215,11 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
             placement,
         )?;
 
-        let (session, mut frame_waiter, mut frame_stream) =
-            xr::Session::<xr::Vulkan>::from_raw(
-                xr_instance.clone(),
-                raw_session,
-                Box::new(()),
-            );
+        let (session, mut frame_waiter, mut frame_stream) = xr::Session::<xr::Vulkan>::from_raw(
+            xr_instance.clone(),
+            raw_session,
+            Box::new(()),
+        );
 
         let local_space = session
             .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
@@ -237,7 +236,7 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
                 create_flags: xr::SwapchainCreateFlags::EMPTY,
                 usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT
                     | xr::SwapchainUsageFlags::TRANSFER_DST,
-                format: i64::from(format.as_raw()),
+                format: format.as_raw() as u32,
                 sample_count: 1,
                 width: TEST_TEXTURE_SIZE,
                 height: TEST_TEXTURE_SIZE,
@@ -493,7 +492,7 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
     Ok(())
 }
 
-fn choose_color_format(formats: &[i64]) -> Result<vk::Format> {
+fn choose_color_format(formats: &[u32]) -> Result<vk::Format> {
     let preferred = [
         vk::Format::R8G8B8A8_SRGB,
         vk::Format::B8G8R8A8_SRGB,
@@ -503,7 +502,7 @@ fn choose_color_format(formats: &[i64]) -> Result<vk::Format> {
 
     preferred
         .into_iter()
-        .find(|candidate| formats.contains(&i64::from(candidate.as_raw())))
+        .find(|candidate| formats.contains(&(candidate.as_raw() as u32)))
         .ok_or_else(|| anyhow!("runtime exposes no simple RGBA8 swapchain format: {formats:?}"))
 }
 
