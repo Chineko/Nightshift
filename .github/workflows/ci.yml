@@ -45,8 +45,8 @@ jobs:
       - name: Test BLE heart-rate provider
         run: cargo test -p nightshift-hr-ble
 
-      - name: Check heart-rate worker
-        run: cargo check -p nightshift-hr-worker
+      - name: Test heart-rate worker
+        run: cargo test -p nightshift-hr-worker
 
       - name: Test VRChat API transport
         run: cargo test -p nightshift-vrchat-api
