@@ -1,0 +1,450 @@
+use std::{
+    env,
+    path::PathBuf,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
+
+use chrono::{Local, Timelike};
+use eframe::egui::{self, Color32, RichText, Stroke};
+use nightshift_protocol::{
+    AppState, ClientMessage, InviteProfile, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
+    UiCommand, VrchatStatus,
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::UnixStream,
+    sync::mpsc as tokio_mpsc,
+};
+
+const BG: Color32 = Color32::from_rgb(12, 13, 17);
+const PANEL: Color32 = Color32::from_rgb(23, 24, 30);
+const PANEL_ALT: Color32 = Color32::from_rgb(30, 31, 38);
+const MUTED: Color32 = Color32::from_rgb(157, 159, 170);
+const PURPLE: Color32 = Color32::from_rgb(183, 141, 255);
+const AMBER: Color32 = Color32::from_rgb(245, 173, 70);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Home,
+    Settings,
+}
+
+enum UiUpdate {
+    Connected(bool),
+    Message(ServerMessage),
+}
+
+struct Bridge {
+    commands: tokio_mpsc::UnboundedSender<UiCommand>,
+    updates: mpsc::Receiver<UiUpdate>,
+}
+
+impl Bridge {
+    fn spawn(ctx: egui::Context) -> Self {
+        let (command_tx, command_rx) = tokio_mpsc::unbounded_channel();
+        let (update_tx, update_rx) = mpsc::channel();
+
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Runtime::new().expect("failed to create Nightshift UI runtime");
+            runtime.block_on(connection_loop(ctx, command_rx, update_tx));
+        });
+
+        Self {
+            commands: command_tx,
+            updates: update_rx,
+        }
+    }
+
+    fn send(&self, command: UiCommand) {
+        let _ = self.commands.send(command);
+    }
+}
+
+fn socket_path() -> Option<PathBuf> {
+    env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .map(|path| path.join("nightshift").join("nightshift.sock"))
+}
+
+async fn connection_loop(
+    ctx: egui::Context,
+    mut commands: tokio_mpsc::UnboundedReceiver<UiCommand>,
+    updates: mpsc::Sender<UiUpdate>,
+) {
+    loop {
+        let Some(path) = socket_path() else {
+            let _ = updates.send(UiUpdate::Connected(false));
+            ctx.request_repaint();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            continue;
+        };
+
+        let stream = match UnixStream::connect(&path).await {
+            Ok(stream) => stream,
+            Err(_) => {
+                let _ = updates.send(UiUpdate::Connected(false));
+                ctx.request_repaint();
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        };
+
+        let _ = updates.send(UiUpdate::Connected(true));
+        ctx.request_repaint();
+
+        let (read_half, mut write_half) = stream.into_split();
+        let mut reader = BufReader::new(read_half);
+        let hello = ClientMessage::Hello {
+            protocol: PROTOCOL_VERSION,
+            client: "nightshift-ui".into(),
+            client_version: env!("CARGO_PKG_VERSION").into(),
+        };
+
+        if write_json_line(&mut write_half, &hello).await.is_err() {
+            continue;
+        }
+
+        let mut line = String::new();
+        loop {
+            line.clear();
+            tokio::select! {
+                read = reader.read_line(&mut line) => {
+                    match read {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            if let Ok(message) = serde_json::from_str::<ServerMessage>(line.trim_end()) {
+                                if updates.send(UiUpdate::Message(message)).is_err() {
+                                    return;
+                                }
+                                ctx.request_repaint();
+                            }
+                        }
+                    }
+                }
+                command = commands.recv() => {
+                    let Some(command) = command else { return; };
+                    let message = ClientMessage::Command { command };
+                    if write_json_line(&mut write_half, &message).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let _ = updates.send(UiUpdate::Connected(false));
+        ctx.request_repaint();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+async fn write_json_line(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    message: &ClientMessage,
+) -> Result<(), serde_json::Error> {
+    let mut bytes = serde_json::to_vec(message)?;
+    bytes.push(b'\n');
+    if writer.write_all(&bytes).await.is_err() {
+        return Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "Nightshift IPC disconnected",
+        )));
+    }
+    Ok(())
+}
+
+struct NightshiftApp {
+    page: Page,
+    state: AppState,
+    daemon_connected: bool,
+    bridge: Bridge,
+    brightness_send_at: Instant,
+}
+
+impl NightshiftApp {
+    fn new(ctx: egui::Context) -> Self {
+        Self {
+            page: Page::Home,
+            state: AppState::default(),
+            daemon_connected: false,
+            bridge: Bridge::spawn(ctx),
+            brightness_send_at: Instant::now() - Duration::from_secs(1),
+        }
+    }
+
+    fn drain_updates(&mut self) {
+        while let Ok(update) = self.bridge.updates.try_recv() {
+            match update {
+                UiUpdate::Connected(connected) => self.daemon_connected = connected,
+                UiUpdate::Message(ServerMessage::FullState { state }) => self.state = state,
+                UiUpdate::Message(ServerMessage::Event { event }) => self.apply_event(event),
+                UiUpdate::Message(ServerMessage::Hello { .. }) => {}
+                UiUpdate::Message(ServerMessage::Error { .. }) => {}
+            }
+        }
+    }
+
+    fn apply_event(&mut self, event: StateEvent) {
+        match event {
+            StateEvent::SleepChanged(state) => self.state.sleep = state,
+            StateEvent::BrightnessChanged(state) => self.state.brightness = state,
+            StateEvent::HeartRateChanged(state) => self.state.heart_rate = state,
+            StateEvent::OscChanged(state) => self.state.osc = state,
+            StateEvent::VrchatChanged(state) => self.state.vrchat = state,
+            StateEvent::InvitesChanged(state) => self.state.invites = state,
+            StateEvent::OverlayChanged(state) => self.state.overlay = state,
+            StateEvent::SettingsChanged(state) => self.state.settings = state,
+            StateEvent::ConnectionChanged(state) => self.state.connection = state,
+        }
+    }
+
+    fn greeting(&self) -> String {
+        let phrase = match Local::now().hour() {
+            5..=11 => "Good morning",
+            12..=17 => "Good afternoon",
+            _ => "Good evening",
+        };
+
+        match self.state.vrchat.display_name.as_deref() {
+            Some(name) if self.state.vrchat.connected => format!("{phrase}, {name}."),
+            _ => format!("{phrase}."),
+        }
+    }
+
+    fn nav(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading(RichText::new("NIGHTSHIFT").strong().size(20.0));
+            ui.add_space(28.0);
+            if ui.selectable_label(self.page == Page::Home, "Home").clicked() {
+                self.page = Page::Home;
+            }
+            if ui.selectable_label(self.page == Page::Settings, "Settings").clicked() {
+                self.page = Page::Settings;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let status = if self.daemon_connected { "Connected" } else { "Disconnected" };
+                let color = if self.daemon_connected { Color32::from_rgb(102, 220, 145) } else { MUTED };
+                ui.label(RichText::new(format!("● {status}")).color(color));
+            });
+        });
+        ui.separator();
+    }
+
+    fn sleep_card(&mut self, ui: &mut egui::Ui) {
+        let sleeping = matches!(self.state.sleep.phase, SleepPhase::Sleeping | SleepPhase::EnteringSleep);
+        let accent = if sleeping { PURPLE } else { AMBER };
+        let title = match self.state.sleep.phase {
+            SleepPhase::Awake => "Awake",
+            SleepPhase::EnteringSleep => "Entering sleep mode…",
+            SleepPhase::Sleeping => "Sleep mode active",
+            SleepPhase::Waking => "Waking up…",
+        };
+
+        egui::Frame::new()
+            .fill(PANEL)
+            .stroke(Stroke::new(1.0, Color32::from_gray(48)))
+            .corner_radius(16)
+            .inner_margin(20)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.label(RichText::new(if sleeping { "☾  Sleep mode" } else { "☀  Sleep mode" }).color(accent).strong().size(18.0));
+                ui.add_space(12.0);
+                ui.label(RichText::new(title).size(26.0).strong());
+                ui.label(RichText::new(if sleeping {
+                    "Your display is dimmed and sleep automation is active."
+                } else {
+                    "Dimming, status and invite automation are ready."
+                }).color(MUTED));
+                ui.add_space(16.0);
+
+                let button_text = if sleeping { "Wake up" } else { "Enter sleep mode" };
+                if ui.add_sized([ui.available_width(), 38.0], egui::Button::new(RichText::new(button_text).strong()).fill(accent)).clicked() {
+                    self.bridge.send(if sleeping { UiCommand::Wake } else { UiCommand::EnterSleep });
+                }
+
+                ui.add_space(16.0);
+                ui.separator();
+                status_row(ui, "Current brightness", &format!("{}%", (self.state.brightness.current * 100.0).round() as u32));
+                status_row(ui, "Sleep target", &format!("{}%", (self.state.brightness.sleep_target * 100.0).round() as u32));
+                status_row(ui, "Invite policy", invite_profile_name(self.state.invites.profile));
+                status_row(ui, "Automation", if sleeping { "Active" } else { "Ready" });
+            });
+    }
+
+    fn brightness_card(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::new().fill(PANEL).corner_radius(16).inner_margin(20).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Brightness").strong().size(17.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("{}%", (self.state.brightness.current * 100.0).round() as u32)).color(PURPLE).strong());
+                });
+            });
+            ui.add_space(8.0);
+            let mut value = self.state.brightness.current;
+            let response = ui.add(egui::Slider::new(&mut value, 0.02..=1.0).show_value(false));
+            if response.changed() {
+                self.state.brightness.current = value;
+                let should_send = self.brightness_send_at.elapsed() >= Duration::from_millis(40) || response.drag_stopped();
+                if should_send {
+                    self.bridge.send(UiCommand::SetBrightness(value));
+                    self.brightness_send_at = Instant::now();
+                }
+            }
+            let sync = if self.state.brightness.manual_override { "Manual override" } else if self.state.brightness.transitioning { "Fading" } else { "Synced" };
+            ui.label(RichText::new(sync).color(MUTED).small());
+        });
+    }
+
+    fn glance_cards(&self, ui: &mut egui::Ui) {
+        ui.columns(2, |columns| {
+            small_card(&mut columns[0], "♥  Heart rate", self.state.heart_rate.bpm.map(|bpm| format!("{bpm} BPM")).as_deref().unwrap_or("— BPM"));
+            small_card(&mut columns[1], "≋  OSC automation", if self.state.osc.enabled { "Running" } else { "Off" });
+        });
+        ui.add_space(8.0);
+        ui.columns(2, |columns| {
+            small_card(&mut columns[0], "●  VRChat status", vrchat_status_name(self.state.vrchat.status));
+            small_card(&mut columns[1], "◎  Invite rules", invite_profile_name(self.state.invites.profile));
+        });
+    }
+
+    fn home(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new(self.greeting()).size(28.0).strong());
+        ui.label(RichText::new("Settle in. Nightshift is ready when you are.").color(MUTED));
+        ui.add_space(20.0);
+        self.sleep_card(ui);
+        ui.add_space(12.0);
+        self.brightness_card(ui);
+        ui.add_space(16.0);
+        ui.label(RichText::new("At a glance").strong().size(18.0));
+        ui.add_space(8.0);
+        self.glance_cards(ui);
+    }
+
+    fn settings(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Settings");
+        ui.label(RichText::new("Changes are sent to the daemon immediately and only changed state is broadcast back.").color(MUTED));
+        ui.add_space(16.0);
+
+        setting_card(ui, "Sleep", |ui| {
+            let mut hr = self.state.heart_rate.enabled;
+            if ui.checkbox(&mut hr, "Heart-rate monitoring").changed() {
+                self.bridge.send(UiCommand::SetHrMonitoring(hr));
+            }
+            let mut detection = self.state.sleep.detection_enabled;
+            if ui.checkbox(&mut detection, "Sleep detection").changed() {
+                self.bridge.send(UiCommand::SetSleepDetection(detection));
+            }
+            let mut target = self.state.brightness.sleep_target;
+            ui.label("Sleep brightness target");
+            if ui.add(egui::Slider::new(&mut target, 0.02..=1.0).percentage()).changed() {
+                self.bridge.send(UiCommand::SetSleepBrightness(target));
+            }
+            let mut fade = self.state.settings.fade_duration_seconds;
+            ui.label("Fade duration");
+            if ui.add(egui::Slider::new(&mut fade, 0.0..=120.0).suffix(" s")).changed() {
+                self.bridge.send(UiCommand::SetFadeDuration(fade));
+            }
+        });
+
+        ui.add_space(12.0);
+        setting_card(ui, "Automation", |ui| {
+            let mut osc = self.state.osc.enabled;
+            if ui.checkbox(&mut osc, "OSC automation").changed() {
+                self.bridge.send(UiCommand::SetOscAutomation(osc));
+            }
+            let mut invites = self.state.invites.enabled;
+            if ui.checkbox(&mut invites, "Invite automation").changed() {
+                self.bridge.send(UiCommand::SetInviteAutomation(invites));
+            }
+        });
+    }
+}
+
+impl eframe::App for NightshiftApp {
+    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.drain_updates();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        ui.visuals_mut().dark_mode = true;
+        ui.visuals_mut().panel_fill = BG;
+        ui.visuals_mut().override_text_color = Some(Color32::from_rgb(238, 238, 242));
+        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+
+        egui::Frame::central_panel(ui.style())
+            .fill(BG)
+            .inner_margin(24)
+            .show(ui, |ui| {
+                self.nav(ui);
+                egui::ScrollArea::vertical().show(ui, |ui| match self.page {
+                    Page::Home => self.home(ui),
+                    Page::Settings => self.settings(ui),
+                });
+            });
+    }
+}
+
+fn status_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(MUTED));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(value).strong());
+        });
+    });
+}
+
+fn small_card(ui: &mut egui::Ui, title: &str, value: &str) {
+    egui::Frame::new().fill(PANEL_ALT).corner_radius(14).inner_margin(16).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.label(RichText::new(title).color(MUTED));
+        ui.add_space(6.0);
+        ui.label(RichText::new(value).strong().size(18.0));
+    });
+}
+
+fn setting_card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new().fill(PANEL).corner_radius(16).inner_margin(20).show(ui, |ui| {
+        ui.set_min_width(ui.available_width());
+        ui.label(RichText::new(title).strong().size(18.0));
+        ui.add_space(10.0);
+        add_contents(ui);
+    });
+}
+
+fn invite_profile_name(profile: InviteProfile) -> &'static str {
+    match profile {
+        InviteProfile::Disabled => "Disabled",
+        InviteProfile::Friends => "Friends",
+        InviteProfile::Favorites => "Favorites",
+        InviteProfile::Whitelist => "Whitelist",
+        InviteProfile::Custom => "Custom",
+    }
+}
+
+fn vrchat_status_name(status: VrchatStatus) -> &'static str {
+    match status {
+        VrchatStatus::Active => "Active",
+        VrchatStatus::JoinMe => "Join Me",
+        VrchatStatus::AskMe => "Ask Me",
+        VrchatStatus::Busy => "Busy",
+        VrchatStatus::Offline => "Offline",
+    }
+}
+
+fn main() -> eframe::Result {
+    let options = eframe::NativeOptions {
+        renderer: eframe::Renderer::Glow,
+        viewport: egui::ViewportBuilder::default()
+            .with_title("Nightshift")
+            .with_inner_size([760.0, 820.0])
+            .with_min_inner_size([520.0, 620.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Nightshift",
+        options,
+        Box::new(|cc| Ok(Box::new(NightshiftApp::new(cc.egui_ctx.clone())))),
+    )
+}
