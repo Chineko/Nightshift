@@ -5,6 +5,7 @@ members = [
     "crates/nightshift-ui",
     "crates/nightshift-overlay-prototype",
     "crates/nightshiftctl",
+    "crates/nightshift-osc",
 ]
 resolver = "2"
 
