@@ -30,6 +30,9 @@ jobs:
       - name: Test GoGo presets
         run: cargo test -p nightshift-gogo
 
+      - name: Test OSC script engine
+        run: cargo test -p nightshift-osc-script
+
       - name: Test daemon state machine
         run: cargo test -p nightshift-daemon
 
