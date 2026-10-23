@@ -76,8 +76,28 @@ impl Default for HeartRateState {
     fn default() -> Self { Self { enabled: false, connected: false, bpm: None, status: HrStatus::Unknown } }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OscState { pub enabled: bool, pub connected: bool }
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OscState {
+    pub enabled: bool,
+    pub connected: bool,
+    #[serde(default)]
+    pub avatar_id: Option<String>,
+    #[serde(default)]
+    pub avatar_parameter_count: u32,
+    #[serde(default)]
+    pub gogo_detected: bool,
+}
+impl Default for OscState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            connected: false,
+            avatar_id: None,
+            avatar_parameter_count: 0,
+            gogo_detected: false,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -165,6 +185,18 @@ pub enum ClientMessage {
     Hello { protocol: u32, client: String, client_version: String },
     GetState,
     Command { command: UiCommand },
+    Report { report: WorkerReport },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "state", rename_all = "snake_case")]
+pub enum WorkerReport {
+    OscRuntime {
+        connected: bool,
+        avatar_id: Option<String>,
+        avatar_parameter_count: u32,
+        gogo_detected: bool,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -178,7 +210,7 @@ pub enum ServerMessage {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Capability { Sleep, Brightness, HeartRate, Osc, VrchatStatus, InviteRules, Overlay }
+pub enum Capability { Sleep, Brightness, HeartRate, Osc, VrchatStatus, InviteRules, Overlay, WorkerReports }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
