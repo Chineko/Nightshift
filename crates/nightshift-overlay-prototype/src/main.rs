@@ -275,7 +275,7 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
             .create_swapchain(&xr::SwapchainCreateInfo {
                 create_flags: xr::SwapchainCreateFlags::EMPTY,
                 usage_flags: xr::SwapchainUsageFlags::COLOR_ATTACHMENT,
-                format: format.as_raw() as _,
+                format: i64::from(format.as_raw()),
                 sample_count: 1,
                 width: TEST_TEXTURE_SIZE,
                 height: TEST_TEXTURE_SIZE,
