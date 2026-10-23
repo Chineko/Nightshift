@@ -57,7 +57,7 @@ struct OscQueryNode {
 pub async fn discover_avatar_context() -> Result<Option<AvatarContext>> {
     oyasumivr_oscquery::client::init()
         .await
-        .map_err(|error| anyhow!("initializing OSCQuery discovery: {error}"))?;
+        .map_err(|error| anyhow!("initializing OSCQuery discovery: {error:?}"))?;
 
     let Some((host, port)) = oyasumivr_oscquery::client::get_vrchat_oscquery_address().await else {
         return Ok(None);
