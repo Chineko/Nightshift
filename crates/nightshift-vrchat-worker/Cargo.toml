@@ -12,11 +12,13 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+futures-util = "0.3"
 nightshift-protocol = { path = "../nightshift-protocol" }
 nightshift-vrchat-api = { path = "../nightshift-vrchat-api" }
 nightshift-vrchat-session = { path = "../nightshift-vrchat-session" }
 nightshift-vrchat-status = { path = "../nightshift-vrchat-status" }
 serde_json.workspace = true
 tokio.workspace = true
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
