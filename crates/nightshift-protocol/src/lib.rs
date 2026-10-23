@@ -212,6 +212,11 @@ pub enum WorkerReport {
     },
     SleepingPose { pose: SleepingPose },
     HeartRateRuntime { connected: bool, bpm: Option<u16> },
+    VrchatRuntime {
+        connected: bool,
+        display_name: Option<String>,
+        status: VrchatStatus,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
