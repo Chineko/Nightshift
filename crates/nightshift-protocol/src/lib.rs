@@ -136,7 +136,7 @@ pub struct SettingsState {
 }
 impl Default for SettingsState {
     fn default() -> Self {
-        Self { fade_duration_seconds: 10.0, sleep_vrchat_status: VrchatStatus::AskMe, wake_vrchat_status: VrchatStatus::Active }
+        Self { fade_duration_seconds: 3.0, sleep_vrchat_status: VrchatStatus::AskMe, wake_vrchat_status: VrchatStatus::Active }
     }
 }
 
