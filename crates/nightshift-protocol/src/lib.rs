@@ -145,10 +145,17 @@ pub struct SettingsState {
     pub fade_duration_seconds: f32,
     pub sleep_vrchat_status: VrchatStatus,
     pub wake_vrchat_status: VrchatStatus,
+    #[serde(default)]
+    pub gogo_automation_enabled: bool,
 }
 impl Default for SettingsState {
     fn default() -> Self {
-        Self { fade_duration_seconds: 3.0, sleep_vrchat_status: VrchatStatus::AskMe, wake_vrchat_status: VrchatStatus::Active }
+        Self {
+            fade_duration_seconds: 3.0,
+            sleep_vrchat_status: VrchatStatus::AskMe,
+            wake_vrchat_status: VrchatStatus::Active,
+            gogo_automation_enabled: false,
+        }
     }
 }
 
@@ -184,6 +191,7 @@ pub enum UiCommand {
     SetHrMonitoring(bool),
     SetSleepDetection(bool),
     SetOscAutomation(bool),
+    SetGogoAutomation(bool),
     SetVrchatSleepStatus(VrchatStatus),
     SetVrchatWakeStatus(VrchatStatus),
     SetInviteAutomation(bool),
