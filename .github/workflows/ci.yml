@@ -35,3 +35,6 @@ jobs:
 
       - name: Check CLI
         run: cargo check -p nightshiftctl
+
+      - name: Check OSC worker
+        run: cargo check -p nightshift-osc
