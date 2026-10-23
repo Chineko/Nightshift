@@ -1,8 +1,10 @@
+mod avatar_context;
 mod resolver;
 
 use std::{env, path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, anyhow, bail};
+use avatar_context::{AvatarContext, discover_avatar_context};
 use nightshift_protocol::{
     ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
 };
@@ -187,6 +189,30 @@ async fn sync_sleep_parameter(
     }
 }
 
+async fn refresh_avatar_context(current: &mut Option<AvatarContext>) {
+    match discover_avatar_context().await {
+        Ok(Some(context)) => {
+            let changed = current.as_ref() != Some(&context);
+            if changed {
+                info!(
+                    avatar_id = %context.avatar_id,
+                    parameters = context.parameters.len(),
+                    "discovered VRChat avatar OSC context"
+                );
+            }
+            *current = Some(context);
+        }
+        Ok(None) => {
+            if current.take().is_some() {
+                info!("VRChat OSCQuery context is no longer available");
+            }
+        }
+        Err(error) => {
+            warn!(%error, "failed to refresh VRChat OSCQuery avatar context");
+        }
+    }
+}
+
 fn start_transition_automation(
     active: &mut AutomationTask,
     socket: Arc<UdpSocket>,
@@ -255,6 +281,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut gogo_enabled = false;
     let mut sleeping = false;
     let mut sender: Option<Arc<UdpSocket>> = None;
+    let mut avatar_context: Option<AvatarContext> = None;
     let mut active_automation = AutomationTask::default();
     let mut line = String::new();
 
@@ -298,8 +325,12 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         sleeping,
                     )
                     .await;
+                    if gogo_enabled {
+                        refresh_avatar_context(&mut avatar_context).await;
+                    }
                 } else {
                     sender = None;
+                    avatar_context = None;
                 }
             }
             ServerMessage::Event { event } => match event {
@@ -316,8 +347,12 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                             sleeping,
                         )
                         .await;
+                        if gogo_enabled {
+                            refresh_avatar_context(&mut avatar_context).await;
+                        }
                     } else {
                         sender = None;
+                        avatar_context = None;
                     }
                 }
                 StateEvent::SettingsChanged(settings) => {
@@ -325,6 +360,9 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     gogo_enabled = settings.gogo_automation_enabled;
                     if was_enabled && !gogo_enabled {
                         active_automation.abort();
+                        avatar_context = None;
+                    } else if enabled && !was_enabled && gogo_enabled {
+                        refresh_avatar_context(&mut avatar_context).await;
                     }
                 }
                 StateEvent::SleepChanged(state) => {
@@ -334,6 +372,9 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         if let Some(new_sleeping) = edge {
                             if sender.is_none() {
                                 sender = Some(osc_sender().await?);
+                            }
+                            if gogo_enabled {
+                                refresh_avatar_context(&mut avatar_context).await;
                             }
                             start_transition_automation(
                                 &mut active_automation,
