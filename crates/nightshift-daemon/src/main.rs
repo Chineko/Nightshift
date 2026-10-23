@@ -15,7 +15,7 @@ use config::PersistedConfig;
 use nightshift_hr::{CalmPeriodDetector, DetectionState};
 use nightshift_protocol::{
     AppState, Capability, ClientMessage, HrStatus, PROTOCOL_VERSION, ServerMessage, SleepPhase,
-    SleepingPose, StateEvent, UiCommand, WorkerReport,
+    SleepingPose, StateEvent, UiCommand, VrchatStatus, WorkerReport,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -33,6 +33,7 @@ struct StateStore {
     overlay_clients: Arc<AtomicUsize>,
     osc_clients: Arc<AtomicUsize>,
     hr_clients: Arc<AtomicUsize>,
+    vrchat_clients: Arc<AtomicUsize>,
     transition_generation: Arc<AtomicU64>,
     config_updates: watch::Sender<PersistedConfig>,
     hr_detector: Arc<Mutex<CalmPeriodDetector>>,
@@ -61,6 +62,7 @@ impl StateStore {
             overlay_clients: Arc::new(AtomicUsize::new(0)),
             osc_clients: Arc::new(AtomicUsize::new(0)),
             hr_clients: Arc::new(AtomicUsize::new(0)),
+            vrchat_clients: Arc::new(AtomicUsize::new(0)),
             transition_generation: Arc::new(AtomicU64::new(0)),
             config_updates,
             hr_detector: Arc::new(Mutex::new(CalmPeriodDetector::default())),
@@ -146,6 +148,23 @@ impl StateStore {
         state.osc.avatar_id = if connected { avatar_id } else { None };
         state.osc.avatar_parameter_count = if connected { avatar_parameter_count } else { 0 };
         state.osc.gogo_detected = connected && gogo_detected;
+
+        if *state != before {
+            self.emit_changes(&before, &state);
+        }
+    }
+
+    async fn set_vrchat_runtime(
+        &self,
+        connected: bool,
+        display_name: Option<String>,
+        status: VrchatStatus,
+    ) {
+        let mut state = self.state.lock().await;
+        let before = state.clone();
+        state.vrchat.connected = connected;
+        state.vrchat.display_name = if connected { display_name } else { None };
+        state.vrchat.status = if connected { status } else { VrchatStatus::Offline };
 
         if *state != before {
             self.emit_changes(&before, &state);
@@ -258,6 +277,14 @@ impl StateStore {
             }
             WorkerReport::HeartRateRuntime { connected, bpm } if client == "nightshift-hr" => {
                 self.set_hr_runtime(connected, bpm).await;
+                true
+            }
+            WorkerReport::VrchatRuntime {
+                connected,
+                display_name,
+                status,
+            } if client == "nightshift-vrchat" => {
+                self.set_vrchat_runtime(connected, display_name, status).await;
                 true
             }
             _ => false,
@@ -456,6 +483,25 @@ impl Drop for HrClientGuard {
     }
 }
 
+struct VrchatClientGuard {
+    store: StateStore,
+}
+
+impl Drop for VrchatClientGuard {
+    fn drop(&mut self) {
+        let previous = self.store.vrchat_clients.fetch_sub(1, Ordering::AcqRel);
+        if previous == 1 {
+            let store = self.store.clone();
+            tokio::spawn(async move {
+                store
+                    .set_vrchat_runtime(false, None, VrchatStatus::Offline)
+                    .await;
+                info!("Nightshift VRChat worker disconnected");
+            });
+        }
+    }
+}
+
 fn socket_path() -> Result<PathBuf> {
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -542,6 +588,16 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
     let _hr_guard = if is_hr_worker {
         store.hr_clients.fetch_add(1, Ordering::AcqRel);
         Some(HrClientGuard {
+            store: store.clone(),
+        })
+    } else {
+        None
+    };
+
+    let is_vrchat_worker = client == "nightshift-vrchat";
+    let _vrchat_guard = if is_vrchat_worker {
+        store.vrchat_clients.fetch_add(1, Ordering::AcqRel);
+        Some(VrchatClientGuard {
             store: store.clone(),
         })
     } else {
@@ -833,5 +889,39 @@ mod tests {
         let (snapshot, _) = store.snapshot_and_subscribe().await;
         assert!(snapshot.heart_rate.connected);
         assert_eq!(snapshot.heart_rate.bpm, Some(55));
+    }
+
+    #[tokio::test]
+    async fn vrchat_reports_are_worker_scoped() {
+        let store = StateStore::new(AppState::default());
+        assert!(
+            store
+                .apply_worker_report(
+                    "nightshift-vrchat",
+                    WorkerReport::VrchatRuntime {
+                        connected: true,
+                        display_name: Some("Hydra Employee".into()),
+                        status: VrchatStatus::AskMe,
+                    },
+                )
+                .await
+        );
+        assert!(
+            !store
+                .apply_worker_report(
+                    "nightshift-osc",
+                    WorkerReport::VrchatRuntime {
+                        connected: true,
+                        display_name: Some("Impostor".into()),
+                        status: VrchatStatus::Busy,
+                    },
+                )
+                .await
+        );
+
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert!(snapshot.vrchat.connected);
+        assert_eq!(snapshot.vrchat.display_name.as_deref(), Some("Hydra Employee"));
+        assert_eq!(snapshot.vrchat.status, VrchatStatus::AskMe);
     }
 }
