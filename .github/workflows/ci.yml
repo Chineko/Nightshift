@@ -24,6 +24,9 @@ jobs:
       - name: Test protocol compatibility
         run: cargo test -p nightshift-protocol
 
+      - name: Test invite rules
+        run: cargo test -p nightshift-invites
+
       - name: Check daemon
         run: cargo check -p nightshift-daemon
 
