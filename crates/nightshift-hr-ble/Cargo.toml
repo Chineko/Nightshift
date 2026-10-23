@@ -1,0 +1,13 @@
+[package]
+name = "nightshift-hr-ble"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+btleplug = "0.13.3"
+futures-util = "0.3"
+tokio.workspace = true
