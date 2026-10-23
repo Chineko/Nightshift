@@ -1,5 +1,6 @@
 use nightshift_protocol::{
-    OscState, OverlaySpawnMode, OverlayState, SettingsState, SleepState, SleepingPose, VrchatStatus,
+    AppState, OscState, OverlaySpawnMode, OverlayState, SettingsState, SleepState, SleepingPose,
+    VrchatStatus,
 };
 
 #[test]
@@ -79,4 +80,64 @@ fn old_sleep_state_defaults_pose_to_unknown() {
     let state: SleepState = serde_json::from_str(old_json).expect("old sleep state must decode");
 
     assert_eq!(state.pose, SleepingPose::Unknown);
+}
+
+#[test]
+fn old_full_app_state_decodes_with_additive_defaults() {
+    let old_json = r#"{
+        "connection": "connected",
+        "sleep": {
+            "phase": "awake",
+            "detection_enabled": false,
+            "detected_by_hr": false
+        },
+        "brightness": {
+            "current": 1.0,
+            "target": 1.0,
+            "sleep_target": 0.06,
+            "transitioning": false,
+            "manual_override": false
+        },
+        "heart_rate": {
+            "enabled": false,
+            "connected": false,
+            "bpm": null,
+            "status": "unknown"
+        },
+        "osc": {
+            "enabled": false,
+            "connected": false
+        },
+        "vrchat": {
+            "connected": false,
+            "display_name": null,
+            "status": "offline"
+        },
+        "invites": {
+            "enabled": false,
+            "profile": "disabled",
+            "last_action": null
+        },
+        "overlay": {
+            "visible": false,
+            "spawn_distance_m": 1.0,
+            "spawn_mode": "in_front"
+        },
+        "settings": {
+            "fade_duration_seconds": 3.0,
+            "sleep_vrchat_status": "ask_me",
+            "wake_vrchat_status": "active"
+        }
+    }"#;
+
+    let state: AppState = serde_json::from_str(old_json).expect("old full app state must decode");
+
+    assert_eq!(state.sleep.pose, SleepingPose::Unknown);
+    assert_eq!(state.osc.avatar_id, None);
+    assert_eq!(state.osc.avatar_parameter_count, 0);
+    assert!(!state.osc.gogo_detected);
+    assert!(!state.overlay.runtime_connected);
+    assert_eq!(state.overlay.runtime_client_version, None);
+    assert!(!state.settings.vrchat_status_automation_enabled);
+    assert!(!state.settings.gogo_automation_enabled);
 }
