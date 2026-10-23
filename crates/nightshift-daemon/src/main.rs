@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -28,6 +28,7 @@ struct StateStore {
     state: Arc<Mutex<AppState>>,
     updates: broadcast::Sender<StateEvent>,
     overlay_clients: Arc<AtomicUsize>,
+    transition_generation: Arc<AtomicU64>,
     config_updates: mpsc::UnboundedSender<PersistedConfig>,
 }
 
@@ -48,6 +49,7 @@ impl StateStore {
             state: Arc::new(Mutex::new(initial_state)),
             updates,
             overlay_clients: Arc::new(AtomicUsize::new(0)),
+            transition_generation: Arc::new(AtomicU64::new(0)),
             config_updates,
         }
     }
@@ -105,12 +107,15 @@ impl StateStore {
 
     async fn complete_transition(
         &self,
+        transition_id: u64,
         expected_phase: SleepPhase,
         final_phase: SleepPhase,
         final_brightness: f32,
     ) {
         let mut state = self.state.lock().await;
-        if state.sleep.phase != expected_phase {
+        if self.transition_generation.load(Ordering::Acquire) != transition_id
+            || state.sleep.phase != expected_phase
+        {
             return;
         }
 
@@ -147,28 +152,36 @@ impl StateStore {
 
         match command {
             UiCommand::EnterSleep => {
-                state.sleep.phase = SleepPhase::EnteringSleep;
-                state.brightness.target = state.brightness.sleep_target;
-                state.brightness.transitioning = true;
-                state.brightness.manual_override = false;
-                transition = Some((
-                    SleepPhase::EnteringSleep,
-                    SleepPhase::Sleeping,
-                    state.brightness.sleep_target,
-                    state.settings.fade_duration_seconds,
-                ));
+                if !matches!(state.sleep.phase, SleepPhase::EnteringSleep | SleepPhase::Sleeping) {
+                    let transition_id = self.transition_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                    state.sleep.phase = SleepPhase::EnteringSleep;
+                    state.brightness.target = state.brightness.sleep_target;
+                    state.brightness.transitioning = true;
+                    state.brightness.manual_override = false;
+                    transition = Some((
+                        transition_id,
+                        SleepPhase::EnteringSleep,
+                        SleepPhase::Sleeping,
+                        state.brightness.sleep_target,
+                        state.settings.fade_duration_seconds,
+                    ));
+                }
             }
             UiCommand::Wake => {
-                state.sleep.phase = SleepPhase::Waking;
-                state.brightness.target = 1.0;
-                state.brightness.transitioning = true;
-                state.brightness.manual_override = false;
-                transition = Some((
-                    SleepPhase::Waking,
-                    SleepPhase::Awake,
-                    1.0,
-                    state.settings.fade_duration_seconds,
-                ));
+                if !matches!(state.sleep.phase, SleepPhase::Waking | SleepPhase::Awake) {
+                    let transition_id = self.transition_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                    state.sleep.phase = SleepPhase::Waking;
+                    state.brightness.target = 1.0;
+                    state.brightness.transitioning = true;
+                    state.brightness.manual_override = false;
+                    transition = Some((
+                        transition_id,
+                        SleepPhase::Waking,
+                        SleepPhase::Awake,
+                        1.0,
+                        state.settings.fade_duration_seconds,
+                    ));
+                }
             }
             UiCommand::SetBrightness(value) => {
                 let value = value.clamp(0.02, 1.0);
@@ -206,12 +219,17 @@ impl StateStore {
         }
         drop(state);
 
-        if let Some((expected_phase, final_phase, final_brightness, seconds)) = transition {
+        if let Some((transition_id, expected_phase, final_phase, final_brightness, seconds)) = transition {
             let store = self.clone();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_secs_f32(seconds.max(0.0))).await;
                 store
-                    .complete_transition(expected_phase, final_phase, final_brightness)
+                    .complete_transition(
+                        transition_id,
+                        expected_phase,
+                        final_phase,
+                        final_brightness,
+                    )
                     .await;
             });
         }
@@ -459,4 +477,43 @@ async fn main() -> Result<()> {
 
     let _ = tokio::fs::remove_file(&path).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn repeated_same_transition_is_idempotent() {
+        let store = StateStore::new(AppState::default());
+        store.apply(UiCommand::EnterSleep).await;
+        let first = store.transition_generation.load(Ordering::Acquire);
+
+        store.apply(UiCommand::EnterSleep).await;
+        let second = store.transition_generation.load(Ordering::Acquire);
+
+        assert_eq!(first, second);
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.sleep.phase, SleepPhase::EnteringSleep);
+    }
+
+    #[tokio::test]
+    async fn stale_timer_cannot_finish_reentered_phase() {
+        let store = StateStore::new(AppState::default());
+        store.apply(UiCommand::EnterSleep).await;
+        let stale = store.transition_generation.load(Ordering::Acquire);
+
+        store.apply(UiCommand::Wake).await;
+        store.apply(UiCommand::EnterSleep).await;
+        let current = store.transition_generation.load(Ordering::Acquire);
+        assert_ne!(stale, current);
+
+        store
+            .complete_transition(stale, SleepPhase::EnteringSleep, SleepPhase::Sleeping, 0.06)
+            .await;
+
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.sleep.phase, SleepPhase::EnteringSleep);
+        assert!(snapshot.brightness.transitioning);
+    }
 }
