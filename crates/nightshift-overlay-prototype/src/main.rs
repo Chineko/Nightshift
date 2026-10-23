@@ -10,6 +10,7 @@ use ash::{
 };
 use openxr as xr;
 use xr::OverlaySessionCreateFlagsEXTX;
+use xr::sys::Handle as XrHandle;
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const VIEW_COUNT: u32 = 2;
@@ -147,11 +148,12 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
             .api_version(vk_target_version);
 
         let vk_instance = {
+            let vk_instance_info = vk::InstanceCreateInfo::default().application_info(&vk_app_info);
             let raw = xr_instance
                 .create_vulkan_instance(
                     system,
                     std::mem::transmute(vk_entry.static_fn().get_instance_proc_addr),
-                    (&raw const vk::InstanceCreateInfo::default().application_info(&vk_app_info)).cast(),
+                    (&raw const vk_instance_info).cast(),
                 )
                 .context("OpenXR creating Vulkan instance")?
                 .map_err(vk::Result::from_raw)
@@ -233,11 +235,13 @@ fn run_overlay(running: Arc<AtomicBool>, brightness: f32, placement: u32) -> Res
             .enumerate_swapchain_formats()
             .context("enumerating swapchain formats")?;
         let format = choose_color_format(&formats)?;
-        println!("Vulkan format: {format:?}");
+        println!("Vulkan format: {}", format.as_raw());
 
+        let view_masks = [0b11];
+        let correlation_masks = [0b11];
         let mut multiview_info = vk::RenderPassMultiviewCreateInfo::default()
-            .view_masks(&[0b11])
-            .correlation_masks(&[0b11]);
+            .view_masks(&view_masks)
+            .correlation_masks(&correlation_masks);
         let color_attachment = [vk::AttachmentDescription {
             format,
             samples: vk::SampleCountFlags::TYPE_1,
