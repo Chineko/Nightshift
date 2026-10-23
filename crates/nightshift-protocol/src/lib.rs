@@ -123,9 +123,21 @@ pub struct OverlayState {
     pub visible: bool,
     pub spawn_distance_m: f32,
     pub spawn_mode: OverlaySpawnMode,
+    #[serde(default)]
+    pub runtime_connected: bool,
+    #[serde(default)]
+    pub runtime_client_version: Option<String>,
 }
 impl Default for OverlayState {
-    fn default() -> Self { Self { visible: false, spawn_distance_m: 1.0, spawn_mode: OverlaySpawnMode::InFront } }
+    fn default() -> Self {
+        Self {
+            visible: false,
+            spawn_distance_m: 1.0,
+            spawn_mode: OverlaySpawnMode::InFront,
+            runtime_connected: false,
+            runtime_client_version: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
