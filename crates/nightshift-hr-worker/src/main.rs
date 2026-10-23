@@ -16,6 +16,31 @@ use tracing::{info, warn};
 const DAEMON_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const BLE_RETRY_DELAY: Duration = Duration::from_secs(3);
 
+struct ProviderTask(Option<JoinHandle<()>>);
+
+impl ProviderTask {
+    fn is_running(&self) -> bool {
+        self.0.is_some()
+    }
+
+    fn start(&mut self, task: JoinHandle<()>) {
+        self.stop();
+        self.0 = Some(task);
+    }
+
+    fn stop(&mut self) {
+        if let Some(task) = self.0.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for ProviderTask {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 fn socket_path() -> Result<PathBuf> {
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -82,26 +107,28 @@ fn spawn_ble_provider(
 
 fn set_provider_enabled(
     enabled: bool,
-    provider: &mut Option<JoinHandle<()>>,
+    provider: &mut ProviderTask,
     events: &mpsc::Sender<BleHeartRateEvent>,
     device_filter: &Option<String>,
 ) {
-    match (enabled, provider.is_some()) {
+    match (enabled, provider.is_running()) {
         (true, false) => {
             info!(
                 filter = device_filter.as_deref().unwrap_or("<first heart-rate device>"),
                 "starting BLE heart-rate provider"
             );
-            *provider = Some(spawn_ble_provider(events.clone(), device_filter.clone()));
+            provider.start(spawn_ble_provider(events.clone(), device_filter.clone()));
         }
         (false, true) => {
-            if let Some(task) = provider.take() {
-                task.abort();
-            }
+            provider.stop();
             info!("BLE heart-rate provider stopped");
         }
         _ => {}
     }
+}
+
+fn discard_queued_events(events: &mut mpsc::Receiver<BleHeartRateEvent>) {
+    while events.try_recv().is_ok() {}
 }
 
 async fn run_connection(stream: UnixStream) -> Result<()> {
@@ -120,7 +147,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
 
     let device_filter = configured_device_filter();
     let (event_tx, mut event_rx) = mpsc::channel::<BleHeartRateEvent>(32);
-    let mut provider: Option<JoinHandle<()>> = None;
+    let mut provider = ProviderTask(None);
     let mut enabled = false;
     let mut line = String::new();
 
@@ -154,6 +181,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                             &device_filter,
                         );
                         if !enabled {
+                            discard_queued_events(&mut event_rx);
                             report_runtime(&mut write_half, false, None).await?;
                         }
                     }
@@ -168,6 +196,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                                 &device_filter,
                             );
                             if !enabled {
+                                discard_queued_events(&mut event_rx);
                                 report_runtime(&mut write_half, false, None).await?;
                             }
                         }
@@ -227,5 +256,38 @@ async fn main() -> Result<()> {
         }
 
         tokio::time::sleep(DAEMON_RECONNECT_DELAY).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn dropping_provider_task_aborts_provider() {
+        let completed = Arc::new(AtomicBool::new(false));
+        let flag = completed.clone();
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            flag.store(true, Ordering::Release);
+        });
+
+        drop(ProviderTask(Some(task)));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+
+        assert!(!completed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn disabling_discards_queued_provider_events() {
+        let (tx, mut rx) = mpsc::channel(4);
+        tx.send(BleHeartRateEvent::Measurement(51)).await.unwrap();
+        tx.send(BleHeartRateEvent::Disconnected).await.unwrap();
+
+        discard_queued_events(&mut rx);
+
+        assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
     }
 }
