@@ -21,6 +21,7 @@ use nightshift_vrchat_worker::{
     invite_bridge::{
         InviteHandlingOutcome, InviteHandlingResult, handle_invite_notification,
     },
+    invite_dedup::RecentInviteNotifications,
     invite_execute::InviteExecutionOutcome,
 };
 use serde_json::Value;
@@ -164,11 +165,13 @@ fn sync_invite_session(
     current: &mut Option<SessionCookies>,
     next: Option<SessionCookies>,
     tasks: &mut JoinSet<Result<InviteHandlingResult>>,
+    recent: &mut RecentInviteNotifications,
 ) {
     if current.as_ref() == next.as_ref() {
         return;
     }
     tasks.abort_all();
+    recent.clear();
     *current = next;
 }
 
@@ -263,6 +266,14 @@ fn pipeline_error_message(frame: &str) -> Option<String> {
     }
 }
 
+fn redact_pipeline_secret(message: &str, auth_token: &str) -> String {
+    if auth_token.is_empty() {
+        message.to_owned()
+    } else {
+        message.replace(auth_token, "<redacted>")
+    }
+}
+
 async fn pipeline_loop(
     auth_token: String,
     events: mpsc::UnboundedSender<VrchatNotification>,
@@ -280,8 +291,10 @@ async fn pipeline_loop(
                 info!("VRChat pipeline connected");
                 socket
             }
-            Ok(Err(error)) => {
-                warn!(%error, "VRChat pipeline connection failed");
+            Ok(Err(_)) => {
+                // Do not log the websocket error object: depending on the implementation/error
+                // variant it may retain request details containing the authToken query parameter.
+                warn!("VRChat pipeline connection failed; retrying");
                 tokio::time::sleep(PIPELINE_RECONNECT_DELAY).await;
                 continue;
             }
@@ -297,6 +310,7 @@ async fn pipeline_loop(
                 Some(Ok(Message::Text(text))) => {
                     let frame = text.as_str();
                     if let Some(message) = pipeline_error_message(frame) {
+                        let message = redact_pipeline_secret(&message, &auth_token);
                         warn!(%message, "VRChat pipeline rejected the connection");
                         break;
                     }
@@ -318,8 +332,9 @@ async fn pipeline_loop(
                     break;
                 }
                 Some(Ok(_)) => {}
-                Some(Err(error)) => {
-                    warn!(%error, "VRChat pipeline read failed");
+                Some(Err(_)) => {
+                    // Keep websocket internals out of logs for the same reason as connect errors.
+                    warn!("VRChat pipeline read failed; reconnecting");
                     break;
                 }
                 None => {
@@ -530,6 +545,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut invite_state = InviteState::default();
     let mut active_session: Option<SessionCookies> = None;
     let mut invite_tasks = JoinSet::<Result<InviteHandlingResult>>::new();
+    let mut recent_invites = RecentInviteNotifications::default();
 
     loop {
         tokio::select! {
@@ -562,6 +578,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                             &mut active_session,
                             next_session,
                             &mut invite_tasks,
+                            &mut recent_invites,
                         );
                         sync_pipeline_task(
                             &mut pipeline_task,
@@ -618,6 +635,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                                     &mut active_session,
                                     None,
                                     &mut invite_tasks,
+                                    &mut recent_invites,
                                 );
                                 sync_pipeline_task(
                                     &mut pipeline_task,
@@ -675,6 +693,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     &mut active_session,
                     next_session,
                     &mut invite_tasks,
+                    &mut recent_invites,
                 );
                 sync_pipeline_task(
                     &mut pipeline_task,
@@ -702,6 +721,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                             &mut active_session,
                             next_session,
                             &mut invite_tasks,
+                            &mut recent_invites,
                         );
                         sync_pipeline_task(
                             &mut pipeline_task,
@@ -717,6 +737,10 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 }
             }
             Some(notification) = pipeline_rx.recv() => {
+                if !recent_invites.observe(&notification.id) {
+                    continue;
+                }
+
                 info!(
                     notification_id = %notification.id,
                     sender_user_id = %notification.sender_user_id,
@@ -820,6 +844,15 @@ mod tests {
             Some("expired")
         );
         assert_eq!(pipeline_error_message(r#"{"type":"notification"}"#), None);
+    }
+
+    #[test]
+    fn pipeline_server_error_redacts_auth_token() {
+        assert_eq!(
+            redact_pipeline_secret("auth token secret-token expired", "secret-token"),
+            "auth token <redacted> expired"
+        );
+        assert_eq!(redact_pipeline_secret("ordinary error", ""), "ordinary error");
     }
 
     #[test]
