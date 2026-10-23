@@ -68,8 +68,14 @@ fn socket_path() -> Option<PathBuf> {
         .map(|path| path.join("nightshift").join("nightshift.sock"))
 }
 
-fn discard_queued_commands(commands: &mut tokio_mpsc::UnboundedReceiver<UiCommand>) {
-    while commands.try_recv().is_ok() {}
+fn discard_queued_commands(commands: &mut tokio_mpsc::UnboundedReceiver<UiCommand>) -> bool {
+    loop {
+        match commands.try_recv() {
+            Ok(_) => {}
+            Err(tokio_mpsc::error::TryRecvError::Empty) => return true,
+            Err(tokio_mpsc::error::TryRecvError::Disconnected) => return false,
+        }
+    }
 }
 
 async fn connection_loop(
@@ -80,7 +86,9 @@ async fn connection_loop(
     loop {
         // Commands are only meaningful for the session in which the user issued them.
         // Never replay input that accumulated while the daemon was unavailable.
-        discard_queued_commands(&mut commands);
+        if !discard_queued_commands(&mut commands) {
+            return;
+        }
 
         let Some(path) = socket_path() else {
             let _ = updates.send(UiUpdate::Connected(false));
