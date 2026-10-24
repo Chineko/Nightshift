@@ -32,8 +32,10 @@ use xr::OverlaySessionCreateFlagsEXTX;
 use xr::sys::Handle as XrHandle;
 
 use content::PanelContent;
-use controller_input::ControllerInput;
-use interaction::{PanelAction, action_at_uv, hit_test_panel};
+use controller_input::{ControllerHand, ControllerInput};
+use interaction::{
+    PanelAction, PanelGrab, action_at_uv, begin_panel_grab, hit_test_panel, update_panel_grab,
+};
 use panel::{PANEL_HEIGHT_M, PANEL_WIDTH_M, PanelRenderer};
 use panel_cache::PanelBitmapCache;
 use panel_state::PanelStateTracker;
@@ -143,7 +145,10 @@ fn main() -> Result<()> {
     println!("  placement  : {placement}");
     println!("  daemon IPC : enabled");
     println!("  fallback fade default : {DEFAULT_TRANSITION_SECONDS:.1}s");
-    println!("  hydra mode : {}", if hydra_mode { "AWAKENED" } else { "sleeping" });
+    println!(
+        "  hydra mode : {}",
+        if hydra_mode { "AWAKENED" } else { "sleeping" }
+    );
     println!("  Ctrl+C to stop");
     println!();
     println!("The tiny evil square now takes orders from the daemon.");
@@ -159,9 +164,22 @@ fn main() -> Result<()> {
     let (updates_tx, updates_rx) = mpsc::channel();
     let (reports_tx, reports_rx) = mpsc::channel();
     let (commands_tx, commands_rx) = mpsc::channel();
-    spawn_ipc_client(running.clone(), updates_tx, reports_rx, commands_rx, hydra_mode);
+    spawn_ipc_client(
+        running.clone(),
+        updates_tx,
+        reports_rx,
+        commands_rx,
+        hydra_mode,
+    );
 
-    run_overlay(running, updates_rx, reports_tx, commands_tx, placement, hydra_mode)
+    run_overlay(
+        running,
+        updates_rx,
+        reports_tx,
+        commands_tx,
+        placement,
+        hydra_mode,
+    )
 }
 
 fn parse_flag_u32(name: &str) -> Result<Option<u32>> {
@@ -231,9 +249,9 @@ fn spawn_ipc_client(
                 Ok(stream) => {
                     announced_waiting = false;
                     println!("Nightshift overlay connected to daemon IPC.");
-                    if let Err(error) =
-                        run_ipc_connection(stream, &updates, &reports, &commands, &running, hydra_mode)
-                    {
+                    if let Err(error) = run_ipc_connection(
+                        stream, &updates, &reports, &commands, &running, hydra_mode,
+                    ) {
                         if running.load(Ordering::Relaxed) {
                             eprintln!("Nightshift overlay IPC disconnected: {error:#}");
                         }
@@ -262,7 +280,9 @@ fn spawn_ipc_client(
 fn write_client_message(writer: &mut UnixStream, message: &ClientMessage) -> Result<()> {
     let mut json = serde_json::to_vec(message).context("serializing daemon IPC message")?;
     json.push(b'\n');
-    writer.write_all(&json).context("sending daemon IPC message")?;
+    writer
+        .write_all(&json)
+        .context("sending daemon IPC message")?;
     writer.flush().context("flushing daemon IPC message")?;
     Ok(())
 }
@@ -457,6 +477,12 @@ fn panel_command(action: PanelAction, current_brightness: f32) -> UiCommand {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ActiveGrab {
+    hand: ControllerHand,
+    grab: PanelGrab,
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_overlay(
     running: Arc<AtomicBool>,
@@ -496,8 +522,13 @@ fn run_overlay(
         )
         .context("creating OpenXR instance")?;
 
-    let props = xr_instance.properties().context("querying OpenXR runtime")?;
-    println!("OpenXR runtime: {} {}", props.runtime_name, props.runtime_version);
+    let props = xr_instance
+        .properties()
+        .context("querying OpenXR runtime")?;
+    println!(
+        "OpenXR runtime: {} {}",
+        props.runtime_name, props.runtime_version
+    );
 
     let system = xr_instance
         .system(xr::FormFactor::HEAD_MOUNTED_DISPLAY)
@@ -601,11 +632,8 @@ fn run_overlay(
             placement,
         )?;
 
-        let (session, mut frame_waiter, mut frame_stream) = xr::Session::<xr::Vulkan>::from_raw(
-            xr_instance.clone(),
-            raw_session,
-            Box::new(()),
-        );
+        let (session, mut frame_waiter, mut frame_stream) =
+            xr::Session::<xr::Vulkan>::from_raw(xr_instance.clone(), raw_session, Box::new(()));
 
         let local_space = session
             .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
@@ -685,6 +713,7 @@ fn run_overlay(
         let pose_clock = Instant::now();
         let mut pose_tracker = PoseTracker::new(0);
         let mut input_error_reported = false;
+        let mut active_grab: Option<ActiveGrab> = None;
         let rect = xr::Rect2Di {
             offset: xr::Offset2Di { x: 0, y: 0 },
             extent: xr::Extent2Di {
@@ -708,7 +737,9 @@ fn run_overlay(
                 match event {
                     xr::Event::SessionStateChanged(event) => match event.state() {
                         xr::SessionState::READY => {
-                            session.begin(VIEW_TYPE).context("beginning overlay session")?;
+                            session
+                                .begin(VIEW_TYPE)
+                                .context("beginning overlay session")?;
                             session_running = true;
                             let now_ms = pose_clock.elapsed().as_millis() as u64;
                             pose_tracker = PoseTracker::new(now_ms);
@@ -780,11 +811,7 @@ fn run_overlay(
                     current_brightness = target;
                     fade = None;
                 } else {
-                    fade = Some(Fade::new(
-                        current_brightness,
-                        target,
-                        transition_seconds,
-                    ));
+                    fade = Some(Fade::new(current_brightness, target, transition_seconds));
                 }
             }
 
@@ -814,10 +841,14 @@ fn run_overlay(
                 .locate_views(VIEW_TYPE, frame_state.predicted_display_time, &local_space)
                 .context("locating stereo views")?;
             if views.len() != VIEW_COUNT as usize {
-                bail!("expected {VIEW_COUNT} views, runtime returned {}", views.len());
+                bail!(
+                    "expected {VIEW_COUNT} views, runtime returned {}",
+                    views.len()
+                );
             }
 
-            let needs_spawn_tracking = surface_target.visible && surface_controller.active_pose().is_none();
+            let needs_spawn_tracking =
+                surface_target.visible && surface_controller.active_pose().is_none();
             let (head_position, head_orientation) = if needs_spawn_tracking {
                 let location = view_space
                     .locate(&local_space, frame_state.predicted_display_time)
@@ -830,7 +861,11 @@ fn run_overlay(
                         .contains(xr::SpaceLocationFlags::ORIENTATION_VALID);
                 if tracking_valid {
                     (
-                        [location.pose.position.x, location.pose.position.y, location.pose.position.z],
+                        [
+                            location.pose.position.x,
+                            location.pose.position.y,
+                            location.pose.position.z,
+                        ],
                         [
                             location.pose.orientation.x,
                             location.pose.orientation.y,
@@ -844,11 +879,11 @@ fn run_overlay(
             } else {
                 ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])
             };
-            let panel_pose = surface_controller.sync(
-                surface_target,
-                head_position,
-                head_orientation,
-            );
+            if !surface_target.visible {
+                active_grab = None;
+            }
+            let mut panel_pose =
+                surface_controller.sync(surface_target, head_position, head_orientation);
             if let Some(report) = overlay_pose_report_if_changed(
                 &mut reported_saved_pose,
                 surface_controller.saved_pose(),
@@ -865,14 +900,52 @@ fn run_overlay(
                     Ok(samples) => {
                         input_error_reported = false;
                         if surface_target.visible {
-                            if let Some(panel_pose) = panel_pose {
+                            if let Some(current_panel_pose) = panel_pose {
                                 for sample in samples {
+                                    if let Some(active) = active_grab {
+                                        if active.hand != sample.hand {
+                                            continue;
+                                        }
+
+                                        if sample.just_released || !sample.select_down {
+                                            if let Some(committed_pose) =
+                                                surface_controller.active_pose()
+                                            {
+                                                let _ = surface_controller
+                                                    .remember_pose(committed_pose);
+                                                panel_pose = Some(committed_pose);
+                                                if hydra_mode {
+                                                    println!(
+                                                        "[Hydra/Input] hand={:?} grab=released position=({:.3},{:.3},{:.3})",
+                                                        sample.hand,
+                                                        committed_pose.position[0],
+                                                        committed_pose.position[1],
+                                                        committed_pose.position[2]
+                                                    );
+                                                }
+                                            }
+                                            active_grab = None;
+                                            continue;
+                                        }
+
+                                        if let Some(ray) = sample.ray {
+                                            if let Some(moved_pose) =
+                                                update_panel_grab(active.grab, ray)
+                                            {
+                                                if surface_controller.move_active_pose(moved_pose) {
+                                                    panel_pose = Some(moved_pose);
+                                                }
+                                            }
+                                        }
+                                        continue;
+                                    }
+
                                     let Some(ray) = sample.ray else {
                                         continue;
                                     };
                                     let Some(uv) = hit_test_panel(
                                         ray,
-                                        panel_pose,
+                                        current_panel_pose,
                                         PANEL_WIDTH_M,
                                         PANEL_HEIGHT_M,
                                     ) else {
@@ -881,9 +954,29 @@ fn run_overlay(
                                     if sample.just_pressed {
                                         if let Some(action) = action_at_uv(uv) {
                                             if hydra_mode {
-                                                println!("[Hydra/Input] hand={:?} action={action:?} uv=({:.3},{:.3})", sample.hand, uv.u, uv.v);
+                                                println!(
+                                                    "[Hydra/Input] hand={:?} action={action:?} uv=({:.3},{:.3})",
+                                                    sample.hand, uv.u, uv.v
+                                                );
                                             }
-                                            let _ = commands.send(panel_command(action, current_brightness));
+                                            let _ = commands
+                                                .send(panel_command(action, current_brightness));
+                                        } else if let Some(grab) = begin_panel_grab(
+                                            ray,
+                                            current_panel_pose,
+                                            PANEL_WIDTH_M,
+                                            PANEL_HEIGHT_M,
+                                        ) {
+                                            active_grab = Some(ActiveGrab {
+                                                hand: sample.hand,
+                                                grab,
+                                            });
+                                            if hydra_mode {
+                                                println!(
+                                                    "[Hydra/Input] hand={:?} grab=started uv=({:.3},{:.3})",
+                                                    sample.hand, uv.u, uv.v
+                                                );
+                                            }
                                         }
                                     }
                                 }
@@ -919,14 +1012,16 @@ fn run_overlay(
                 );
             }
 
-            let image_index = swapchain.acquire_image().context("acquiring dimmer image")?;
+            let image_index = swapchain
+                .acquire_image()
+                .context("acquiring dimmer image")?;
             swapchain
                 .wait_image(xr::Duration::INFINITE)
                 .context("waiting for dimmer image")?;
 
-            let image = *images
-                .get(image_index as usize)
-                .ok_or_else(|| anyhow!("runtime returned invalid swapchain image index {image_index}"))?;
+            let image = *images.get(image_index as usize).ok_or_else(|| {
+                anyhow!("runtime returned invalid swapchain image index {image_index}")
+            })?;
 
             vk_device
                 .wait_for_fences(&[fence], true, u64::MAX)
@@ -1006,7 +1101,9 @@ fn run_overlay(
             vk_device
                 .wait_for_fences(&[fence], true, u64::MAX)
                 .context("waiting for dimmer clear to finish")?;
-            swapchain.release_image().context("releasing dimmer image")?;
+            swapchain
+                .release_image()
+                .context("releasing dimmer image")?;
 
             let projection_views = [
                 xr::CompositionLayerProjectionView::new()
@@ -1046,7 +1143,9 @@ fn run_overlay(
                         &bitmap.rgba,
                     )?;
                     if hydra_mode {
-                        println!("[Hydra/Panel] status parchment refreshed; rectangle knows too much.");
+                        println!(
+                            "[Hydra/Panel] status parchment refreshed; rectangle knows too much."
+                        );
                     }
                 } else {
                     panel_renderer.ensure_initialized(&vk_device, queue, command_buffer, fence)?;
@@ -1061,11 +1160,7 @@ fn run_overlay(
                     .context("submitting dimmer and positioned panel layers")?;
             } else {
                 frame_stream
-                    .end(
-                        frame_state.predicted_display_time,
-                        blend_mode,
-                        &[&layer],
-                    )
+                    .end(frame_state.predicted_display_time, blend_mode, &[&layer])
                     .context("submitting dimmer composition layer")?;
             }
         }

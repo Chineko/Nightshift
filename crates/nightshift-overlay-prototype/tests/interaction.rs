@@ -1,9 +1,12 @@
-#[path = "../src/placement.rs"]
-mod placement;
 #[path = "../src/interaction.rs"]
 mod interaction;
+#[path = "../src/placement.rs"]
+mod placement;
 
-use interaction::{PanelAction, PanelRay, PanelUv, action_at_uv, hit_test_panel};
+use interaction::{
+    PanelAction, PanelRay, PanelUv, action_at_uv, begin_panel_grab, hit_test_panel,
+    update_panel_grab,
+};
 use placement::PanelPose;
 
 const WIDTH: f32 = 0.72;
@@ -106,4 +109,79 @@ fn button_regions_map_to_expected_actions_and_gaps_are_dead() {
     }
     assert_eq!(action_at_uv(PanelUv { u: 0.27, v: 0.91 }), None);
     assert_eq!(action_at_uv(PanelUv { u: 0.5, v: 0.5 }), None);
+}
+
+#[test]
+fn grab_moves_panel_with_controller_translation_without_rotating_it() {
+    let initial = identity_panel();
+    let grab = begin_panel_grab(
+        PanelRay {
+            origin: [0.0, 0.0, 0.0],
+            direction: [0.0, 0.0, -1.0],
+        },
+        initial,
+        WIDTH,
+        HEIGHT,
+    )
+    .expect("center press should begin grab");
+
+    let moved = update_panel_grab(
+        grab,
+        PanelRay {
+            origin: [0.25, 0.10, 0.0],
+            direction: [0.0, 0.0, -1.0],
+        },
+    )
+    .expect("valid tracked ray should move panel");
+
+    assert!((moved.position[0] - 0.25).abs() < 1.0e-5);
+    assert!((moved.position[1] - 0.10).abs() < 1.0e-5);
+    assert!((moved.position[2] + 1.0).abs() < 1.0e-5);
+    assert_eq!(moved.orientation_xyzw, initial.orientation_xyzw);
+}
+
+#[test]
+fn off_center_grab_preserves_the_grabbed_point() {
+    let initial = identity_panel();
+    let start_ray = PanelRay {
+        origin: [0.2, 0.0, 0.0],
+        direction: [0.0, 0.0, -1.0],
+    };
+    let grab = begin_panel_grab(start_ray, initial, WIDTH, HEIGHT)
+        .expect("off-center panel point should be grabbable");
+    let moved = update_panel_grab(
+        grab,
+        PanelRay {
+            origin: [0.35, 0.0, 0.0],
+            direction: [0.0, 0.0, -1.0],
+        },
+    )
+    .expect("translated controller should move panel");
+
+    assert!((moved.position[0] - 0.15).abs() < 1.0e-5);
+    assert!((moved.position[2] + 1.0).abs() < 1.0e-5);
+}
+
+#[test]
+fn grab_update_rejects_invalid_tracking() {
+    let grab = begin_panel_grab(
+        PanelRay {
+            origin: [0.0, 0.0, 0.0],
+            direction: [0.0, 0.0, -1.0],
+        },
+        identity_panel(),
+        WIDTH,
+        HEIGHT,
+    )
+    .unwrap();
+    assert!(
+        update_panel_grab(
+            grab,
+            PanelRay {
+                origin: [f32::NAN, 0.0, 0.0],
+                direction: [0.0, 0.0, -1.0],
+            },
+        )
+        .is_none()
+    );
 }

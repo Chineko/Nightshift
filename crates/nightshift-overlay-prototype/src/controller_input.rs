@@ -13,7 +13,9 @@ pub enum ControllerHand {
 pub struct PointerSample {
     pub hand: ControllerHand,
     pub ray: Option<PanelRay>,
+    pub select_down: bool,
     pub just_pressed: bool,
+    pub just_released: bool,
 }
 
 pub struct ControllerInput {
@@ -137,9 +139,9 @@ fn sample_hand(
     let select_state = select
         .state(session, xr::Path::NULL)
         .context("reading controller select action")?;
-    let just_pressed = select_state.is_active
-        && select_state.changed_since_last_sync
-        && select_state.current_state;
+    let select_down = select_state.is_active && select_state.current_state;
+    let just_pressed = select_state.changed_since_last_sync && select_state.current_state;
+    let just_released = select_state.changed_since_last_sync && !select_state.current_state;
 
     let ray = if aim.is_active(session, xr::Path::NULL)? {
         let location = space
@@ -159,7 +161,9 @@ fn sample_hand(
     Ok(PointerSample {
         hand,
         ray,
+        select_down,
         just_pressed,
+        just_released,
     })
 }
 

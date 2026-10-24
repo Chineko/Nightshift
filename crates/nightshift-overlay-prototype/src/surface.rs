@@ -1,6 +1,8 @@
 use nightshift_protocol::{OverlayPose, OverlaySpawnMode, OverlayState};
 
-use crate::placement::{PanelPose, normalize_quaternion_xyzw, panel_pose_in_front, sanitize_panel_distance};
+use crate::placement::{
+    PanelPose, normalize_quaternion_xyzw, panel_pose_in_front, sanitize_panel_distance,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceTarget {
@@ -16,7 +18,10 @@ impl From<&OverlayState> for SurfaceTarget {
             visible: state.visible,
             distance_m: sanitize_panel_distance(state.spawn_distance_m),
             spawn_mode: state.spawn_mode,
-            remembered_pose: state.remembered_pose.map(panel_pose_from_protocol).and_then(sanitize_pose),
+            remembered_pose: state
+                .remembered_pose
+                .map(panel_pose_from_protocol)
+                .and_then(sanitize_pose),
         }
     }
 }
@@ -60,6 +65,17 @@ impl SurfaceController {
 
     pub const fn saved_pose(&self) -> Option<PanelPose> {
         self.saved_pose
+    }
+
+    pub fn move_active_pose(&mut self, pose: PanelPose) -> bool {
+        if !self.visible {
+            return false;
+        }
+        let Some(pose) = sanitize_pose(pose) else {
+            return false;
+        };
+        self.active_pose = Some(pose);
+        true
     }
 
     pub fn remember_pose(&mut self, pose: PanelPose) -> bool {
@@ -164,6 +180,24 @@ mod tests {
             [0.0, 0.0, 0.0, 1.0],
         );
         assert_eq!(restored, Some(current));
+    }
+
+    #[test]
+    fn live_move_does_not_replace_saved_pose_until_commit() {
+        let mut controller = SurfaceController::default();
+        let original = pose(1.0);
+        assert!(controller.remember_pose(original));
+        let _ = controller.sync(
+            target(OverlaySpawnMode::RestoreLastPosition, None),
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        let moved = pose(2.0);
+        assert!(controller.move_active_pose(moved));
+        assert_eq!(controller.active_pose(), Some(moved));
+        assert_eq!(controller.saved_pose(), Some(original));
+        assert!(controller.remember_pose(moved));
+        assert_eq!(controller.saved_pose(), Some(moved));
     }
 
     #[test]

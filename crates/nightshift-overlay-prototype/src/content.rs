@@ -1,6 +1,4 @@
-use nightshift_protocol::{
-    AppState, HrProviderStatus, InviteProfile, SleepPhase, VrchatStatus,
-};
+use nightshift_protocol::{AppState, HrProviderStatus, InviteProfile, SleepPhase, VrchatStatus};
 
 pub const PANEL_LINE_COUNT: usize = 6;
 
@@ -31,7 +29,12 @@ fn sleep_line(state: &AppState) -> String {
         SleepPhase::Sleeping => "Sleeping",
         SleepPhase::Waking => "Waking",
     };
-    if state.sleep.detected_by_hr && matches!(state.sleep.phase, SleepPhase::EnteringSleep | SleepPhase::Sleeping) {
+    if state.sleep.detected_by_hr
+        && matches!(
+            state.sleep.phase,
+            SleepPhase::EnteringSleep | SleepPhase::Sleeping
+        )
+    {
         format!("Sleep: {phase} (HR)")
     } else {
         format!("Sleep: {phase}")
@@ -41,7 +44,10 @@ fn sleep_line(state: &AppState) -> String {
 fn brightness_line(state: &AppState) -> String {
     let current = percent(state.brightness.current);
     if state.brightness.transitioning {
-        format!("Brightness: {current}% -> {}%", percent(state.brightness.target))
+        format!(
+            "Brightness: {current}% -> {}%",
+            percent(state.brightness.target)
+        )
     } else {
         format!("Brightness: {current}%")
     }
@@ -153,6 +159,9 @@ mod tests {
     fn non_finite_brightness_fails_to_safe_readable_value() {
         let mut state = AppState::default();
         state.brightness.current = f32::NAN;
-        assert_eq!(PanelContent::from_state(&state).lines[2], "Brightness: 100%");
+        assert_eq!(
+            PanelContent::from_state(&state).lines[2],
+            "Brightness: 100%"
+        );
     }
 }
