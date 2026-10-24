@@ -80,47 +80,55 @@ impl PanelRenderer {
         self.swapchain
             .wait_image(xr::Duration::INFINITE)
             .context("waiting for positioned panel image")?;
-        let image = self.image(image_index)?;
 
-        unsafe {
-            prepare_command_buffer(device, command_buffer, fence)?;
+        let render_result = (|| -> Result<()> {
+            let image = self.image(image_index)?;
+            unsafe {
+                prepare_command_buffer(device, command_buffer, fence)?;
 
-            let to_transfer = [vk::ImageMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::empty())
-                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .old_layout(vk::ImageLayout::UNDEFINED)
-                .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .image(image)
-                .subresource_range(self.subresource)];
-            device.cmd_pipeline_barrier(
-                command_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &to_transfer,
-            );
+                let to_transfer = [vk::ImageMemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(self.subresource)];
+                device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &to_transfer,
+                );
 
-            device.cmd_clear_color_image(
-                command_buffer,
-                image,
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &vk::ClearColorValue {
-                    float32: [0.035, 0.04, 0.055, 1.0],
-                },
-                &[self.subresource],
-            );
+                device.cmd_clear_color_image(
+                    command_buffer,
+                    image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &vk::ClearColorValue {
+                        float32: [0.035, 0.04, 0.055, 1.0],
+                    },
+                    &[self.subresource],
+                );
 
-            transition_to_compositor(device, command_buffer, image, self.subresource);
-            submit_and_wait(device, queue, command_buffer, fence)?;
-        }
+                transition_to_compositor(device, command_buffer, image, self.subresource);
+                submit_and_wait(device, queue, command_buffer, fence)?;
+            }
+            Ok(())
+        })();
 
-        self.swapchain
+        // Once OpenXR has handed us a waited image, it goes back even if the GPU path
+        // trips over its own shoelaces. Starving the compositor is poor goblin etiquette.
+        let release_result = self
+            .swapchain
             .release_image()
-            .context("releasing positioned panel image")?;
+            .context("releasing positioned panel image");
+        render_result?;
+        release_result?;
         self.initialized = true;
         Ok(())
     }
@@ -145,110 +153,141 @@ impl PanelRenderer {
         self.swapchain
             .wait_image(xr::Duration::INFINITE)
             .context("waiting for positioned panel image for upload")?;
-        let image = self.image(image_index)?;
-
-        let buffer = unsafe {
-            device.create_buffer(
-                &vk::BufferCreateInfo::default()
-                    .size(upload.len() as u64)
-                    .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
-                None,
-            )
-        }
-        .context("creating positioned panel staging buffer")?;
-        let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-        let properties = unsafe { instance.get_physical_device_memory_properties(physical_device) };
-        let memory_type_index = find_memory_type(
-            requirements.memory_type_bits,
-            &properties,
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-        )
-        .ok_or_else(|| anyhow!("Vulkan exposes no host-visible coherent memory for panel upload"))?;
-        let memory = unsafe {
-            device.allocate_memory(
-                &vk::MemoryAllocateInfo::default()
-                    .allocation_size(requirements.size)
-                    .memory_type_index(memory_type_index),
-                None,
-            )
-        }
-        .context("allocating positioned panel staging memory")?;
 
         let upload_result = (|| -> Result<()> {
-            unsafe {
-                device
-                    .bind_buffer_memory(buffer, memory, 0)
-                    .context("binding positioned panel staging memory")?;
-                let mapped = device
-                    .map_memory(memory, 0, upload.len() as u64, vk::MemoryMapFlags::empty())
-                    .context("mapping positioned panel staging memory")?;
-                std::ptr::copy_nonoverlapping(upload.as_ptr(), mapped.cast::<u8>(), upload.len());
-                device.unmap_memory(memory);
-
-                prepare_command_buffer(device, command_buffer, fence)?;
-                let to_transfer = [vk::ImageMemoryBarrier::default()
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .old_layout(vk::ImageLayout::UNDEFINED)
-                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                    .image(image)
-                    .subresource_range(self.subresource)];
-                device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &to_transfer,
-                );
-
-                let copy = [vk::BufferImageCopy::default()
-                    .buffer_offset(0)
-                    .buffer_row_length(0)
-                    .buffer_image_height(0)
-                    .image_subresource(
-                        vk::ImageSubresourceLayers::default()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .mip_level(0)
-                            .base_array_layer(0)
-                            .layer_count(1),
-                    )
-                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                    .image_extent(vk::Extent3D {
-                        width: PANEL_TEXTURE_WIDTH,
-                        height: PANEL_TEXTURE_HEIGHT,
-                        depth: 1,
-                    })];
-                device.cmd_copy_buffer_to_image(
-                    command_buffer,
-                    buffer,
-                    image,
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    &copy,
-                );
-
-                transition_to_compositor(device, command_buffer, image, self.subresource);
-                submit_and_wait(device, queue, command_buffer, fence)?;
+            let image = self.image(image_index)?;
+            let buffer = unsafe {
+                device.create_buffer(
+                    &vk::BufferCreateInfo::default()
+                        .size(upload.len() as u64)
+                        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
+                        .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                    None,
+                )
             }
-            Ok(())
+            .context("creating positioned panel staging buffer")?;
+
+            let staging_result = (|| -> Result<()> {
+                let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
+                let properties =
+                    unsafe { instance.get_physical_device_memory_properties(physical_device) };
+                let memory_type_index = find_memory_type(
+                    requirements.memory_type_bits,
+                    &properties,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE
+                        | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )
+                .ok_or_else(|| {
+                    anyhow!("Vulkan exposes no host-visible coherent memory for panel upload")
+                })?;
+                let memory = unsafe {
+                    device.allocate_memory(
+                        &vk::MemoryAllocateInfo::default()
+                            .allocation_size(requirements.size)
+                            .memory_type_index(memory_type_index),
+                        None,
+                    )
+                }
+                .context("allocating positioned panel staging memory")?;
+
+                let copy_result = (|| -> Result<()> {
+                    unsafe {
+                        device
+                            .bind_buffer_memory(buffer, memory, 0)
+                            .context("binding positioned panel staging memory")?;
+                        let mapped = device
+                            .map_memory(
+                                memory,
+                                0,
+                                upload.len() as u64,
+                                vk::MemoryMapFlags::empty(),
+                            )
+                            .context("mapping positioned panel staging memory")?;
+                        std::ptr::copy_nonoverlapping(
+                            upload.as_ptr(),
+                            mapped.cast::<u8>(),
+                            upload.len(),
+                        );
+                        device.unmap_memory(memory);
+
+                        prepare_command_buffer(device, command_buffer, fence)?;
+                        let to_transfer = [vk::ImageMemoryBarrier::default()
+                            .src_access_mask(vk::AccessFlags::empty())
+                            .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                            .old_layout(vk::ImageLayout::UNDEFINED)
+                            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                            .image(image)
+                            .subresource_range(self.subresource)];
+                        device.cmd_pipeline_barrier(
+                            command_buffer,
+                            vk::PipelineStageFlags::TOP_OF_PIPE,
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::DependencyFlags::empty(),
+                            &[],
+                            &[],
+                            &to_transfer,
+                        );
+
+                        let copy = [vk::BufferImageCopy::default()
+                            .buffer_offset(0)
+                            .buffer_row_length(0)
+                            .buffer_image_height(0)
+                            .image_subresource(
+                                vk::ImageSubresourceLayers::default()
+                                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                    .mip_level(0)
+                                    .base_array_layer(0)
+                                    .layer_count(1),
+                            )
+                            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                            .image_extent(vk::Extent3D {
+                                width: PANEL_TEXTURE_WIDTH,
+                                height: PANEL_TEXTURE_HEIGHT,
+                                depth: 1,
+                            })];
+                        device.cmd_copy_buffer_to_image(
+                            command_buffer,
+                            buffer,
+                            image,
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            &copy,
+                        );
+
+                        transition_to_compositor(
+                            device,
+                            command_buffer,
+                            image,
+                            self.subresource,
+                        );
+                        submit_and_wait(device, queue, command_buffer, fence)?;
+                    }
+                    Ok(())
+                })();
+
+                unsafe {
+                    device.free_memory(memory, None);
+                }
+                copy_result
+            })();
+
+            // The staging buffer does not get to haunt us just because memory setup failed.
+            unsafe {
+                device.destroy_buffer(buffer, None);
+            }
+            staging_result
         })();
 
-        unsafe {
-            device.destroy_buffer(buffer, None);
-            device.free_memory(memory, None);
-        }
-
-        if upload_result.is_ok() {
-            self.swapchain
-                .release_image()
-                .context("releasing uploaded positioned panel image")?;
-            self.initialized = true;
-        }
-        upload_result
+        // Same rule as initialization: a waited swapchain image always goes home.
+        let release_result = self
+            .swapchain
+            .release_image()
+            .context("releasing uploaded positioned panel image");
+        upload_result?;
+        release_result?;
+        self.initialized = true;
+        Ok(())
     }
 
     pub fn layer<'a>(
@@ -371,7 +410,10 @@ fn prepare_upload_bytes(rgba: &[u8], format: vk::Format) -> Result<Vec<u8>> {
             }
             Ok(bgra)
         }
-        _ => bail!("unsupported positioned panel upload format {format:?}"),
+        _ => bail!(
+            "unsupported positioned panel upload format {}",
+            format.as_raw()
+        ),
     }
 }
 
@@ -434,5 +476,12 @@ mod tests {
     #[test]
     fn upload_rejects_wrong_bitmap_size() {
         assert!(prepare_upload_bytes(&[0; 4], vk::Format::R8G8B8A8_UNORM).is_err());
+    }
+
+    #[test]
+    fn upload_rejects_unsupported_format_without_debug_formatting() {
+        let rgba = pixel_buffer([1, 2, 3, 4]);
+        let error = prepare_upload_bytes(&rgba, vk::Format::R16G16B16A16_SFLOAT).unwrap_err();
+        assert!(error.to_string().contains("unsupported positioned panel upload format"));
     }
 }
