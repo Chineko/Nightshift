@@ -1,38 +1,66 @@
-# Nightshift OpenXR dimmer prototype
+# Nightshift OpenXR overlay worker
 
-This crate exists only to validate compositor ordering with Monado/WiVRn and WayVR.
+This crate hosts Nightshift's OpenXR compositor worker for Monado/WiVRn setups. It creates an `XR_EXTX_overlay` session at placement `4` and currently has three responsibilities:
 
-It creates an `XR_EXTX_overlay` session at placement `4` (WayVR currently uses placement `5`) and submits a tiny 4x4 black stereo projection layer with source-alpha blending. The compositor stretches the layer over the normal stereo views, so the GPU workload is intentionally tiny.
+- submit the tiny stereo projection-layer sleep dimmer
+- report HMD orientation to the daemon's sleeping-pose detector
+- submit a basic world-locked positioned `CompositionLayerQuad` controlled by canonical overlay state
 
-## Test
+Current WayVR uses a higher overlay placement, so WayVR can continue to render above Nightshift while both are running.
 
-Start WiVRn and connect the headset, launch VRChat, then launch WayVR normally so a WayVR panel is visible.
+## Run
 
-Run:
-
-```fish
-cargo run -p nightshift-overlay-prototype --release -- --brightness 0.20
-```
-
-Expected result:
-
-- VRChat / the main OpenXR session becomes roughly 20% as bright.
-- WayVR stays at normal brightness.
-- Moving your head does not uncover the dimmer.
-- Ctrl+C removes the dimmer cleanly.
-
-Useful variants:
+Start WiVRn/Monado and connect the headset. Start the Nightshift daemon, then launch the overlay worker:
 
 ```fish
-cargo run -p nightshift-overlay-prototype --release -- --brightness 0.50
-cargo run -p nightshift-overlay-prototype --release -- --brightness 0.06
-cargo run -p nightshift-overlay-prototype --release -- --brightness 1.00
+cargo run -p nightshift-daemon
+cargo run -p nightshift-overlay --release
 ```
 
-To experiment with compositor ordering:
+In another terminal, `nightshiftctl` can exercise the positioned surface:
 
 ```fish
-cargo run -p nightshift-overlay-prototype --release -- --brightness 0.20 --placement 4
+cargo run -p nightshiftctl -- overlay-distance 1.25
+cargo run -p nightshiftctl -- overlay-mode in-front
+cargo run -p nightshiftctl -- overlay-show
+cargo run -p nightshiftctl -- status
+cargo run -p nightshiftctl -- overlay-hide
 ```
 
-If placement 4 unexpectedly lands above WayVR, try 3 and 6 and record which components dim. This is prototype code; once ordering is confirmed, brightness/fade control will move behind the Nightshift daemon and the overlay renderer will stop repainting unchanged pixels every frame.
+The same visibility, distance, and spawn-mode controls are available in the desktop Settings view.
+
+## Expected positioned-panel behavior
+
+- `overlay-show` captures a headset-centered VIEW pose at the configured distance and submits the panel in LOCAL/world space.
+- Moving your head after showing the panel does not make it follow your head.
+- `overlay-hide` removes the quad layer from subsequent rendered frames.
+- `restore-last-position` reuses the most recent valid pose remembered by the running overlay process.
+- If there is no remembered pose, restore mode falls back to spawning in front of the headset.
+- Invalid HMD tracking does not create a malformed panel.
+- A daemon IPC disconnect fails the positioned panel closed to hidden.
+
+The remembered panel pose is currently process-local. Restarting the overlay worker clears it; persistent transforms and direct grabbing/repositioning are future work.
+
+## Expected dimmer/ordering behavior
+
+Use the normal Nightshift brightness/sleep controls while VRChat is visible. The dimmer remains a tiny black stereo projection layer with source-alpha blending.
+
+Expected compositor behavior:
+
+- VRChat / the main OpenXR session dims according to canonical Nightshift brightness.
+- The positioned Nightshift panel is submitted after Nightshift's dimmer and remains undimmed.
+- WayVR remains at normal brightness when running above Nightshift's placement-4 session.
+- Moving your head does not uncover the full-screen dimmer.
+- Ctrl+C removes Nightshift's OpenXR layers cleanly.
+
+The first positioned panel intentionally contains only a fixed dark surface. Rich content and interaction come after geometry, lifecycle, and compositor ordering are validated on real hardware.
+
+## Automated checks
+
+CI runs:
+
+```fish
+cargo test -p nightshift-overlay
+```
+
+This covers placement geometry, finite-value validation, show/hide/restore state behavior, and the quad-rendering API boundary. CI installs the OpenXR loader development package so these tests are linked and executed rather than only compile-checked.
