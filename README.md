@@ -9,6 +9,7 @@ The project is intentionally split so Nightshift can run on its own and WayVR ca
 - `nightshift-protocol` — shared state, commands, events, capability handshake, and versioned IPC types.
 - `nightshift-daemon` — source of truth and event-driven Unix-socket server.
 - `nightshift-ui` — desktop UI client. It keeps IPC off the UI thread and requests repaints only when state changes.
+- `nightshift-overlay-prototype` — OpenXR full-screen dimmer and HMD pose worker. It follows canonical daemon brightness/fade state; it is not the future positioned WayVR/panel surface.
 
 The daemon socket is created at:
 
@@ -44,7 +45,13 @@ The Home view currently includes:
 - sleep brightness target/status
 - heart-rate, OSC, VRChat status, and invite-rule summaries
 
-The Settings view currently includes the first sleep and automation controls. Additional rule editing, HR provider configuration, controller shortcut settings, and WayVR-specific overlay behavior will be added as their backends are wired in.
+The Settings view currently includes sleep and automation controls plus heart-rate provider discovery/selection and HR tuning. Additional rule editing, controller shortcut settings, and WayVR-specific overlay behavior will be added as their backends are wired in.
+
+## Overlay behavior
+
+The current OpenXR overlay prototype is a stereo projection-layer dimmer used for Nightshift brightness/fade behavior. Because it covers the headset views, meter-based spawn distance and positioned-panel placement modes do not apply to that dimmer.
+
+The daemon protocol/config already carries bounded `spawn_distance_m` and `spawn_mode` settings for a future positioned overlay surface. Those settings are intentionally not presented as active dimmer controls until a WayVR or OpenXR quad/panel backend consumes them. `ShowOverlay`/`HideOverlay` likewise remain reserved for that positioned surface rather than disabling the sleep dimmer.
 
 ## Performance principles
 
