@@ -24,6 +24,9 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Verify Cargo lockfile
+        run: cargo metadata --locked --no-deps > /dev/null
+
       - name: Test protocol compatibility
         run: cargo test -p nightshift-protocol
 
