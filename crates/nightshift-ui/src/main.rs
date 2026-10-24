@@ -9,8 +9,8 @@ use std::{
 use chrono::{Local, Timelike};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use nightshift_protocol::{
-    AppState, ClientMessage, HrProviderStatus, InviteProfile, PROTOCOL_VERSION, ServerMessage,
-    SleepPhase, StateEvent, UiCommand, VrchatStatus,
+    AppState, ClientMessage, HrProviderStatus, InviteProfile, OverlaySpawnMode, PROTOCOL_VERSION,
+    ServerMessage, SleepPhase, StateEvent, UiCommand, VrchatStatus,
 };
 use nightshift_ui::{invite_settings_ui::InviteSettingsUi, vrchat_auth_ui::VrchatAuthUi};
 use tokio::{
@@ -483,6 +483,78 @@ impl NightshiftApp {
         );
     }
 
+    fn overlay_settings(&mut self, ui: &mut egui::Ui) {
+        status_row(
+            ui,
+            "Runtime",
+            if self.state.overlay.runtime_connected {
+                "Connected"
+            } else {
+                "Disconnected"
+            },
+        );
+        status_row(
+            ui,
+            "Runtime version",
+            self.state
+                .overlay
+                .runtime_client_version
+                .as_deref()
+                .unwrap_or("—"),
+        );
+
+        ui.add_space(8.0);
+        let visibility_label = if self.state.overlay.visible {
+            "Hide overlay"
+        } else {
+            "Show overlay"
+        };
+        if ui.button(visibility_label).clicked() {
+            self.send_command(if self.state.overlay.visible {
+                UiCommand::HideOverlay
+            } else {
+                UiCommand::ShowOverlay
+            });
+        }
+
+        ui.add_space(8.0);
+        let mut distance = self.state.overlay.spawn_distance_m;
+        ui.label("Spawn distance");
+        if ui
+            .add(egui::Slider::new(&mut distance, 0.25..=5.0).suffix(" m"))
+            .changed()
+        {
+            self.send_command(UiCommand::SetOverlaySpawnDistance(distance));
+        }
+
+        let mut mode = self.state.overlay.spawn_mode;
+        let before = mode;
+        ui.horizontal(|ui| {
+            ui.label("Spawn mode");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::ComboBox::from_id_salt("overlay_spawn_mode")
+                    .selected_text(overlay_spawn_mode_name(mode))
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut mode, OverlaySpawnMode::InFront, "In front");
+                        ui.selectable_value(
+                            &mut mode,
+                            OverlaySpawnMode::RestoreLastPosition,
+                            "Restore last position",
+                        );
+                    });
+            });
+        });
+        if mode != before {
+            self.send_command(UiCommand::SetOverlaySpawnMode(mode));
+        }
+
+        ui.label(
+            RichText::new("Placement settings are persisted by the daemon; runtime visibility stays session state.")
+                .color(MUTED)
+                .small(),
+        );
+    }
+
     fn settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("Settings");
         ui.label(RichText::new("Changes are sent to the daemon immediately and only changed state is broadcast back.").color(MUTED));
@@ -580,6 +652,9 @@ impl NightshiftApp {
         });
 
         ui.add_space(12.0);
+        setting_card(ui, "Overlay", |ui| self.overlay_settings(ui));
+
+        ui.add_space(12.0);
         setting_card(ui, "Invite automation", |ui| {
             let commands = self.invite_settings.render(ui, &self.state.invites);
             for command in commands {
@@ -671,6 +746,13 @@ fn hr_provider_status_name(status: HrProviderStatus) -> &'static str {
         HrProviderStatus::Connected => "Connected",
         HrProviderStatus::Error => "Error",
         HrProviderStatus::Unknown => "Unknown",
+    }
+}
+
+fn overlay_spawn_mode_name(mode: OverlaySpawnMode) -> &'static str {
+    match mode {
+        OverlaySpawnMode::InFront => "In front",
+        OverlaySpawnMode::RestoreLastPosition => "Restore last position",
     }
 }
 
