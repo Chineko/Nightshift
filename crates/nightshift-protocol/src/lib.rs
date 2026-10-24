@@ -82,6 +82,13 @@ pub enum HrStatus { Normal, Resting, SleepCandidate, #[default] Unknown }
 #[serde(rename_all = "snake_case")]
 pub enum HrProviderStatus { Disabled, Searching, Connected, Error, #[default] Unknown }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HrDeviceInfo {
+    pub id: String,
+    pub address: String,
+    pub name: Option<String>,
+}
+
 fn default_hr_threshold_bpm() -> u16 { 60 }
 fn default_hr_calm_period_seconds() -> u64 { 120 }
 fn default_hr_cooldown_seconds() -> u64 { 15 * 60 }
@@ -96,6 +103,8 @@ pub struct HeartRateState {
     pub device_filter: Option<String>,
     #[serde(default)]
     pub connected_device: Option<String>,
+    #[serde(default)]
+    pub available_devices: Vec<HrDeviceInfo>,
     #[serde(default)]
     pub provider_status: HrProviderStatus,
     #[serde(default)]
@@ -116,6 +125,7 @@ impl Default for HeartRateState {
             status: HrStatus::Unknown,
             device_filter: None,
             connected_device: None,
+            available_devices: Vec::new(),
             provider_status: HrProviderStatus::Disabled,
             last_error: None,
             threshold_bpm: default_hr_threshold_bpm(),
@@ -306,6 +316,7 @@ pub enum WorkerReport {
         connected_device: Option<String>,
         last_error: Option<String>,
     },
+    HeartRateDevices { devices: Vec<HrDeviceInfo> },
     VrchatRuntime {
         connected: bool,
         display_name: Option<String>,
