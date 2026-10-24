@@ -1,7 +1,22 @@
 use nightshift_protocol::{
     AppState, HeartRateState, HrProviderStatus, InviteActionKind, InviteRuleSettings, InviteState,
-    OscState, OverlaySpawnMode, OverlayState, SettingsState, SleepState, SleepingPose, VrchatStatus,
+    OscState, OverlaySpawnMode, OverlayState, SettingsState, SleepState, SleepingPose, UiCommand,
+    VrchatStatus,
 };
+
+#[test]
+fn overlay_setting_commands_round_trip_on_the_wire() {
+    let commands = [
+        UiCommand::SetOverlaySpawnDistance(1.5),
+        UiCommand::SetOverlaySpawnMode(OverlaySpawnMode::RestoreLastPosition),
+    ];
+
+    for command in commands {
+        let json = serde_json::to_string(&command).expect("serialize overlay command");
+        let decoded: UiCommand = serde_json::from_str(&json).expect("deserialize overlay command");
+        assert_eq!(decoded, command);
+    }
+}
 
 #[test]
 fn old_overlay_state_defaults_runtime_health() {
