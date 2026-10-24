@@ -91,6 +91,8 @@ fn disconnected_report() -> WorkerReport {
         connected: false,
         display_name: None,
         status: VrchatStatus::Offline,
+        last_invite_action: None,
+        invite_error: None,
     }
 }
 
@@ -429,6 +431,8 @@ async fn refresh_runtime(
             connected: true,
             display_name: Some(user.display_name),
             status: user.status,
+            last_invite_action: None,
+            invite_error: None,
         },
         pipeline_auth_token: Some(cookies.auth.clone()),
         session_cookies: Some(cookies),
@@ -454,6 +458,8 @@ async fn set_runtime_status(
             connected: true,
             display_name: Some(user.display_name),
             status: target,
+            last_invite_action: None,
+            invite_error: None,
         },
         pipeline_auth_token: Some(cookies.auth.clone()),
         session_cookies: Some(cookies),
@@ -844,6 +850,8 @@ mod tests {
                 connected: false,
                 display_name: None,
                 status: VrchatStatus::Offline,
+                last_invite_action: None,
+                invite_error: None,
             }
         );
     }
