@@ -1,9 +1,12 @@
 use std::{env, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use nightshift_hr_ble::{BleDeviceInfo, BleHeartRateEvent, discover_device, first_adapter, run_device};
+use nightshift_hr_ble::{
+    BleDeviceInfo, BleHeartRateEvent, discover_devices_and_select, first_adapter, run_device,
+};
 use nightshift_protocol::{
-    ClientMessage, HrProviderStatus, PROTOCOL_VERSION, ServerMessage, StateEvent, WorkerReport,
+    ClientMessage, HrDeviceInfo, HrProviderStatus, PROTOCOL_VERSION, ServerMessage, StateEvent,
+    WorkerReport,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -73,6 +76,14 @@ fn device_label(device: &BleDeviceInfo) -> String {
         .unwrap_or_else(|| device.address.clone())
 }
 
+fn protocol_device(device: BleDeviceInfo) -> HrDeviceInfo {
+    HrDeviceInfo {
+        id: device.id,
+        address: device.address,
+        name: device.name,
+    }
+}
+
 async fn write_client_message(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     message: &ClientMessage,
@@ -119,6 +130,21 @@ async fn report_provider(
     .await
 }
 
+async fn report_devices(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    devices: Vec<BleDeviceInfo>,
+) -> Result<()> {
+    write_client_message(
+        writer,
+        &ClientMessage::Report {
+            report: WorkerReport::HeartRateDevices {
+                devices: devices.into_iter().map(protocol_device).collect(),
+            },
+        },
+    )
+    .await
+}
+
 fn spawn_ble_provider(
     events: mpsc::Sender<BleHeartRateEvent>,
     device_filter: Option<String>,
@@ -131,7 +157,20 @@ fn spawn_ble_provider(
 
             let result = async {
                 let adapter = first_adapter().await?;
-                let peripheral = discover_device(&adapter, device_filter.as_deref()).await?;
+                let (devices, peripheral) =
+                    discover_devices_and_select(&adapter, device_filter.as_deref()).await?;
+                events
+                    .send(BleHeartRateEvent::Devices(devices))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("heart-rate event consumer stopped"))?;
+
+                let peripheral = match (peripheral, device_filter.as_deref()) {
+                    (Some(peripheral), _) => peripheral,
+                    (None, Some(filter)) => bail!("no BLE heart-rate device matched {filter:?}"),
+                    (None, None) => {
+                        bail!("no BLE device advertising the Heart Rate service was found")
+                    }
+                };
                 run_device(peripheral, events.clone()).await
             }
             .await;
@@ -212,6 +251,7 @@ async fn apply_provider_config(
         discard_queued_events(event_rx);
         report_runtime(write_half, false, None).await?;
         report_provider(write_half, HrProviderStatus::Disabled, None, None).await?;
+        report_devices(write_half, Vec::new()).await?;
     }
 
     Ok(())
@@ -309,6 +349,9 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     BleHeartRateEvent::Searching => {
                         report_runtime(&mut write_half, false, None).await?;
                         report_provider(&mut write_half, HrProviderStatus::Searching, None, None).await?;
+                    }
+                    BleHeartRateEvent::Devices(devices) => {
+                        report_devices(&mut write_half, devices).await?;
                     }
                     BleHeartRateEvent::Connected(device) => {
                         let label = device_label(&device);
@@ -453,5 +496,17 @@ mod tests {
             name: None,
         };
         assert_eq!(device_label(&unnamed), "CC:DD");
+    }
+
+    #[test]
+    fn protocol_device_preserves_stable_identity() {
+        let device = protocol_device(BleDeviceInfo {
+            id: "stable-id".into(),
+            address: "AA:BB".into(),
+            name: Some("Polar H10".into()),
+        });
+        assert_eq!(device.id, "stable-id");
+        assert_eq!(device.address, "AA:BB");
+        assert_eq!(device.name.as_deref(), Some("Polar H10"));
     }
 }
