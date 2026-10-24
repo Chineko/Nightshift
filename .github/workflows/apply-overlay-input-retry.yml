@@ -50,8 +50,8 @@ jobs:
           python3 /tmp/apply_overlay_input.py
       - name: Test overlay input slice
         run: |
-          cargo test -p nightshift-overlay-prototype --locked
-          cargo clippy -p nightshift-overlay-prototype --all-targets --locked -- -D warnings
+          cargo test --manifest-path crates/nightshift-overlay-prototype/Cargo.toml --locked
+          cargo clippy --manifest-path crates/nightshift-overlay-prototype/Cargo.toml --all-targets --locked -- -D warnings
       - name: Commit tested overlay input
         shell: bash
         run: |
