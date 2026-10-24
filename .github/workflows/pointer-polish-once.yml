@@ -1,0 +1,229 @@
+name: Pointer polish one-shot
+
+on:
+  push:
+    branches:
+      - prototype/integrated-mvp
+    paths:
+      - .github/workflows/pointer-polish-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libopenxr-dev pkg-config
+
+      - name: Guard base commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "c1994d36a337d9a699fbb0eec62655697a29800e"
+          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/pointer-polish-once.yml"
+
+      - name: Apply pointer polish
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def rep(path, old, new, expected=1):
+              p = Path(path)
+              text = p.read_text()
+              count = text.count(old)
+              if count != expected:
+                  raise SystemExit(f"{path}: expected {expected} matches, got {count}: {old[:100]!r}")
+              p.write_text(text.replace(old, new, expected))
+
+          # Protocol: persisted, backwards-compatible overlay laser toggle.
+          rep("crates/nightshift-protocol/src/lib.rs",
+              "#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]\npub struct OverlayState {\n    pub visible: bool,\n    pub spawn_distance_m: f32,\n    pub spawn_mode: OverlaySpawnMode,\n",
+              "fn default_overlay_laser_enabled() -> bool { true }\n\n#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]\npub struct OverlayState {\n    pub visible: bool,\n    pub spawn_distance_m: f32,\n    pub spawn_mode: OverlaySpawnMode,\n    #[serde(default = \"default_overlay_laser_enabled\")]\n    pub laser_enabled: bool,\n")
+          rep("crates/nightshift-protocol/src/lib.rs",
+              "            spawn_mode: OverlaySpawnMode::InFront,\n            remembered_pose: None,\n",
+              "            spawn_mode: OverlaySpawnMode::InFront,\n            laser_enabled: true,\n            remembered_pose: None,\n")
+          rep("crates/nightshift-protocol/src/lib.rs",
+              "    SetOverlaySpawnMode(OverlaySpawnMode),\n    ShowOverlay,\n",
+              "    SetOverlaySpawnMode(OverlaySpawnMode),\n    SetOverlayLaserEnabled(bool),\n    ShowOverlay,\n")
+
+          # Protocol compatibility tests.
+          rep("crates/nightshift-protocol/tests/compat.rs",
+              "        UiCommand::SetOverlaySpawnMode(OverlaySpawnMode::RestoreLastPosition),\n",
+              "        UiCommand::SetOverlaySpawnMode(OverlaySpawnMode::RestoreLastPosition),\n        UiCommand::SetOverlayLaserEnabled(false),\n")
+          rep("crates/nightshift-protocol/tests/compat.rs",
+              "    assert_eq!(state.spawn_mode, OverlaySpawnMode::InFront);\n    assert_eq!(state.remembered_pose, None);\n",
+              "    assert_eq!(state.spawn_mode, OverlaySpawnMode::InFront);\n    assert!(state.laser_enabled);\n    assert_eq!(state.remembered_pose, None);\n")
+          rep("crates/nightshift-protocol/tests/compat.rs",
+              "        spawn_mode: OverlaySpawnMode::RestoreLastPosition,\n        remembered_pose: None,\n",
+              "        spawn_mode: OverlaySpawnMode::RestoreLastPosition,\n        laser_enabled: false,\n        remembered_pose: None,\n")
+          rep("crates/nightshift-protocol/tests/compat.rs",
+              "    assert_eq!(state.overlay.remembered_pose, None);\n    assert!(!state.overlay.runtime_connected);\n",
+              "    assert_eq!(state.overlay.remembered_pose, None);\n    assert!(state.overlay.laser_enabled);\n    assert!(!state.overlay.runtime_connected);\n")
+
+          # Daemon persistence and command application.
+          rep("crates/nightshift-daemon/src/config.rs",
+              "    pub overlay_spawn_mode: OverlaySpawnMode,\n    pub overlay_remembered_pose: Option<OverlayPose>,\n",
+              "    pub overlay_spawn_mode: OverlaySpawnMode,\n    pub overlay_laser_enabled: bool,\n    pub overlay_remembered_pose: Option<OverlayPose>,\n")
+          rep("crates/nightshift-daemon/src/config.rs",
+              "            overlay_spawn_mode: state.overlay.spawn_mode,\n            overlay_remembered_pose: state.overlay.remembered_pose.and_then(sanitize_overlay_pose),\n",
+              "            overlay_spawn_mode: state.overlay.spawn_mode,\n            overlay_laser_enabled: state.overlay.laser_enabled,\n            overlay_remembered_pose: state.overlay.remembered_pose.and_then(sanitize_overlay_pose),\n")
+          rep("crates/nightshift-daemon/src/config.rs",
+              "        state.overlay.spawn_mode = self.overlay_spawn_mode;\n        state.overlay.remembered_pose = self.overlay_remembered_pose.and_then(sanitize_overlay_pose);\n",
+              "        state.overlay.spawn_mode = self.overlay_spawn_mode;\n        state.overlay.laser_enabled = self.overlay_laser_enabled;\n        state.overlay.remembered_pose = self.overlay_remembered_pose.and_then(sanitize_overlay_pose);\n")
+          rep("crates/nightshift-daemon/src/config.rs",
+              "        state.overlay.spawn_mode = OverlaySpawnMode::RestoreLastPosition;\n        state.overlay.remembered_pose = Some(OverlayPose {\n",
+              "        state.overlay.spawn_mode = OverlaySpawnMode::RestoreLastPosition;\n        state.overlay.laser_enabled = false;\n        state.overlay.remembered_pose = Some(OverlayPose {\n")
+          rep("crates/nightshift-daemon/src/config.rs",
+              "        assert_eq!(restored.overlay.remembered_pose, state.overlay.remembered_pose);\n",
+              "        assert!(!restored.overlay.laser_enabled);\n        assert_eq!(restored.overlay.remembered_pose, state.overlay.remembered_pose);\n")
+
+          rep("crates/nightshift-daemon/src/main.rs",
+              "                | UiCommand::SetOverlaySpawnMode(_)\n        );\n",
+              "                | UiCommand::SetOverlaySpawnMode(_)\n                | UiCommand::SetOverlayLaserEnabled(_)\n        );\n")
+          rep("crates/nightshift-daemon/src/main.rs",
+              "            UiCommand::SetOverlaySpawnMode(mode) => state.overlay.spawn_mode = mode,\n            UiCommand::ShowOverlay => state.overlay.visible = true,\n",
+              "            UiCommand::SetOverlaySpawnMode(mode) => state.overlay.spawn_mode = mode,\n            UiCommand::SetOverlayLaserEnabled(enabled) => state.overlay.laser_enabled = enabled,\n            UiCommand::ShowOverlay => state.overlay.visible = true,\n")
+          rep("crates/nightshift-daemon/src/main.rs",
+              "        store.apply(UiCommand::SetOverlaySpawnDistance(99.0)).await;\n        store\n            .apply(UiCommand::SetOverlaySpawnMode(\n",
+              "        store.apply(UiCommand::SetOverlaySpawnDistance(99.0)).await;\n        store.apply(UiCommand::SetOverlayLaserEnabled(false)).await;\n        store\n            .apply(UiCommand::SetOverlaySpawnMode(\n")
+          rep("crates/nightshift-daemon/src/main.rs",
+              "        assert_eq!(snapshot.overlay.spawn_distance_m, 5.0);\n        assert_eq!(\n",
+              "        assert_eq!(snapshot.overlay.spawn_distance_m, 5.0);\n        assert!(!snapshot.overlay.laser_enabled);\n        assert_eq!(\n")
+
+          # Desktop setting.
+          rep("crates/nightshift-ui/src/main.rs",
+              "        if mode != before {\n            self.send_command(UiCommand::SetOverlaySpawnMode(mode));\n        }\n\n        ui.label(\n",
+              "        if mode != before {\n            self.send_command(UiCommand::SetOverlaySpawnMode(mode));\n        }\n\n        let mut laser_enabled = self.state.overlay.laser_enabled;\n        if ui.checkbox(&mut laser_enabled, \"Show controller laser guide\").changed() {\n            self.send_command(UiCommand::SetOverlayLaserEnabled(laser_enabled));\n        }\n        ui.label(\n            RichText::new(\"The surface cursor stays visible when the laser guide is off.\")\n                .color(MUTED)\n                .small(),\n        );\n\n        ui.label(\n")
+
+          # Surface target carries the visual preference without changing placement semantics.
+          rep("crates/nightshift-overlay-prototype/src/surface.rs",
+              "    pub spawn_mode: OverlaySpawnMode,\n    pub remembered_pose: Option<PanelPose>,\n",
+              "    pub spawn_mode: OverlaySpawnMode,\n    pub laser_enabled: bool,\n    pub remembered_pose: Option<PanelPose>,\n")
+          rep("crates/nightshift-overlay-prototype/src/surface.rs",
+              "            spawn_mode: state.spawn_mode,\n            remembered_pose: state\n",
+              "            spawn_mode: state.spawn_mode,\n            laser_enabled: state.laser_enabled,\n            remembered_pose: state\n")
+          rep("crates/nightshift-overlay-prototype/src/surface.rs",
+              "            spawn_mode,\n            remembered_pose,\n",
+              "            spawn_mode,\n            laser_enabled: true,\n            remembered_pose,\n")
+
+          # Overlay frame integration: visual smoothing, HMD-facing beam, cursor always.
+          rep("crates/nightshift-overlay-prototype/src/main.rs",
+              "use laser::{LaserRenderer, LaserSegment};\n",
+              "use laser::{LaserRenderer, LaserSegment, PointerSmoother, smoothing_alpha};\n")
+          rep("crates/nightshift-overlay-prototype/src/main.rs",
+              "        let mut active_grab: Option<ActiveGrab> = None;\n        let mut laser_easter_egg_fired = false;\n",
+              "        let mut active_grab: Option<ActiveGrab> = None;\n        let mut pointer_smoother = PointerSmoother::default();\n        let mut pointer_visual_clock = Instant::now();\n        let mut laser_easter_egg_fired = false;\n")
+          rep("crates/nightshift-overlay-prototype/src/main.rs",
+              "            let needs_spawn_tracking =\n",
+              "            let hmd_position = [\n                (views[0].pose.position.x + views[1].pose.position.x) * 0.5,\n                (views[0].pose.position.y + views[1].pose.position.y) * 0.5,\n                (views[0].pose.position.z + views[1].pose.position.z) * 0.5,\n            ];\n\n            let needs_spawn_tracking =\n")
+          rep("crates/nightshift-overlay-prototype/src/main.rs",
+              "            let mut hovered_action = None;\n            let mut laser_segment = None;\n",
+              "            let mut hovered_action = None;\n            let mut pointer_segment = None;\n")
+          rep("crates/nightshift-overlay-prototype/src/main.rs",
+              "                                    if laser_segment.is_none() {\n                                        laser_segment = Some(LaserSegment {\n",
+              "                                    if pointer_segment.is_none() {\n                                        pointer_segment = Some(LaserSegment {\n")
+          rep("crates/nightshift-overlay-prototype/src/main.rs",
+              "            let now_ms = pose_clock.elapsed().as_millis() as u64;\n",
+              "            let pointer_now = Instant::now();\n            let pointer_delta = pointer_now.duration_since(pointer_visual_clock).as_secs_f32();\n            pointer_visual_clock = pointer_now;\n            let pointer_segment = match pointer_segment {\n                Some(segment) => Some(pointer_smoother.update(\n                    segment,\n                    smoothing_alpha(pointer_delta),\n                )),\n                None => {\n                    pointer_smoother.reset();\n                    None\n                }\n            };\n\n            let now_ms = pose_clock.elapsed().as_millis() as u64;\n")
+
+          old_render = '''                let panel_layer = panel_renderer.layer(&local_space, panel_pose);\n                if let Some(segment) = laser_segment {\n                    laser_renderer.ensure_initialized(&vk_device, queue, command_buffer, fence)?;\n                    if let Some(laser_layers) = laser_renderer.layers(&local_space, segment) {\n                        frame_stream\n                            .end(\n                                frame_state.predicted_display_time,\n                                blend_mode,\n                                &[&layer, &panel_layer, &laser_layers[0], &laser_layers[1]],\n                            )\n                            .context("submitting dimmer, laser, and positioned panel layers")?;\n                    } else {\n                        frame_stream\n                            .end(\n                                frame_state.predicted_display_time,\n                                blend_mode,\n                                &[&layer, &panel_layer],\n                            )\n                            .context("submitting dimmer and positioned panel layers")?;\n                    }\n                } else {\n                    frame_stream\n                        .end(\n                            frame_state.predicted_display_time,\n                            blend_mode,\n                            &[&layer, &panel_layer],\n                        )\n                        .context("submitting dimmer and positioned panel layers")?;\n                }\n'''
+          new_render = '''                let panel_layer = panel_renderer.layer(&local_space, panel_pose);\n                if let Some(segment) = pointer_segment {\n                    laser_renderer.ensure_initialized(&vk_device, queue, command_buffer, fence)?;\n                    if let Some(pointer_layers) = laser_renderer.layers(\n                        &local_space,\n                        segment,\n                        hmd_position,\n                        surface_target.laser_enabled,\n                    ) {\n                        if let Some(beam_layer) = pointer_layers.beam {\n                            frame_stream\n                                .end(\n                                    frame_state.predicted_display_time,\n                                    blend_mode,\n                                    &[&layer, &panel_layer, &beam_layer, &pointer_layers.cursor],\n                                )\n                                .context("submitting dimmer, panel, laser, and cursor layers")?;\n                        } else {\n                            frame_stream\n                                .end(\n                                    frame_state.predicted_display_time,\n                                    blend_mode,\n                                    &[&layer, &panel_layer, &pointer_layers.cursor],\n                                )\n                                .context("submitting dimmer, panel, and cursor layers")?;\n                        }\n                    } else {\n                        frame_stream\n                            .end(\n                                frame_state.predicted_display_time,\n                                blend_mode,\n                                &[&layer, &panel_layer],\n                            )\n                            .context("submitting dimmer and positioned panel layers")?;\n                    }\n                } else {\n                    frame_stream\n                        .end(\n                            frame_state.predicted_display_time,\n                            blend_mode,\n                            &[&layer, &panel_layer],\n                        )\n                        .context("submitting dimmer and positioned panel layers")?;\n                }\n'''
+          rep("crates/nightshift-overlay-prototype/src/main.rs", old_render, new_render)
+
+          # Pointer renderer: one camera-facing beam, plus an always-present surface cursor.
+          p = Path("crates/nightshift-overlay-prototype/src/laser.rs")
+          text = p.read_text()
+          text = text.replace("const LASER_THICKNESS_M: f32 = 0.004;\n", "const LASER_THICKNESS_M: f32 = 0.002;\nconst CURSOR_SIZE_M: f32 = 0.012;\nconst CURSOR_OFFSET_M: f32 = 0.002;\nconst POINTER_SMOOTHING_TAU_SECONDS: f32 = 0.025;\n", 1)
+          marker = "pub struct LaserRenderer {"
+          insert = '''#[derive(Clone, Copy, Debug, Default, PartialEq)]\npub struct PointerSmoother {\n    smoothed: Option<LaserSegment>,\n}\n\nimpl PointerSmoother {\n    pub fn update(&mut self, target: LaserSegment, alpha: f32) -> LaserSegment {\n        let alpha = if alpha.is_finite() { alpha.clamp(0.0, 1.0) } else { 1.0 };\n        let next = self\n            .smoothed\n            .and_then(|current| smooth_segment(current, target, alpha))\n            .unwrap_or(target);\n        self.smoothed = Some(next);\n        next\n    }\n\n    pub fn reset(&mut self) {\n        self.smoothed = None;\n    }\n}\n\npub fn smoothing_alpha(delta_seconds: f32) -> f32 {\n    if !delta_seconds.is_finite() || delta_seconds <= 0.0 {\n        return 1.0;\n    }\n    (1.0 - (-delta_seconds / POINTER_SMOOTHING_TAU_SECONDS).exp()).clamp(0.0, 1.0)\n}\n\npub struct PointerLayers<'a> {\n    pub beam: Option<xr::CompositionLayerQuad<'a, xr::Vulkan>>,\n    pub cursor: xr::CompositionLayerQuad<'a, xr::Vulkan>,\n}\n\n'''
+          if text.count(marker) != 1:
+              raise SystemExit("laser.rs renderer marker mismatch")
+          text = text.replace(marker, insert + marker, 1)
+          start = text.index("    pub fn layers<'a>(")
+          end = text.index("fn xr_pose(", start)
+          replacement = '''    pub fn layers<'a>(\n        &'a self,\n        space: &'a xr::Space,\n        segment: LaserSegment,\n        hmd_position: [f32; 3],\n        show_laser: bool,\n    ) -> Option<PointerLayers<'a>> {\n        let (beam_pose, length) = laser_pose(segment, hmd_position)?;\n        let cursor_pose = cursor_pose(segment, hmd_position)?;\n        let make_layer = |pose, size: xr::Extent2Df| {\n            xr::CompositionLayerQuad::new()\n                .layer_flags(xr::CompositionLayerFlags::BLEND_TEXTURE_SOURCE_ALPHA)\n                .pose(pose)\n                .sub_image(\n                    xr::SwapchainSubImage::new()\n                        .swapchain(&self.swapchain)\n                        .image_array_index(0)\n                        .image_rect(self.rect),\n                )\n                .eye_visibility(xr::EyeVisibility::BOTH)\n                .space(space)\n                .size(size)\n        };\n        let beam = show_laser.then(|| {\n            make_layer(\n                beam_pose,\n                xr::Extent2Df {\n                    width: length,\n                    height: LASER_THICKNESS_M,\n                },\n            )\n        });\n        let cursor = make_layer(\n            cursor_pose,\n            xr::Extent2Df {\n                width: CURSOR_SIZE_M,\n                height: CURSOR_SIZE_M,\n            },\n        );\n        Some(PointerLayers { beam, cursor })\n    }\n}\n\nfn laser_pose(segment: LaserSegment, hmd_position: [f32; 3]) -> Option<(xr::Posef, f32)> {\n    if !segment.distance_m.is_finite() || segment.distance_m <= EPSILON {\n        return None;\n    }\n    let direction = normalize(segment.ray.direction)?;\n    if !segment.ray.origin.iter().all(|value| value.is_finite())\n        || !hmd_position.iter().all(|value| value.is_finite())\n    {\n        return None;\n    }\n    let midpoint = add(segment.ray.origin, scale(direction, segment.distance_m * 0.5));\n    let to_hmd = normalize(subtract(hmd_position, midpoint))?;\n    let base = quaternion_from_x_axis(direction)?;\n    let mut best = None;\n    for quarter_turn in 0..4 {\n        let angle = quarter_turn as f32 * std::f32::consts::FRAC_PI_2;\n        let half = angle * 0.5;\n        let roll = [half.sin(), 0.0, 0.0, half.cos()];\n        let orientation = normalize_quaternion_xyzw(quaternion_multiply(base, roll))?;\n        let normal = quaternion_rotate_vector(orientation, [0.0, 0.0, 1.0]);\n        let score = dot(normal, to_hmd);\n        if best.is_none_or(|(best_score, _)| score > best_score) {\n            best = Some((score, orientation));\n        }\n    }\n    let (_, orientation) = best?;\n    Some((xr_pose(midpoint, orientation), segment.distance_m))\n}\n\nfn cursor_pose(segment: LaserSegment, hmd_position: [f32; 3]) -> Option<xr::Posef> {\n    let direction = normalize(segment.ray.direction)?;\n    let hit = add(segment.ray.origin, scale(direction, segment.distance_m));\n    let to_hmd = normalize(subtract(hmd_position, hit)).or_else(|| normalize(scale(direction, -1.0)))?;\n    let position = add(hit, scale(to_hmd, CURSOR_OFFSET_M));\n    let orientation = quaternion_from_z_axis(to_hmd)?;\n    Some(xr_pose(position, orientation))\n}\n\nfn smooth_segment(current: LaserSegment, target: LaserSegment, alpha: f32) -> Option<LaserSegment> {\n    let current_end = segment_end(current)?;\n    let target_end = segment_end(target)?;\n    segment_from_points(\n        lerp(current.ray.origin, target.ray.origin, alpha),\n        lerp(current_end, target_end, alpha),\n    )\n}\n\nfn segment_end(segment: LaserSegment) -> Option<[f32; 3]> {\n    let direction = normalize(segment.ray.direction)?;\n    Some(add(segment.ray.origin, scale(direction, segment.distance_m)))\n}\n\nfn segment_from_points(origin: [f32; 3], end: [f32; 3]) -> Option<LaserSegment> {\n    let delta = subtract(end, origin);\n    let distance_m = length(delta)?;\n    Some(LaserSegment {\n        ray: PanelRay {\n            origin,\n            direction: scale(delta, distance_m.recip()),\n        },\n        distance_m,\n    })\n}\n\n'''
+          text = text[:start] + replacement + text[end:]
+          rep_marker = "fn quaternion_multiply(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {"
+          helpers = '''fn quaternion_from_z_axis(direction: [f32; 3]) -> Option<[f32; 4]> {\n    let dot = direction[2];\n    if dot < -0.9999 {\n        return Some([0.0, 1.0, 0.0, 0.0]);\n    }\n    let cross = [-direction[1], direction[0], 0.0];\n    normalize_quaternion_xyzw([cross[0], cross[1], cross[2], 1.0 + dot])\n}\n\nfn quaternion_rotate_vector(q: [f32; 4], vector: [f32; 3]) -> [f32; 3] {\n    let qv = [vector[0], vector[1], vector[2], 0.0];\n    let conjugate = [-q[0], -q[1], -q[2], q[3]];\n    let rotated = quaternion_multiply(quaternion_multiply(q, qv), conjugate);\n    [rotated[0], rotated[1], rotated[2]]\n}\n\n'''
+          if text.count(rep_marker) != 1:
+              raise SystemExit("laser.rs quaternion marker mismatch")
+          text = text.replace(rep_marker, helpers + rep_marker, 1)
+          normalize_marker = "fn normalize(vector: [f32; 3]) -> Option<[f32; 3]> {"
+          vec_helpers = '''fn add(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {\n    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]\n}\n\nfn subtract(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {\n    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]\n}\n\nfn scale(vector: [f32; 3], scalar: f32) -> [f32; 3] {\n    [vector[0] * scalar, vector[1] * scalar, vector[2] * scalar]\n}\n\nfn dot(left: [f32; 3], right: [f32; 3]) -> f32 {\n    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]\n}\n\nfn lerp(from: [f32; 3], to: [f32; 3], alpha: f32) -> [f32; 3] {\n    add(from, scale(subtract(to, from), alpha))\n}\n\nfn length(vector: [f32; 3]) -> Option<f32> {\n    let length_sq = dot(vector, vector);\n    if !length_sq.is_finite() || length_sq <= EPSILON * EPSILON {\n        return None;\n    }\n    Some(length_sq.sqrt())\n}\n\n'''
+          if text.count(normalize_marker) != 1:
+              raise SystemExit("laser.rs normalize marker mismatch")
+          text = text.replace(normalize_marker, vec_helpers + normalize_marker, 1)
+          text = text.replace("    let length_sq = vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2];\n", "    let length_sq = dot(vector, vector);\n", 1)
+          text = text.replace("        let (first, _, length) = laser_poses(segment).unwrap();\n", "        let (first, length) = laser_pose(segment, [0.0, 1.6, 0.5]).unwrap();\n", 1)
+          text = text.replace("            laser_poses(LaserSegment {\n", "            laser_pose(LaserSegment {\n", 1)
+          text = text.replace("                distance_m: 1.0,\n            })\n            .is_none()\n", "                distance_m: 1.0,\n            }, [0.0, 1.6, 0.0])\n            .is_none()\n", 1)
+          test_end = text.rfind("}\n")
+          extra_tests = '''\n    #[test]\n    fn smoothing_is_frame_rate_aware_and_stays_bounded() {\n        let at_90_hz = smoothing_alpha(1.0 / 90.0);\n        let at_120_hz = smoothing_alpha(1.0 / 120.0);\n        assert!(at_90_hz > at_120_hz);\n        assert!(at_90_hz > 0.0 && at_90_hz < 1.0);\n    }\n\n    #[test]\n    fn cursor_sits_slightly_in_front_of_hit_point() {\n        let segment = LaserSegment {\n            ray: PanelRay {\n                origin: [0.0, 1.6, 0.0],\n                direction: [0.0, 0.0, -1.0],\n            },\n            distance_m: 1.0,\n        };\n        let pose = cursor_pose(segment, [0.0, 1.6, 0.0]).unwrap();\n        assert!(pose.position.z > -1.0);\n        assert!((pose.position.z + 0.998).abs() < 1.0e-4);\n    }\n'''
+          text = text[:test_end] + extra_tests + text[test_end:]
+          p.write_text(text)
+          PY
+
+      - name: Format touched Rust
+        run: |
+          rustfmt crates/nightshift-protocol/src/lib.rs
+          rustfmt crates/nightshift-protocol/tests/compat.rs
+          rustfmt crates/nightshift-daemon/src/config.rs
+          rustfmt crates/nightshift-daemon/src/main.rs
+          rustfmt crates/nightshift-ui/src/main.rs
+          rustfmt crates/nightshift-overlay-prototype/src/surface.rs
+          rustfmt crates/nightshift-overlay-prototype/src/main.rs
+          rustfmt crates/nightshift-overlay-prototype/src/laser.rs
+
+      - name: Verify focused crates
+        run: |
+          cargo test -p nightshift-protocol --locked
+          cargo test -p nightshift-daemon --locked
+          cargo test -p nightshift-ui --locked
+          cargo test -p nightshift-overlay --locked
+          cargo clippy -p nightshift-protocol -p nightshift-daemon -p nightshift-ui -p nightshift-overlay --all-targets --locked
+
+      - name: Scope audit and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              ".github/workflows/pointer-polish-once.yml",
+              "crates/nightshift-protocol/src/lib.rs",
+              "crates/nightshift-protocol/tests/compat.rs",
+              "crates/nightshift-daemon/src/config.rs",
+              "crates/nightshift-daemon/src/main.rs",
+              "crates/nightshift-ui/src/main.rs",
+              "crates/nightshift-overlay-prototype/src/surface.rs",
+              "crates/nightshift-overlay-prototype/src/main.rs",
+              "crates/nightshift-overlay-prototype/src/laser.rs",
+          }
+          changed = set(subprocess.check_output(["git", "status", "--porcelain"], text=True).splitlines())
+          paths = {line[3:] for line in changed}
+          extra = paths - allowed
+          if extra:
+              raise SystemExit(f"unexpected changed paths: {sorted(extra)}")
+          PY
+          git rm .github/workflows/pointer-polish-once.yml
+          git config user.name "Nightshift Integration Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add crates/nightshift-protocol/src/lib.rs crates/nightshift-protocol/tests/compat.rs \
+            crates/nightshift-daemon/src/config.rs crates/nightshift-daemon/src/main.rs \
+            crates/nightshift-ui/src/main.rs crates/nightshift-overlay-prototype/src/surface.rs \
+            crates/nightshift-overlay-prototype/src/main.rs crates/nightshift-overlay-prototype/src/laser.rs
+          git commit -m "Polish overlay pointer visuals"
+          git push origin HEAD:prototype/integrated-mvp
