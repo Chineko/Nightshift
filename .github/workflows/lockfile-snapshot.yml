@@ -6,12 +6,18 @@ on:
       - prototype/integrated-mvp
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   lockfile:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: prototype/integrated-mvp
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -19,9 +25,14 @@ jobs:
       - name: Generate lockfile
         run: cargo generate-lockfile
 
-      - name: Upload lockfile
-        uses: actions/upload-artifact@v4
-        with:
-          name: cargo-lock
-          path: Cargo.lock
-          if-no-files-found: error
+      - name: Commit generated lockfile
+        run: |
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "Refresh Cargo lockfile"
+          git push origin HEAD:prototype/integrated-mvp
