@@ -363,6 +363,8 @@ pub enum UiCommand {
     SetInviteAutomation(bool),
     SetInviteProfile(InviteProfile),
     SetInviteRules(InviteRuleSettings),
+    SetOverlaySpawnDistance(f32),
+    SetOverlaySpawnMode(OverlaySpawnMode),
     ShowOverlay,
     HideOverlay,
 }
