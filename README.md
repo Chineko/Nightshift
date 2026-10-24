@@ -6,10 +6,26 @@ The project is intentionally split so Nightshift can run on its own and coexist 
 
 ## Current architecture
 
+The workspace is intentionally split into small policy, transport, worker, and UI crates:
+
 - `nightshift-protocol` — shared state, commands, events, capability handshake, and versioned IPC types.
-- `nightshift-daemon` — source of truth and event-driven Unix-socket server.
+- `nightshift-daemon` — canonical source of truth, persistence, sleep-state transitions, and event-driven Unix-socket server.
 - `nightshift-ui` — desktop UI client. It keeps IPC off the UI thread and requests repaints only when state changes.
-- `nightshift-overlay-prototype` — OpenXR worker that provides the full-screen sleep dimmer, HMD pose reporting, and the first world-locked positioned panel surface.
+- `nightshift-overlay-prototype` (`nightshift-overlay`) — OpenXR worker for the full-screen sleep dimmer, HMD pose reporting, and the first world-locked positioned panel surface.
+- `nightshiftctl` — command-line client for inspecting daemon state and exercising supported controls.
+- `nightshift-osc` — OSC/OSCQuery runtime worker that connects VRChat avatar parameters to daemon automation.
+- `nightshift-osc-script` — bounded OSC automation script engine.
+- `nightshift-invites` — invite policy/rule evaluation independent of VRChat transport.
+- `nightshift-gogo` — GoGo Loco preset/state policy.
+- `nightshift-pose` — sleeping-pose classification logic.
+- `nightshift-hr` — heart-rate calm-period/sleep detector.
+- `nightshift-hr-ble` — BLE heart-rate discovery and measurement provider.
+- `nightshift-hr-worker` — daemon-connected heart-rate provider lifecycle worker.
+- `nightshift-vrchat-api` — HTTP/pipeline transport helpers for VRChat API operations.
+- `nightshift-vrchat-session` — desktop keyring-backed VRChat session persistence.
+- `nightshift-vrchat-auth` — VRChat login and two-factor authentication service.
+- `nightshift-vrchat-status` — sleep/wake VRChat status policy.
+- `nightshift-vrchat-worker` — authenticated VRChat runtime worker for status, invites, and pipeline events.
 
 The daemon socket is created at:
 
@@ -18,6 +34,12 @@ $XDG_RUNTIME_DIR/nightshift/nightshift.sock
 ```
 
 Clients receive one full state snapshot after connecting. After that, the daemon broadcasts only changed state sections. If a client falls behind, it receives a fresh full snapshot to recover.
+
+### IPC trust boundary
+
+Nightshift's local IPC security boundary is the Unix user account. The daemon creates its runtime directory with mode `0700` and its socket with mode `0600`, so other Unix users cannot connect through the normal filesystem path. Processes running as the same user are trusted: client names in the handshake are routing/authorization labels, not cryptographic identities, and a malicious same-UID process could send ordinary commands or impersonate a worker label. If Nightshift ever exposes IPC outside the owning user account, the protocol needs a stronger authenticated peer model before that boundary is widened.
+
+Persisted settings live under the user's Nightshift config directory. The daemon secures that directory to `0700`, writes config and recovery files with mode `0600`, uses an atomic temporary-file replacement, and preserves unparseable config bytes as `config.json.bak` before falling back to defaults.
 
 ## Run locally
 
@@ -74,6 +96,7 @@ Nightshift is designed around event-driven updates:
 - no blocking work on the UI thread
 - deduplicated backend state broadcasts
 - brightness slider IPC is rate-limited while dragging
+- VRChat favorite-friend membership is cached briefly per authenticated session to avoid repeatedly paging the favorites API during invite bursts
 - positioned-panel texture initialization happens once and the HMD VIEW pose is only located when a new panel spawn pose is needed
 - external integrations should use events where possible and the lowest practical polling frequency otherwise
 
