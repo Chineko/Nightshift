@@ -1,14 +1,20 @@
 use nightshift_protocol::{
     AppState, HeartRateState, HrProviderStatus, InviteActionKind, InviteRuleSettings, InviteState,
-    OscState, OverlayPose, OverlaySpawnMode, OverlayState, SettingsState, SleepState, SleepingPose,
-    UiCommand, VrchatStatus, WorkerReport,
+    OscState, OverlayPose, OverlaySpawnMode, OverlayState, PROTOCOL_VERSION, SettingsState,
+    SleepState, SleepingPose, UiCommand, VrchatStatus, WorkerReport,
 };
+
+#[test]
+fn pointer_settings_require_protocol_v2() {
+    assert_eq!(PROTOCOL_VERSION, 2);
+}
 
 #[test]
 fn overlay_setting_commands_round_trip_on_the_wire() {
     let commands = [
         UiCommand::SetOverlaySpawnDistance(1.5),
         UiCommand::SetOverlaySpawnMode(OverlaySpawnMode::RestoreLastPosition),
+        UiCommand::SetOverlayLaserEnabled(false),
     ];
 
     for command in commands {
@@ -41,11 +47,13 @@ fn old_overlay_state_defaults_runtime_health() {
         "spawn_mode": "in_front"
     }"#;
 
-    let state: OverlayState = serde_json::from_str(old_json).expect("old overlay state must decode");
+    let state: OverlayState =
+        serde_json::from_str(old_json).expect("old overlay state must decode");
 
     assert!(!state.visible);
     assert_eq!(state.spawn_distance_m, 1.0);
     assert_eq!(state.spawn_mode, OverlaySpawnMode::InFront);
+    assert!(state.laser_enabled);
     assert_eq!(state.remembered_pose, None);
     assert!(!state.runtime_connected);
     assert_eq!(state.runtime_client_version, None);
@@ -57,6 +65,7 @@ fn new_overlay_state_round_trips_runtime_health() {
         visible: true,
         spawn_distance_m: 1.25,
         spawn_mode: OverlaySpawnMode::RestoreLastPosition,
+        laser_enabled: false,
         remembered_pose: None,
         runtime_connected: true,
         runtime_client_version: Some("0.1.0".into()),
@@ -76,7 +85,8 @@ fn old_settings_state_defaults_automations_off() {
         "wake_vrchat_status": "active"
     }"#;
 
-    let state: SettingsState = serde_json::from_str(old_json).expect("old settings state must decode");
+    let state: SettingsState =
+        serde_json::from_str(old_json).expect("old settings state must decode");
 
     assert_eq!(state.fade_duration_seconds, 3.0);
     assert_eq!(state.sleep_vrchat_status, VrchatStatus::AskMe);
@@ -232,6 +242,7 @@ fn old_full_app_state_decodes_with_additive_defaults() {
     assert!(state.invites.rules.whitelist.is_empty());
     assert_eq!(state.invites.rules.fallback, InviteActionKind::Ignored);
     assert_eq!(state.overlay.remembered_pose, None);
+    assert!(state.overlay.laser_enabled);
     assert!(!state.overlay.runtime_connected);
     assert_eq!(state.overlay.runtime_client_version, None);
     assert!(!state.settings.vrchat_status_automation_enabled);

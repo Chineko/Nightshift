@@ -23,6 +23,32 @@ pub struct PointerSample {
     pub grip_just_released: bool,
 }
 
+pub fn select_active_pointer_hand(
+    samples: &[PointerSample; 2],
+    hits: [bool; 2],
+    previous: Option<ControllerHand>,
+) -> Option<ControllerHand> {
+    for (index, sample) in samples.iter().enumerate() {
+        if hits[index] && (sample.trigger_just_pressed || sample.grip_just_pressed) {
+            return Some(sample.hand);
+        }
+    }
+
+    if let Some(previous) = previous
+        && samples
+            .iter()
+            .enumerate()
+            .any(|(index, sample)| hits[index] && sample.hand == previous)
+    {
+        return Some(previous);
+    }
+
+    samples
+        .iter()
+        .enumerate()
+        .find_map(|(index, sample)| hits[index].then_some(sample.hand))
+}
+
 pub struct ControllerInput {
     action_set: xr::ActionSet,
     left_aim: xr::Action<xr::Posef>,
@@ -329,4 +355,50 @@ fn rotate(vector: [f32; 3], quaternion_xyzw: [f32; 4]) -> [f32; 3] {
         vector[1] + w * twice_cross[1] + cross_q_twice_cross[1],
         vector[2] + w * twice_cross[2] + cross_q_twice_cross[2],
     ]
+}
+
+#[cfg(test)]
+mod pointer_selection_tests {
+    use super::*;
+
+    fn sample(hand: ControllerHand) -> PointerSample {
+        PointerSample {
+            hand,
+            ray: None,
+            controller_pose: None,
+            trigger_just_pressed: false,
+            grip_down: false,
+            grip_just_pressed: false,
+            grip_just_released: false,
+        }
+    }
+
+    #[test]
+    fn active_input_wins_over_previous_hand() {
+        let left = sample(ControllerHand::Left);
+        let mut right = sample(ControllerHand::Right);
+        right.trigger_just_pressed = true;
+        assert_eq!(
+            select_active_pointer_hand(&[left, right], [true, true], Some(ControllerHand::Left)),
+            Some(ControllerHand::Right)
+        );
+    }
+
+    #[test]
+    fn previous_hand_is_sticky_while_it_still_hits() {
+        let samples = [sample(ControllerHand::Left), sample(ControllerHand::Right)];
+        assert_eq!(
+            select_active_pointer_hand(&samples, [true, true], Some(ControllerHand::Right)),
+            Some(ControllerHand::Right)
+        );
+    }
+
+    #[test]
+    fn selection_falls_back_to_the_only_hit() {
+        let samples = [sample(ControllerHand::Left), sample(ControllerHand::Right)];
+        assert_eq!(
+            select_active_pointer_hand(&samples, [false, true], Some(ControllerHand::Left)),
+            Some(ControllerHand::Right)
+        );
+    }
 }

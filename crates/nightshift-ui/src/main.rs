@@ -548,6 +548,16 @@ impl NightshiftApp {
             self.send_command(UiCommand::SetOverlaySpawnMode(mode));
         }
 
+        let mut laser_enabled = self.state.overlay.laser_enabled;
+        if ui.checkbox(&mut laser_enabled, "Show controller laser guide").changed() {
+            self.send_command(UiCommand::SetOverlayLaserEnabled(laser_enabled));
+        }
+        ui.label(
+            RichText::new("The surface cursor stays visible when the laser guide is off.")
+                .color(MUTED)
+                .small(),
+        );
+
         ui.label(
             RichText::new("Placement settings are persisted by the daemon; runtime visibility stays session state.")
                 .color(MUTED)

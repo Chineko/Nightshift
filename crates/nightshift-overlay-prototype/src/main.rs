@@ -33,12 +33,12 @@ use xr::OverlaySessionCreateFlagsEXTX;
 use xr::sys::Handle as XrHandle;
 
 use content::PanelContent;
-use controller_input::{ControllerHand, ControllerInput};
+use controller_input::{ControllerHand, ControllerInput, select_active_pointer_hand};
 use interaction::{
     PanelAction, PanelGrab, action_at_uv, begin_panel_grab, hit_test_panel_with_distance,
     update_panel_grab,
 };
-use laser::{LaserRenderer, LaserSegment};
+use laser::{LaserRenderer, LaserSegment, PointerSmoother, smoothing_alpha};
 use panel::{PANEL_HEIGHT_M, PANEL_WIDTH_M, PanelRenderer};
 use panel_cache::PanelBitmapCache;
 use panel_state::PanelStateTracker;
@@ -718,6 +718,9 @@ fn run_overlay(
         let mut pose_tracker = PoseTracker::new(0);
         let mut input_error_reported = false;
         let mut active_grab: Option<ActiveGrab> = None;
+        let mut active_pointer_hand: Option<ControllerHand> = None;
+        let mut pointer_smoother = PointerSmoother::default();
+        let mut pointer_visual_clock = Instant::now();
         let mut laser_easter_egg_fired = false;
         let rect = xr::Rect2Di {
             offset: xr::Offset2Di { x: 0, y: 0 },
@@ -852,6 +855,12 @@ fn run_overlay(
                 );
             }
 
+            let hmd_position = [
+                (views[0].pose.position.x + views[1].pose.position.x) * 0.5,
+                (views[0].pose.position.y + views[1].pose.position.y) * 0.5,
+                (views[0].pose.position.z + views[1].pose.position.z) * 0.5,
+            ];
+
             let needs_spawn_tracking =
                 surface_target.visible && surface_controller.active_pose().is_none();
             let (head_position, head_orientation) = if needs_spawn_tracking {
@@ -897,7 +906,7 @@ fn run_overlay(
             }
 
             let mut hovered_action = None;
-            let mut laser_segment = None;
+            let mut raw_pointer_segment = None;
             if let Some(controller_input) = controller_input.as_ref() {
                 match controller_input.samples(
                     &session,
@@ -908,12 +917,13 @@ fn run_overlay(
                         input_error_reported = false;
                         if surface_target.visible {
                             if let Some(current_panel_pose) = panel_pose {
-                                for sample in samples {
-                                    if let Some(active) = active_grab {
-                                        if active.hand != sample.hand {
-                                            continue;
-                                        }
-
+                                if let Some(active) = active_grab {
+                                    active_pointer_hand = Some(active.hand);
+                                    if let Some(sample) = samples
+                                        .iter()
+                                        .copied()
+                                        .find(|sample| sample.hand == active.hand)
+                                    {
                                         if sample.grip_just_released || !sample.grip_down {
                                             if let Some(committed_pose) =
                                                 surface_controller.active_pose()
@@ -932,85 +942,107 @@ fn run_overlay(
                                                 }
                                             }
                                             active_grab = None;
-                                            continue;
-                                        }
-
-                                        if let Some(controller_pose) = sample.controller_pose {
-                                            if let Some(moved_pose) =
+                                        } else if let Some(controller_pose) = sample.controller_pose
+                                            && let Some(moved_pose) =
                                                 update_panel_grab(active.grab, controller_pose)
-                                            {
-                                                if surface_controller.move_active_pose(moved_pose) {
-                                                    panel_pose = Some(moved_pose);
-                                                }
-                                            }
-                                        }
-                                        continue;
-                                    }
-
-                                    let Some(ray) = sample.ray else {
-                                        continue;
-                                    };
-                                    let Some(hit) = hit_test_panel_with_distance(
-                                        ray,
-                                        current_panel_pose,
-                                        PANEL_WIDTH_M,
-                                        PANEL_HEIGHT_M,
-                                    ) else {
-                                        continue;
-                                    };
-
-                                    if laser_segment.is_none() {
-                                        laser_segment = Some(LaserSegment {
-                                            ray,
-                                            distance_m: hit.distance_m,
-                                        });
-                                    }
-                                    if hovered_action.is_none() {
-                                        hovered_action = action_at_uv(hit.uv);
-                                    }
-
-                                    if sample.trigger_just_pressed {
-                                        if let Some(action) = action_at_uv(hit.uv) {
-                                            if hydra_mode && !laser_easter_egg_fired {
-                                                println!("[Hydra/Input] I'M FIRIN' MAH LAZER");
-                                                laser_easter_egg_fired = true;
-                                            }
-                                            if hydra_mode {
-                                                println!(
-                                                    "[Hydra/Input] hand={:?} action={action:?} uv=({:.3},{:.3})",
-                                                    sample.hand, hit.uv.u, hit.uv.v
-                                                );
-                                            }
-                                            let _ = commands
-                                                .send(panel_command(action, current_brightness));
+                                            && surface_controller.move_active_pose(moved_pose)
+                                        {
+                                            panel_pose = Some(moved_pose);
                                         }
                                     }
-
-                                    if sample.grip_just_pressed {
-                                        if let Some(controller_pose) = sample.controller_pose {
-                                            if let Some(grab) = begin_panel_grab(
-                                                controller_pose,
+                                } else {
+                                    let hits = [
+                                        samples[0].ray.and_then(|ray| {
+                                            hit_test_panel_with_distance(
+                                                ray,
                                                 current_panel_pose,
-                                            ) {
-                                                if hydra_mode && !laser_easter_egg_fired {
-                                                    println!("[Hydra/Input] I'M FIRIN' MAH LAZER");
-                                                    laser_easter_egg_fired = true;
+                                                PANEL_WIDTH_M,
+                                                PANEL_HEIGHT_M,
+                                            )
+                                        }),
+                                        samples[1].ray.and_then(|ray| {
+                                            hit_test_panel_with_distance(
+                                                ray,
+                                                current_panel_pose,
+                                                PANEL_WIDTH_M,
+                                                PANEL_HEIGHT_M,
+                                            )
+                                        }),
+                                    ];
+                                    active_pointer_hand = select_active_pointer_hand(
+                                        &samples,
+                                        [hits[0].is_some(), hits[1].is_some()],
+                                        active_pointer_hand,
+                                    );
+
+                                    if let Some(hand) = active_pointer_hand {
+                                        let index = match hand {
+                                            ControllerHand::Left => 0,
+                                            ControllerHand::Right => 1,
+                                        };
+                                        if let (Some(ray), Some(hit)) =
+                                            (samples[index].ray, hits[index])
+                                        {
+                                            let sample = samples[index];
+                                            raw_pointer_segment = Some(LaserSegment {
+                                                ray,
+                                                distance_m: hit.distance_m,
+                                            });
+                                            hovered_action = action_at_uv(hit.uv);
+
+                                            if sample.trigger_just_pressed {
+                                                if let Some(action) = hovered_action {
+                                                    if hydra_mode && !laser_easter_egg_fired {
+                                                        println!(
+                                                            "[Hydra/Input] I'M FIRIN' MAH LAZER"
+                                                        );
+                                                        laser_easter_egg_fired = true;
+                                                    }
+                                                    if hydra_mode {
+                                                        println!(
+                                                            "[Hydra/Input] hand={:?} action={action:?} uv=({:.3},{:.3})",
+                                                            sample.hand, hit.uv.u, hit.uv.v
+                                                        );
+                                                    }
+                                                    let _ = commands.send(panel_command(
+                                                        action,
+                                                        current_brightness,
+                                                    ));
                                                 }
-                                                active_grab = Some(ActiveGrab {
-                                                    hand: sample.hand,
-                                                    grab,
-                                                });
-                                                if hydra_mode {
-                                                    println!(
-                                                        "[Hydra/Input] hand={:?} grab=started uv=({:.3},{:.3})",
-                                                        sample.hand, hit.uv.u, hit.uv.v
-                                                    );
+                                            }
+
+                                            if sample.grip_just_pressed {
+                                                if let Some(controller_pose) =
+                                                    sample.controller_pose
+                                                    && let Some(grab) = begin_panel_grab(
+                                                        controller_pose,
+                                                        current_panel_pose,
+                                                    )
+                                                {
+                                                    if hydra_mode && !laser_easter_egg_fired {
+                                                        println!(
+                                                            "[Hydra/Input] I'M FIRIN' MAH LAZER"
+                                                        );
+                                                        laser_easter_egg_fired = true;
+                                                    }
+                                                    active_grab = Some(ActiveGrab {
+                                                        hand: sample.hand,
+                                                        grab,
+                                                    });
+                                                    if hydra_mode {
+                                                        println!(
+                                                            "[Hydra/Input] hand={:?} grab=started uv=({:.3},{:.3})",
+                                                            sample.hand, hit.uv.u, hit.uv.v
+                                                        );
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
+                        } else {
+                            active_pointer_hand = None;
                         }
                     }
                     Err(error) if !input_error_reported => {
@@ -1020,6 +1052,21 @@ fn run_overlay(
                     Err(_) => {}
                 }
             }
+
+            let pointer_now = Instant::now();
+            let pointer_delta = pointer_now
+                .duration_since(pointer_visual_clock)
+                .as_secs_f32();
+            pointer_visual_clock = pointer_now;
+            let smoothed_beam_segment = match raw_pointer_segment {
+                Some(segment) => {
+                    Some(pointer_smoother.update(segment, smoothing_alpha(pointer_delta)))
+                }
+                None => {
+                    pointer_smoother.reset();
+                    None
+                }
+            };
 
             let now_ms = pose_clock.elapsed().as_millis() as u64;
             if let Some(stable_pose) = pose_tracker.advance(now_ms) {
@@ -1182,16 +1229,32 @@ fn run_overlay(
                     panel_renderer.ensure_initialized(&vk_device, queue, command_buffer, fence)?;
                 }
                 let panel_layer = panel_renderer.layer(&local_space, panel_pose);
-                if let Some(segment) = laser_segment {
+                if let Some(cursor_segment) = raw_pointer_segment {
                     laser_renderer.ensure_initialized(&vk_device, queue, command_buffer, fence)?;
-                    if let Some(laser_layers) = laser_renderer.layers(&local_space, segment) {
-                        frame_stream
-                            .end(
-                                frame_state.predicted_display_time,
-                                blend_mode,
-                                &[&layer, &panel_layer, &laser_layers[0], &laser_layers[1]],
-                            )
-                            .context("submitting dimmer, laser, and positioned panel layers")?;
+                    if let Some(pointer_layers) = laser_renderer.layers(
+                        &local_space,
+                        cursor_segment,
+                        smoothed_beam_segment,
+                        hmd_position,
+                        surface_target.laser_enabled,
+                    ) {
+                        if let Some(beam_layer) = pointer_layers.beam {
+                            frame_stream
+                                .end(
+                                    frame_state.predicted_display_time,
+                                    blend_mode,
+                                    &[&layer, &panel_layer, &beam_layer, &pointer_layers.cursor],
+                                )
+                                .context("submitting dimmer, panel, laser, and cursor layers")?;
+                        } else {
+                            frame_stream
+                                .end(
+                                    frame_state.predicted_display_time,
+                                    blend_mode,
+                                    &[&layer, &panel_layer, &pointer_layers.cursor],
+                                )
+                                .context("submitting dimmer, panel, and cursor layers")?;
+                        }
                     } else {
                         frame_stream
                             .end(

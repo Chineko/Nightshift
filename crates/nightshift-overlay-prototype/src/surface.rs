@@ -9,6 +9,7 @@ pub struct SurfaceTarget {
     pub visible: bool,
     pub distance_m: f32,
     pub spawn_mode: OverlaySpawnMode,
+    pub laser_enabled: bool,
     pub remembered_pose: Option<PanelPose>,
 }
 
@@ -18,6 +19,7 @@ impl From<&OverlayState> for SurfaceTarget {
             visible: state.visible,
             distance_m: sanitize_panel_distance(state.spawn_distance_m),
             spawn_mode: state.spawn_mode,
+            laser_enabled: state.laser_enabled,
             remembered_pose: state
                 .remembered_pose
                 .map(panel_pose_from_protocol)
@@ -145,6 +147,7 @@ mod tests {
             visible: true,
             distance_m: 1.0,
             spawn_mode,
+            laser_enabled: true,
             remembered_pose,
         }
     }

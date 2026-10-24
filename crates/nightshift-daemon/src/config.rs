@@ -32,6 +32,7 @@ pub struct PersistedConfig {
     pub invite_rules: InviteRuleSettings,
     pub overlay_spawn_distance_m: f32,
     pub overlay_spawn_mode: OverlaySpawnMode,
+    pub overlay_laser_enabled: bool,
     pub overlay_remembered_pose: Option<OverlayPose>,
 }
 
@@ -89,6 +90,7 @@ impl PersistedConfig {
             invite_rules: state.invites.rules.clone(),
             overlay_spawn_distance_m: state.overlay.spawn_distance_m,
             overlay_spawn_mode: state.overlay.spawn_mode,
+            overlay_laser_enabled: state.overlay.laser_enabled,
             overlay_remembered_pose: state.overlay.remembered_pose.and_then(sanitize_overlay_pose),
         }
     }
@@ -117,6 +119,7 @@ impl PersistedConfig {
         state.invites.rules = self.invite_rules.clone();
         state.overlay.spawn_distance_m = self.overlay_spawn_distance_m.clamp(0.25, 5.0);
         state.overlay.spawn_mode = self.overlay_spawn_mode;
+        state.overlay.laser_enabled = self.overlay_laser_enabled;
         state.overlay.remembered_pose = self.overlay_remembered_pose.and_then(sanitize_overlay_pose);
     }
 
@@ -229,6 +232,7 @@ mod tests {
         let mut state = AppState::default();
         state.overlay.spawn_distance_m = 2.25;
         state.overlay.spawn_mode = OverlaySpawnMode::RestoreLastPosition;
+        state.overlay.laser_enabled = false;
         state.overlay.remembered_pose = Some(OverlayPose {
             position: [1.0, 2.0, -3.0],
             orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
@@ -243,6 +247,7 @@ mod tests {
             restored.overlay.spawn_mode,
             OverlaySpawnMode::RestoreLastPosition
         );
+        assert!(!restored.overlay.laser_enabled);
         assert_eq!(restored.overlay.remembered_pose, state.overlay.remembered_pose);
     }
 

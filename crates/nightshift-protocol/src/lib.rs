@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppState {
@@ -253,11 +253,15 @@ pub struct OverlayPose {
     pub orientation_xyzw: [f32; 4],
 }
 
+fn default_overlay_laser_enabled() -> bool { true }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OverlayState {
     pub visible: bool,
     pub spawn_distance_m: f32,
     pub spawn_mode: OverlaySpawnMode,
+    #[serde(default = "default_overlay_laser_enabled")]
+    pub laser_enabled: bool,
     #[serde(default)]
     pub remembered_pose: Option<OverlayPose>,
     #[serde(default)]
@@ -271,6 +275,7 @@ impl Default for OverlayState {
             visible: false,
             spawn_distance_m: 1.0,
             spawn_mode: OverlaySpawnMode::InFront,
+            laser_enabled: true,
             remembered_pose: None,
             runtime_connected: false,
             runtime_client_version: None,
@@ -375,6 +380,7 @@ pub enum UiCommand {
     SetInviteRules(InviteRuleSettings),
     SetOverlaySpawnDistance(f32),
     SetOverlaySpawnMode(OverlaySpawnMode),
+    SetOverlayLaserEnabled(bool),
     ShowOverlay,
     HideOverlay,
 }

@@ -511,6 +511,7 @@ impl StateStore {
                 | UiCommand::SetInviteRules(_)
                 | UiCommand::SetOverlaySpawnDistance(_)
                 | UiCommand::SetOverlaySpawnMode(_)
+                | UiCommand::SetOverlayLaserEnabled(_)
         );
 
         let mut state = self.state.lock().await;
@@ -606,6 +607,7 @@ impl StateStore {
                 state.overlay.spawn_distance_m = distance_m.clamp(0.25, 5.0);
             }
             UiCommand::SetOverlaySpawnMode(mode) => state.overlay.spawn_mode = mode,
+            UiCommand::SetOverlayLaserEnabled(enabled) => state.overlay.laser_enabled = enabled,
             UiCommand::ShowOverlay => state.overlay.visible = true,
             UiCommand::HideOverlay => state.overlay.visible = false,
         }
@@ -1155,6 +1157,7 @@ mod tests {
         let store = StateStore::new(AppState::default());
 
         store.apply(UiCommand::SetOverlaySpawnDistance(99.0)).await;
+        store.apply(UiCommand::SetOverlayLaserEnabled(false)).await;
         store
             .apply(UiCommand::SetOverlaySpawnMode(
                 OverlaySpawnMode::RestoreLastPosition,
@@ -1163,6 +1166,7 @@ mod tests {
 
         let (snapshot, _) = store.snapshot_and_subscribe().await;
         assert_eq!(snapshot.overlay.spawn_distance_m, 5.0);
+        assert!(!snapshot.overlay.laser_enabled);
         assert_eq!(
             snapshot.overlay.spawn_mode,
             OverlaySpawnMode::RestoreLastPosition
