@@ -150,23 +150,24 @@ pub fn parse_pipeline_notification(frame: &str) -> Result<Option<VrchatNotificat
 }
 
 impl VrchatApiClient {
-    /// Resolve the two social facts needed by Nightshift's pure invite rules.
-    ///
-    /// Favorite friends are necessarily friends in VRChat, so finding a favorite lets us avoid
-    /// even the targeted friend-status request. Otherwise use VRChat's per-user friend-status
-    /// endpoint rather than paging through the account's entire online/offline friend lists.
+    /// Resolve both social facts needed by callers that need friend and favorite context together.
     pub async fn invite_sender_relationship(
         &self,
         cookies: &SessionCookies,
         user_id: &str,
     ) -> Result<(bool, bool)> {
-        if self.is_favorite_friend(cookies, user_id).await? {
+        if self.invite_sender_is_favorite(cookies, user_id).await? {
             return Ok((true, true));
         }
-        Ok((self.is_friend(cookies, user_id).await?, false))
+        Ok((self.invite_sender_is_friend(cookies, user_id).await?, false))
     }
 
-    async fn is_favorite_friend(&self, cookies: &SessionCookies, user_id: &str) -> Result<bool> {
+    /// Check only whether the invite sender is a favorite friend.
+    pub async fn invite_sender_is_favorite(
+        &self,
+        cookies: &SessionCookies,
+        user_id: &str,
+    ) -> Result<bool> {
         let mut offset = 0;
         loop {
             let response = self
@@ -203,7 +204,12 @@ impl VrchatApiClient {
         }
     }
 
-    async fn is_friend(&self, cookies: &SessionCookies, user_id: &str) -> Result<bool> {
+    /// Check only whether the invite sender is a friend using VRChat's targeted endpoint.
+    pub async fn invite_sender_is_friend(
+        &self,
+        cookies: &SessionCookies,
+        user_id: &str,
+    ) -> Result<bool> {
         let response = self
             .http
             .get(format!("{BASE_URL}/user/{user_id}/friendStatus"))
