@@ -60,6 +60,38 @@ jobs:
           PY
           python3 /tmp/apply.py
           rm -f .github/workflows/apply-overlay-input-polish-final.yml
+      - name: Fix standalone test harnesses and Vulkan safety scopes
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for filename in ['tests/panel_content.rs', 'tests/raster.rs']:
+              path = Path('crates/nightshift-overlay-prototype') / filename
+              text = path.read_text()
+              marker = '#[path = "../src/content.rs"]\nmod content;\n'
+              addition = '#[path = "../src/placement.rs"]\nmod placement;\n#[path = "../src/interaction.rs"]\nmod interaction;\n'
+              if addition not in text:
+                  if text.count(marker) != 1:
+                      raise SystemExit(f'{filename}: content module marker mismatch')
+                  text = text.replace(marker, marker + addition, 1)
+              text = text.replace('render_if_changed(&content)', 'render_if_changed(&content, None)')
+              path.write_text(text)
+
+          path = Path('crates/nightshift-overlay-prototype/src/laser.rs')
+          text = path.read_text()
+          old = '            let result = (|| -> Result<()> {\n'
+          new = '            let result = unsafe { (|| -> Result<()> {\n'
+          if text.count(old) != 1:
+              raise SystemExit('laser unsafe opening guard mismatch')
+          text = text.replace(old, new, 1)
+          old = '            })();\n            let release = self.swapchain.release_image().context("releasing laser image");\n'
+          new = '            })() };\n            let release = self.swapchain.release_image().context("releasing laser image");\n'
+          if text.count(old) != 1:
+              raise SystemExit('laser unsafe closing guard mismatch')
+          text = text.replace(old, new, 1)
+          path.write_text(text)
+          PY
       - name: Format only touched Rust files
         run: |
           rustfmt --edition 2024 \
@@ -68,7 +100,9 @@ jobs:
             crates/nightshift-overlay-prototype/src/laser.rs \
             crates/nightshift-overlay-prototype/src/panel_cache.rs \
             crates/nightshift-overlay-prototype/src/raster.rs \
-            crates/nightshift-overlay-prototype/tests/interaction.rs
+            crates/nightshift-overlay-prototype/tests/interaction.rs \
+            crates/nightshift-overlay-prototype/tests/panel_content.rs \
+            crates/nightshift-overlay-prototype/tests/raster.rs
           rustfmt --edition 2024 crates/nightshift-overlay-prototype/src/main.rs
           git checkout HEAD -- \
             crates/nightshift-overlay-prototype/src/content.rs \
