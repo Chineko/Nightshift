@@ -52,6 +52,10 @@ jobs:
           if text.count(old) != 1:
               raise SystemExit('laser submission patch guard failed')
           text = text.replace(old, bounded, 1)
+          docs_marker = '# Update user-facing behavior/docs with this checkpoint\'s exact controls.'
+          if docs_marker not in text:
+              raise SystemExit('README section marker missing')
+          text = text.split(docs_marker, 1)[0]
           path.write_text(text)
           PY
           python3 /tmp/apply.py
@@ -80,7 +84,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add README.md crates/nightshift-overlay-prototype .github/workflows/apply-overlay-input-polish-final.yml
+          git add crates/nightshift-overlay-prototype .github/workflows/apply-overlay-input-polish-final.yml
           git diff --cached --check
           git commit -m 'Polish overlay controller interaction'
           git push
