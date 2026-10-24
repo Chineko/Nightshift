@@ -4,7 +4,12 @@ pub use invites::{
     InviteRefused, NotificationKind, VrchatNotification, parse_pipeline_notification, pipeline_url,
 };
 
-use std::{fmt, time::Duration};
+use std::{
+    collections::HashSet,
+    fmt,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use nightshift_protocol::VrchatStatus;
@@ -17,6 +22,7 @@ use serde::{Deserialize, Serialize};
 const BASE_URL: &str = "https://api.vrchat.cloud/api/1";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const FAVORITES_CACHE_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct SessionCookies {
@@ -146,9 +152,16 @@ impl fmt::Debug for CapturedCookies {
     }
 }
 
+struct FavoriteCache {
+    session_auth: String,
+    loaded_at: Instant,
+    user_ids: HashSet<String>,
+}
+
 #[derive(Clone)]
 pub struct VrchatApiClient {
     http: HttpClient,
+    favorite_cache: Arc<Mutex<Option<FavoriteCache>>>,
 }
 
 impl VrchatApiClient {
@@ -162,7 +175,10 @@ impl VrchatApiClient {
             .timeout(HTTP_REQUEST_TIMEOUT)
             .build()
             .context("building VRChat HTTP client")?;
-        Ok(Self { http })
+        Ok(Self {
+            http,
+            favorite_cache: Arc::new(Mutex::new(None)),
+        })
     }
 
     pub async fn begin_login(&self, username: &str, password: &str) -> Result<LoginResult> {
@@ -299,6 +315,7 @@ impl VrchatApiClient {
         user_id: &str,
         status: VrchatStatus,
     ) -> Result<()> {
+        let user_id = validate_vrchat_user_id(user_id)?;
         let response = self
             .http
             .put(format!("{BASE_URL}/users/{user_id}"))
@@ -324,6 +341,22 @@ impl Default for VrchatApiClient {
     fn default() -> Self {
         Self::new().expect("building the default VRChat HTTP client should succeed")
     }
+}
+
+fn validate_vrchat_user_id(user_id: &str) -> Result<&str> {
+    let Some(uuid) = user_id.strip_prefix("usr_") else {
+        bail!("invalid VRChat user id");
+    };
+    if uuid.len() != 36 {
+        bail!("invalid VRChat user id");
+    }
+    for (index, byte) in uuid.bytes().enumerate() {
+        let hyphen = matches!(index, 8 | 13 | 18 | 23);
+        if (hyphen && byte != b'-') || (!hyphen && !byte.is_ascii_hexdigit()) {
+            bail!("invalid VRChat user id");
+        }
+    }
+    Ok(user_id)
 }
 
 fn login_user(body: LoginResponse) -> Result<CurrentUserSummary> {
@@ -481,5 +514,16 @@ mod tests {
     #[test]
     fn rejects_unknown_statuses() {
         assert!(parse_status("creative chaos").is_err());
+    }
+
+    #[test]
+    fn validates_vrchat_user_ids_before_path_interpolation() {
+        let valid = "usr_01234567-89ab-cdef-0123-456789abcdef";
+        assert_eq!(validate_vrchat_user_id(valid).unwrap(), valid);
+        assert!(validate_vrchat_user_id("usr_not-a-uuid").is_err());
+        assert!(validate_vrchat_user_id("not_01234567-89ab-cdef-0123-456789abcdef").is_err());
+        assert!(
+            validate_vrchat_user_id("usr_01234567-89ab-cdef-0123-456789abcde/").is_err()
+        );
     }
 }
