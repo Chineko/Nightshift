@@ -41,6 +41,7 @@ fn new_overlay_state_round_trips_runtime_health() {
         visible: true,
         spawn_distance_m: 1.25,
         spawn_mode: OverlaySpawnMode::RestoreLastPosition,
+        remembered_pose: None,
         runtime_connected: true,
         runtime_client_version: Some("0.1.0".into()),
     };
