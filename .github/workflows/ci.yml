@@ -21,13 +21,18 @@ jobs:
           components: rustfmt, clippy
 
       - name: Install Linux system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libopenxr-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y fish libdbus-1-dev libopenxr-dev pkg-config
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
       - name: Verify Cargo lockfile
         run: cargo metadata --locked --no-deps > /dev/null
+
+      - name: Validate dev launcher
+        run: |
+          fish -n scripts/nightshift-dev.fish
+          fish scripts/nightshift-dev.fish --help > /dev/null
 
       - name: Keep Hydra healthy
         run: |
