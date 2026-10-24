@@ -181,6 +181,7 @@ mod tests {
                 ..Default::default()
             },
             last_action: None,
+            last_error: None,
         };
         let rules = invite_rules_from_state(&state);
         assert!(rules.whitelist.contains("usr_allowed"));
@@ -200,6 +201,7 @@ mod tests {
                 fallback: InviteActionKind::Declined,
             },
             last_action: None,
+            last_error: None,
         };
         let rules = invite_rules_from_state(&state);
         assert!(!rules.custom_accept_friends);
@@ -221,6 +223,7 @@ mod tests {
                 ..Default::default()
             },
             last_action: None,
+            last_error: None,
         };
         assert_eq!(
             relationship_needs(&invite_rules_from_state(&state)),
