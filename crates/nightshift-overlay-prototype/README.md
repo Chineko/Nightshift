@@ -4,7 +4,7 @@ This crate hosts Nightshift's OpenXR compositor worker for Monado/WiVRn setups. 
 
 - submit the tiny stereo projection-layer sleep dimmer
 - report HMD orientation to the daemon's sleeping-pose detector
-- submit a basic world-locked positioned `CompositionLayerQuad` controlled by canonical overlay state
+- submit a world-locked positioned `CompositionLayerQuad` controlled by canonical overlay state and populated with live Nightshift status
 
 Current WayVR uses a higher overlay placement, so WayVR can continue to render above Nightshift while both are running.
 
@@ -41,6 +41,21 @@ The same visibility, distance, and spawn-mode controls are available in the desk
 
 The remembered panel pose is currently process-local. Restarting the overlay worker clears it; persistent transforms and direct grabbing/repositioning are future work.
 
+## Live panel content
+
+The positioned panel renders a small CPU-generated status bitmap from canonical daemon state. It currently shows:
+
+- Nightshift title
+- sleep phase, including HR-detected sleep context
+- current brightness and transition target
+- heart-rate/provider state
+- VRChat connectivity/status
+- OSC and invite-automation state
+
+Daemon snapshots and state events update an internal panel-state mirror. The bitmap is regenerated only when those visible lines change; unrelated state changes do not request a redraw, and identical content is deduplicated before any Vulkan upload. If the OpenXR session is restarted, the cache is invalidated so the latest status is uploaded again.
+
+When testing on hardware, verify that changing sleep state, brightness, heart rate, VRChat status, OSC, or invite automation updates the corresponding line. Hide the panel, change state, then show it again and confirm the newest state appears rather than the value that was visible when it was hidden.
+
 ## Expected dimmer/ordering behavior
 
 Use the normal Nightshift brightness/sleep controls while VRChat is visible. The dimmer remains a tiny black stereo projection layer with source-alpha blending.
@@ -53,8 +68,6 @@ Expected compositor behavior:
 - Moving your head does not uncover the full-screen dimmer.
 - Ctrl+C removes Nightshift's OpenXR layers cleanly.
 
-The first positioned panel intentionally contains only a fixed dark surface. Rich content and interaction come after geometry, lifecycle, and compositor ordering are validated on real hardware.
-
 ## Automated checks
 
 CI runs:
@@ -63,4 +76,4 @@ CI runs:
 cargo test -p nightshift-overlay
 ```
 
-This covers placement geometry, finite-value validation, show/hide/restore state behavior, and the quad-rendering API boundary. CI installs the OpenXR loader development package so these tests are linked and executed rather than only compile-checked.
+This covers placement geometry, finite-value validation, show/hide/restore state behavior, panel content generation, bitmap rasterization and deduplication, upload-format handling, and the quad-rendering API boundary. CI installs the OpenXR loader development package so these tests are linked and executed rather than only compile-checked.
