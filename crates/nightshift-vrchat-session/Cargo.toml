@@ -8,6 +8,6 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-keyring = "4.2.0"
+keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
 serde.workspace = true
 serde_json.workspace = true
