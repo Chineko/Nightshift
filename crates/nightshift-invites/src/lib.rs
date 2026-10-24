@@ -15,6 +15,7 @@ pub struct InviteRules {
     pub enabled: bool,
     pub profile: InviteProfile,
     pub whitelist: HashSet<String>,
+    pub blacklist: HashSet<String>,
     pub custom_accept_friends: bool,
     pub custom_accept_favorites: bool,
     pub custom_accept_whitelist: bool,
@@ -27,6 +28,7 @@ impl Default for InviteRules {
             enabled: false,
             profile: InviteProfile::Disabled,
             whitelist: HashSet::new(),
+            blacklist: HashSet::new(),
             custom_accept_friends: true,
             custom_accept_favorites: true,
             custom_accept_whitelist: true,
@@ -39,6 +41,9 @@ impl InviteRules {
     pub fn decide(&self, context: &InviteContext) -> InviteActionKind {
         if !self.enabled || self.profile == InviteProfile::Disabled {
             return InviteActionKind::Ignored;
+        }
+        if self.blacklist.contains(&context.user_id) {
+            return InviteActionKind::Declined;
         }
 
         let whitelisted = context.is_whitelisted || self.whitelist.contains(&context.user_id);
@@ -140,6 +145,19 @@ mod tests {
         rules.whitelist.insert("usr_test".into());
 
         assert_eq!(rules.decide(&context()), InviteActionKind::Accepted);
+    }
+
+    #[test]
+    fn blacklist_declines_before_accept_profiles() {
+        let mut rules = InviteRules {
+            enabled: true,
+            profile: InviteProfile::Friends,
+            ..Default::default()
+        };
+        rules.blacklist.insert("usr_test".into());
+        let mut invite = context();
+        invite.is_friend = true;
+        assert_eq!(rules.decide(&invite), InviteActionKind::Declined);
     }
 
     #[test]

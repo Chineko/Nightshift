@@ -26,12 +26,28 @@ pub struct PanelGrab {
     relative_orientation_xyzw: [f32; 4],
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PanelPage {
+    #[default]
+    Home,
+    Settings,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelAction {
+    NavigateHome,
+    NavigateSettings,
     EnterSleep,
     Wake,
     BrightnessDown,
     BrightnessUp,
+    ToggleHeartRate,
+    ToggleOsc,
+    CycleInviteProfile,
+    CycleVrchatStatus,
+    SelectWhitelist,
+    SelectBlacklist,
+    RemoveSocial(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,12 +59,26 @@ struct ButtonRegion {
     y_max: f32,
 }
 
-// Keep interaction regions aligned with the vertical home dashboard in raster.rs.
-// Moon/sun adjust brightness; the single bottom action changes between sleep and wake.
+// Keep interaction regions aligned with the vertical dashboards in raster.rs.
+const NAV_HOME: ButtonRegion = region(PanelAction::NavigateHome, 500.0, 594.0, 38.0, 86.0);
+const NAV_SETTINGS: ButtonRegion = region(PanelAction::NavigateSettings, 602.0, 720.0, 38.0, 86.0);
 const BRIGHTNESS_DOWN: ButtonRegion =
     region(PanelAction::BrightnessDown, 60.0, 116.0, 340.0, 406.0);
 const BRIGHTNESS_UP: ButtonRegion = region(PanelAction::BrightnessUp, 652.0, 708.0, 340.0, 406.0);
 const PRIMARY_ACTION: ButtonRegion = region(PanelAction::EnterSleep, 40.0, 728.0, 840.0, 914.0);
+const SETTINGS_HR: ButtonRegion = region(PanelAction::ToggleHeartRate, 356.0, 446.0, 238.0, 320.0);
+const SETTINGS_OSC: ButtonRegion = region(PanelAction::ToggleOsc, 356.0, 446.0, 354.0, 436.0);
+const SETTINGS_INVITES: ButtonRegion = region(PanelAction::CycleInviteProfile, 300.0, 446.0, 470.0, 552.0);
+const SETTINGS_VRCHAT: ButtonRegion = region(PanelAction::CycleVrchatStatus, 300.0, 446.0, 586.0, 668.0);
+const SOCIAL_WHITELIST: ButtonRegion = region(PanelAction::SelectWhitelist, 500.0, 602.0, 302.0, 348.0);
+const SOCIAL_BLACKLIST: ButtonRegion = region(PanelAction::SelectBlacklist, 606.0, 708.0, 302.0, 348.0);
+const SOCIAL_REMOVE: [ButtonRegion; 5] = [
+    region(PanelAction::RemoveSocial(0), 676.0, 716.0, 366.0, 420.0),
+    region(PanelAction::RemoveSocial(1), 676.0, 716.0, 438.0, 492.0),
+    region(PanelAction::RemoveSocial(2), 676.0, 716.0, 510.0, 564.0),
+    region(PanelAction::RemoveSocial(3), 676.0, 716.0, 582.0, 636.0),
+    region(PanelAction::RemoveSocial(4), 676.0, 716.0, 654.0, 708.0),
+];
 
 const fn region(
     action: PanelAction,
@@ -67,24 +97,56 @@ const fn region(
 }
 
 pub fn action_at_uv(uv: PanelUv) -> Option<PanelAction> {
-    action_at_uv_for_sleep_state(uv, false)
+    action_at_uv_for_page(uv, PanelPage::Home, false)
 }
 
 pub fn action_at_uv_for_sleep_state(uv: PanelUv, wake_action: bool) -> Option<PanelAction> {
+    action_at_uv_for_page(uv, PanelPage::Home, wake_action)
+}
+
+pub fn action_at_uv_for_page(
+    uv: PanelUv,
+    page: PanelPage,
+    wake_action: bool,
+) -> Option<PanelAction> {
     if !uv.u.is_finite() || !uv.v.is_finite() {
         return None;
     }
-    for button in [BRIGHTNESS_DOWN, BRIGHTNESS_UP] {
+    for button in [NAV_HOME, NAV_SETTINGS] {
         if inside(uv, button) {
             return Some(button.action);
         }
     }
-    if inside(uv, PRIMARY_ACTION) {
-        return Some(if wake_action {
-            PanelAction::Wake
-        } else {
-            PanelAction::EnterSleep
-        });
+    match page {
+        PanelPage::Home => {
+            for button in [BRIGHTNESS_DOWN, BRIGHTNESS_UP] {
+                if inside(uv, button) {
+                    return Some(button.action);
+                }
+            }
+            if inside(uv, PRIMARY_ACTION) {
+                return Some(if wake_action { PanelAction::Wake } else { PanelAction::EnterSleep });
+            }
+        }
+        PanelPage::Settings => {
+            for button in [
+                SETTINGS_HR,
+                SETTINGS_OSC,
+                SETTINGS_INVITES,
+                SETTINGS_VRCHAT,
+                SOCIAL_WHITELIST,
+                SOCIAL_BLACKLIST,
+            ] {
+                if inside(uv, button) {
+                    return Some(button.action);
+                }
+            }
+            for button in SOCIAL_REMOVE {
+                if inside(uv, button) {
+                    return Some(button.action);
+                }
+            }
+        }
     }
     None
 }

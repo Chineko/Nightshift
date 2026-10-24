@@ -4,7 +4,8 @@ mod interaction;
 mod placement;
 
 use interaction::{
-    PanelAction, PanelRay, PanelUv, action_at_uv, action_at_uv_for_sleep_state, begin_panel_grab,
+    PanelAction, PanelPage, PanelRay, PanelUv, action_at_uv, action_at_uv_for_page,
+    action_at_uv_for_sleep_state, begin_panel_grab,
     hit_test_panel, hit_test_panel_with_distance, update_panel_grab,
 };
 use placement::PanelPose;
@@ -121,6 +122,26 @@ fn dashboard_regions_map_to_brightness_and_stateful_primary_action() {
     );
 
     assert_eq!(action_at_uv(PanelUv { u: 0.5, v: 0.5 }), None);
+}
+
+#[test]
+fn settings_regions_map_to_navigation_quick_controls_and_social_remove() {
+    assert_eq!(
+        action_at_uv_for_page(PanelUv { u: 0.86, v: 0.065 }, PanelPage::Home, false),
+        Some(PanelAction::NavigateSettings)
+    );
+    assert_eq!(
+        action_at_uv_for_page(PanelUv { u: 0.71, v: 0.065 }, PanelPage::Settings, false),
+        Some(PanelAction::NavigateHome)
+    );
+    assert_eq!(
+        action_at_uv_for_page(PanelUv { u: 0.52, v: 0.29 }, PanelPage::Settings, false),
+        Some(PanelAction::ToggleHeartRate)
+    );
+    assert_eq!(
+        action_at_uv_for_page(PanelUv { u: 0.90, v: 0.40 }, PanelPage::Settings, false),
+        Some(PanelAction::RemoveSocial(0))
+    );
 }
 
 #[test]

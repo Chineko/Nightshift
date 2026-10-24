@@ -1,7 +1,21 @@
-use nightshift_protocol::{AppState, ConnectionState, HrProviderStatus, SleepPhase, VrchatStatus};
+use nightshift_protocol::{
+    AppState, ConnectionState, HrProviderStatus, InviteProfile, InviteRuleSettings, SleepPhase,
+    VrchatStatus,
+};
+
+use crate::interaction::PanelPage;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SocialTab {
+    #[default]
+    Whitelist,
+    Blacklist,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PanelContent {
+    pub page: PanelPage,
+    pub social_tab: SocialTab,
     pub lines: [String; 6],
     pub sleep_phase: SleepPhase,
     pub brightness_percent: u32,
@@ -13,6 +27,12 @@ pub struct PanelContent {
     pub vrchat_status: String,
     pub automation_summary: String,
     pub connected: bool,
+    pub heart_rate_enabled: bool,
+    pub osc_enabled: bool,
+    pub invite_enabled: bool,
+    pub invite_profile: InviteProfile,
+    pub invite_rules: InviteRuleSettings,
+    pub sleep_vrchat_status: VrchatStatus,
 }
 
 impl PanelContent {
@@ -21,6 +41,8 @@ impl PanelContent {
         let target_brightness_percent = percent(state.brightness.sleep_target);
         let lines = legacy_lines(state);
         Self {
+            page: PanelPage::Home,
+            social_tab: SocialTab::Whitelist,
             lines,
             sleep_phase: state.sleep.phase,
             brightness_percent,
@@ -34,6 +56,50 @@ impl PanelContent {
                 "SLEEP MODE WILL SET BRIGHTNESS TO {target_brightness_percent}% AND UPDATE VRCHAT STATUS."
             ),
             connected: matches!(state.connection, ConnectionState::Connected),
+            heart_rate_enabled: state.heart_rate.enabled,
+            osc_enabled: state.osc.enabled,
+            invite_enabled: state.invites.enabled,
+            invite_profile: state.invites.profile,
+            invite_rules: state.invites.rules.clone(),
+            sleep_vrchat_status: state.settings.sleep_vrchat_status,
+        }
+    }
+
+    pub fn with_view(mut self, page: PanelPage, social_tab: SocialTab) -> Self {
+        self.page = page;
+        self.social_tab = social_tab;
+        self
+    }
+
+    pub fn set_view(&mut self, page: PanelPage, social_tab: SocialTab) {
+        self.page = page;
+        self.social_tab = social_tab;
+    }
+
+    pub fn social_entries(&self) -> &[String] {
+        match self.social_tab {
+            SocialTab::Whitelist => &self.invite_rules.whitelist,
+            SocialTab::Blacklist => &self.invite_rules.blacklist,
+        }
+    }
+
+    pub fn invite_profile_label(&self) -> &'static str {
+        match self.invite_profile {
+            InviteProfile::Disabled => "DISABLED",
+            InviteProfile::Friends => "FRIENDS",
+            InviteProfile::Favorites => "FAVORITES",
+            InviteProfile::Whitelist => "WHITELIST",
+            InviteProfile::Custom => "CUSTOM",
+        }
+    }
+
+    pub fn sleep_vrchat_status_label(&self) -> &'static str {
+        match self.sleep_vrchat_status {
+            VrchatStatus::Active => "ACTIVE",
+            VrchatStatus::JoinMe => "JOIN ME",
+            VrchatStatus::AskMe => "ASK ME",
+            VrchatStatus::Busy => "BUSY",
+            VrchatStatus::Offline => "OFFLINE",
         }
     }
 

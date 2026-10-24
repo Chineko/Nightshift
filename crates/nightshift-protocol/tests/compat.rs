@@ -5,8 +5,8 @@ use nightshift_protocol::{
 };
 
 #[test]
-fn pointer_settings_require_protocol_v2() {
-    assert_eq!(PROTOCOL_VERSION, 2);
+fn settings_control_center_requires_protocol_v3() {
+    assert_eq!(PROTOCOL_VERSION, 3);
 }
 
 #[test]
@@ -158,10 +158,27 @@ fn old_invite_state_defaults_rule_settings() {
 
     assert!(state.enabled);
     assert!(state.rules.whitelist.is_empty());
+    assert!(state.rules.blacklist.is_empty());
     assert!(state.rules.accept_friends);
     assert!(state.rules.accept_favorites);
     assert!(state.rules.accept_whitelist);
     assert_eq!(state.rules.fallback, InviteActionKind::Ignored);
+}
+
+#[test]
+fn invite_blacklist_round_trips_and_old_rules_default_empty() {
+    let rules = InviteRuleSettings {
+        whitelist: vec!["usr_friend".into()],
+        blacklist: vec!["usr_blocked".into()],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&rules).expect("serialize invite rules");
+    let decoded: InviteRuleSettings = serde_json::from_str(&json).expect("deserialize invite rules");
+    assert_eq!(decoded, rules);
+
+    let old: InviteRuleSettings = serde_json::from_str(r#"{"whitelist":["usr_friend"]}"#)
+        .expect("old invite rules decode");
+    assert!(old.blacklist.is_empty());
 }
 
 #[test]
@@ -240,6 +257,7 @@ fn old_full_app_state_decodes_with_additive_defaults() {
     assert_eq!(state.osc.avatar_parameter_count, 0);
     assert!(!state.osc.gogo_detected);
     assert!(state.invites.rules.whitelist.is_empty());
+    assert!(state.invites.rules.blacklist.is_empty());
     assert_eq!(state.invites.rules.fallback, InviteActionKind::Ignored);
     assert_eq!(state.overlay.remembered_pose, None);
     assert!(state.overlay.laser_enabled);

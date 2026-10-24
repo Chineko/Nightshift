@@ -9,6 +9,7 @@ pub struct InviteSettingsUi {
     draft_rules: InviteRuleSettings,
     canonical_rules: InviteRuleSettings,
     whitelist_edit: String,
+    blacklist_edit: String,
     initialized: bool,
 }
 
@@ -18,6 +19,7 @@ impl Default for InviteSettingsUi {
             draft_rules: InviteRuleSettings::default(),
             canonical_rules: InviteRuleSettings::default(),
             whitelist_edit: String::new(),
+            blacklist_edit: String::new(),
             initialized: false,
         }
     }
@@ -90,6 +92,10 @@ impl InviteSettingsUi {
             }
         }
 
+        ui.add_space(12.0);
+        ui.separator();
+        self.blacklist_editor(ui, &mut commands);
+
         render_feedback(ui, state);
         commands
     }
@@ -99,6 +105,7 @@ impl InviteSettingsUi {
             self.draft_rules = state.rules.clone();
             self.canonical_rules = state.rules.clone();
             self.whitelist_edit = state.rules.whitelist.join("\n");
+            self.blacklist_edit = state.rules.blacklist.join("\n");
             self.initialized = true;
         }
     }
@@ -117,7 +124,26 @@ impl InviteSettingsUi {
                 .small(),
         );
         if response.changed() {
-            self.draft_rules.whitelist = parse_whitelist(&self.whitelist_edit);
+            self.draft_rules.whitelist = parse_user_list(&self.whitelist_edit);
+            commands.push(UiCommand::SetInviteRules(self.draft_rules.clone()));
+        }
+    }
+
+    fn blacklist_editor(&mut self, ui: &mut egui::Ui, commands: &mut Vec<UiCommand>) {
+        ui.label(RichText::new("Always decline").strong());
+        ui.label("Blacklisted VRChat user IDs");
+        let response = ui.add(
+            egui::TextEdit::multiline(&mut self.blacklist_edit)
+                .desired_rows(4)
+                .hint_text("usr_blocked_one\nusr_blocked_two"),
+        );
+        ui.label(
+            RichText::new("Blacklisted users are declined before friend, favorite, whitelist, or custom acceptance rules.")
+                .weak()
+                .small(),
+        );
+        if response.changed() {
+            self.draft_rules.blacklist = parse_user_list(&self.blacklist_edit);
             commands.push(UiCommand::SetInviteRules(self.draft_rules.clone()));
         }
     }
@@ -211,7 +237,7 @@ fn render_feedback(ui: &mut egui::Ui, state: &InviteState) {
     }
 }
 
-fn parse_whitelist(value: &str) -> Vec<String> {
+fn parse_user_list(value: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
     for id in value
@@ -259,9 +285,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn whitelist_parser_trims_deduplicates_and_accepts_commas() {
+    fn user_list_parser_trims_deduplicates_and_accepts_commas() {
         assert_eq!(
-            parse_whitelist(" usr_one\nusr_two, usr_one\n\nusr_three "),
+            parse_user_list(" usr_one\nusr_two, usr_one\n\nusr_three "),
             vec!["usr_one", "usr_two", "usr_three"]
         );
     }

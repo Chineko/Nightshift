@@ -31,6 +31,7 @@ pub fn invite_rules_from_state(state: &InviteState) -> InviteRules {
         enabled: state.enabled,
         profile: state.profile,
         whitelist: state.rules.whitelist.iter().cloned().collect::<HashSet<_>>(),
+        blacklist: state.rules.blacklist.iter().cloned().collect::<HashSet<_>>(),
         custom_accept_friends: state.rules.accept_friends,
         custom_accept_favorites: state.rules.accept_favorites,
         custom_accept_whitelist: state.rules.accept_whitelist,
@@ -189,12 +190,29 @@ mod tests {
     }
 
     #[test]
+    fn blacklist_maps_to_pure_rules() {
+        let state = InviteState {
+            enabled: true,
+            profile: InviteProfile::Friends,
+            rules: InviteRuleSettings {
+                blacklist: vec!["usr_blocked".into()],
+                ..Default::default()
+            },
+            last_action: None,
+            last_error: None,
+        };
+        let rules = invite_rules_from_state(&state);
+        assert!(rules.blacklist.contains("usr_blocked"));
+    }
+
+    #[test]
     fn custom_settings_map_to_pure_rules_and_lookup_needs() {
         let state = InviteState {
             enabled: true,
             profile: InviteProfile::Custom,
             rules: InviteRuleSettings {
                 whitelist: vec!["usr_allowed".into()],
+                blacklist: vec![],
                 accept_friends: false,
                 accept_favorites: true,
                 accept_whitelist: false,

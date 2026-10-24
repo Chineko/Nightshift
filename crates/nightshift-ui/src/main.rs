@@ -566,8 +566,8 @@ impl NightshiftApp {
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Settings");
-        ui.label(RichText::new("Changes are sent to the daemon immediately and only changed state is broadcast back.").color(MUTED));
+        ui.heading("Advanced settings");
+        ui.label(RichText::new("Full Nightshift configuration lives here. The VR overlay keeps only quick, headset-friendly controls.").color(MUTED));
         ui.add_space(16.0);
 
         setting_card(ui, "Sleep", |ui| {
@@ -665,11 +665,22 @@ impl NightshiftApp {
         setting_card(ui, "Overlay", |ui| self.overlay_settings(ui));
 
         ui.add_space(12.0);
-        setting_card(ui, "Invite automation", |ui| {
+        setting_card(ui, "Invite automation & access lists", |ui| {
             let commands = self.invite_settings.render(ui, &self.state.invites);
             for command in commands {
                 self.send_command(command);
             }
+        });
+
+        ui.add_space(12.0);
+        setting_card(ui, "Diagnostics", |ui| {
+            status_row(ui, "Daemon IPC", if self.daemon_connected { "Connected" } else { "Disconnected" });
+            status_row(ui, "Overlay runtime", if self.state.overlay.runtime_connected { "Connected" } else { "Disconnected" });
+            status_row(ui, "OSC runtime", if self.state.osc.connected { "Connected" } else { "Waiting" });
+            status_row(ui, "Heart-rate provider", hr_provider_status_name(self.state.heart_rate.provider_status));
+            status_row(ui, "VRChat", if self.state.vrchat.connected { "Connected" } else { "Offline" });
+            ui.add_space(6.0);
+            ui.label(RichText::new("Use this desktop page for device selection, thresholds, placement, laser behavior, automations, access lists, and runtime health.").color(MUTED).small());
         });
     }
 }
@@ -791,8 +802,8 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_title("Nightshift")
-            .with_inner_size([760.0, 820.0])
-            .with_min_inner_size([520.0, 620.0]),
+            .with_inner_size([920.0, 900.0])
+            .with_min_inner_size([680.0, 680.0]),
         ..Default::default()
     };
 

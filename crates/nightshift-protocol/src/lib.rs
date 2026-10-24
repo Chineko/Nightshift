@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppState {
@@ -198,6 +198,7 @@ where
 #[serde(default)]
 pub struct InviteRuleSettings {
     pub whitelist: Vec<String>,
+    pub blacklist: Vec<String>,
     pub accept_friends: bool,
     pub accept_favorites: bool,
     pub accept_whitelist: bool,
@@ -209,6 +210,7 @@ impl Default for InviteRuleSettings {
     fn default() -> Self {
         Self {
             whitelist: Vec::new(),
+            blacklist: Vec::new(),
             accept_friends: true,
             accept_favorites: true,
             accept_whitelist: true,

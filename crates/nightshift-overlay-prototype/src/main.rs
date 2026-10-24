@@ -32,10 +32,10 @@ use openxr as xr;
 use xr::OverlaySessionCreateFlagsEXTX;
 use xr::sys::Handle as XrHandle;
 
-use content::PanelContent;
+use content::{PanelContent, SocialTab};
 use controller_input::{ControllerHand, ControllerInput, select_active_pointer_hand};
 use interaction::{
-    PanelAction, PanelGrab, action_at_uv_for_sleep_state, begin_panel_grab,
+    PanelAction, PanelGrab, PanelPage, action_at_uv_for_page, begin_panel_grab,
     hit_test_panel_with_distance, update_panel_grab,
 };
 use laser::{LaserRenderer, LaserSegment, PointerSmoother, smoothing_alpha};
@@ -467,16 +467,60 @@ fn report_pose(reports: &Sender<WorkerReport>, pose: SleepingPose) {
     let _ = reports.send(WorkerReport::SleepingPose { pose });
 }
 
-fn panel_command(action: PanelAction, current_brightness: f32) -> UiCommand {
+fn next_invite_profile(profile: nightshift_protocol::InviteProfile) -> nightshift_protocol::InviteProfile {
+    use nightshift_protocol::InviteProfile;
+    match profile {
+        InviteProfile::Disabled => InviteProfile::Friends,
+        InviteProfile::Friends => InviteProfile::Favorites,
+        InviteProfile::Favorites => InviteProfile::Whitelist,
+        InviteProfile::Whitelist => InviteProfile::Custom,
+        InviteProfile::Custom => InviteProfile::Disabled,
+    }
+}
+
+fn next_vrchat_status(status: nightshift_protocol::VrchatStatus) -> nightshift_protocol::VrchatStatus {
+    use nightshift_protocol::VrchatStatus;
+    match status {
+        VrchatStatus::Active => VrchatStatus::AskMe,
+        VrchatStatus::AskMe => VrchatStatus::Busy,
+        VrchatStatus::Busy => VrchatStatus::Offline,
+        VrchatStatus::Offline => VrchatStatus::JoinMe,
+        VrchatStatus::JoinMe => VrchatStatus::Active,
+    }
+}
+
+fn panel_command(
+    action: PanelAction,
+    content: &PanelContent,
+    current_brightness: f32,
+) -> Option<UiCommand> {
     match action {
-        PanelAction::EnterSleep => UiCommand::EnterSleep,
-        PanelAction::Wake => UiCommand::Wake,
-        PanelAction::BrightnessDown => {
-            UiCommand::SetBrightness(sanitize_brightness(current_brightness - 0.1))
+        PanelAction::EnterSleep => Some(UiCommand::EnterSleep),
+        PanelAction::Wake => Some(UiCommand::Wake),
+        PanelAction::BrightnessDown => Some(UiCommand::SetBrightness(sanitize_brightness(current_brightness - 0.1))),
+        PanelAction::BrightnessUp => Some(UiCommand::SetBrightness(sanitize_brightness(current_brightness + 0.1))),
+        PanelAction::ToggleHeartRate => Some(UiCommand::SetHrMonitoring(!content.heart_rate_enabled)),
+        PanelAction::ToggleOsc => Some(UiCommand::SetOscAutomation(!content.osc_enabled)),
+        PanelAction::CycleInviteProfile => Some(UiCommand::SetInviteProfile(next_invite_profile(content.invite_profile))),
+        PanelAction::CycleVrchatStatus => Some(UiCommand::SetVrchatSleepStatus(next_vrchat_status(content.sleep_vrchat_status))),
+        PanelAction::RemoveSocial(index) => {
+            let mut rules = content.invite_rules.clone();
+            let list = match content.social_tab {
+                SocialTab::Whitelist => &mut rules.whitelist,
+                SocialTab::Blacklist => &mut rules.blacklist,
+            };
+            let index = index as usize;
+            if index < list.len() {
+                list.remove(index);
+                Some(UiCommand::SetInviteRules(rules))
+            } else {
+                None
+            }
         }
-        PanelAction::BrightnessUp => {
-            UiCommand::SetBrightness(sanitize_brightness(current_brightness + 0.1))
-        }
+        PanelAction::NavigateHome
+        | PanelAction::NavigateSettings
+        | PanelAction::SelectWhitelist
+        | PanelAction::SelectBlacklist => None,
     }
 }
 
@@ -711,7 +755,10 @@ fn run_overlay(
         let mut surface_target = hidden_surface_target();
         let mut surface_controller = SurfaceController::default();
         let mut reported_saved_pose = None;
-        let mut panel_content = PanelContent::from_state(&AppState::default());
+        let mut panel_page = PanelPage::Home;
+        let mut social_tab = SocialTab::Whitelist;
+        let mut panel_content = PanelContent::from_state(&AppState::default())
+            .with_view(panel_page, social_tab);
         let mut panel_cache = PanelBitmapCache::default();
         let mut hydra_frame = 0_u64;
         let pose_clock = Instant::now();
@@ -805,7 +852,7 @@ fn run_overlay(
                 surface_target = update;
             }
             if let Some(update) = latest_panel {
-                panel_content = update;
+                panel_content = update.with_view(panel_page, social_tab);
             }
             if let Some(update) = latest_brightness {
                 if let Some(active_fade) = fade {
@@ -988,8 +1035,9 @@ fn run_overlay(
                                                 ray,
                                                 distance_m: hit.distance_m,
                                             });
-                                            hovered_action = action_at_uv_for_sleep_state(
+                                            hovered_action = action_at_uv_for_page(
                                                 hit.uv,
+                                                panel_page,
                                                 panel_content.sleep_action_is_wake(),
                                             );
 
@@ -1007,10 +1055,37 @@ fn run_overlay(
                                                             sample.hand, hit.uv.u, hit.uv.v
                                                         );
                                                     }
-                                                    let _ = commands.send(panel_command(
-                                                        action,
-                                                        current_brightness,
-                                                    ));
+                                                    match action {
+                                                        PanelAction::NavigateHome => {
+                                                            panel_page = PanelPage::Home;
+                                                            panel_content.set_view(panel_page, social_tab);
+                                                            panel_cache.invalidate();
+                                                        }
+                                                        PanelAction::NavigateSettings => {
+                                                            panel_page = PanelPage::Settings;
+                                                            panel_content.set_view(panel_page, social_tab);
+                                                            panel_cache.invalidate();
+                                                        }
+                                                        PanelAction::SelectWhitelist => {
+                                                            social_tab = SocialTab::Whitelist;
+                                                            panel_content.set_view(panel_page, social_tab);
+                                                            panel_cache.invalidate();
+                                                        }
+                                                        PanelAction::SelectBlacklist => {
+                                                            social_tab = SocialTab::Blacklist;
+                                                            panel_content.set_view(panel_page, social_tab);
+                                                            panel_cache.invalidate();
+                                                        }
+                                                        _ => {
+                                                            if let Some(command) = panel_command(
+                                                                action,
+                                                                &panel_content,
+                                                                current_brightness,
+                                                            ) {
+                                                                let _ = commands.send(command);
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
 
