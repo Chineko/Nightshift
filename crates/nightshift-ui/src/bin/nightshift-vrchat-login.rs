@@ -108,6 +108,7 @@ struct LoginApp {
     bridge: AuthBridge,
     username: String,
     password: String,
+    show_password: bool,
     code: String,
     pending: Option<PendingAuth>,
     busy: bool,
@@ -120,6 +121,7 @@ impl LoginApp {
             bridge: AuthBridge::spawn(ctx),
             username: String::new(),
             password: String::new(),
+            show_password: false,
             code: String::new(),
             pending: None,
             busy: false,
@@ -139,6 +141,7 @@ impl LoginApp {
                 AuthUpdate::Authenticated(display_name) => {
                     self.pending = None;
                     self.password.clear();
+                    self.show_password = false;
                     self.code.clear();
                     self.message = Some((
                         format!("Connected as {display_name}. Session saved securely."),
@@ -148,6 +151,7 @@ impl LoginApp {
                 AuthUpdate::SessionCleared => {
                     self.pending = None;
                     self.password.clear();
+                    self.show_password = false;
                     self.code.clear();
                     self.message = Some(("Stored VRChat session removed.".into(), true));
                 }
@@ -162,6 +166,7 @@ impl LoginApp {
             return;
         }
         let password = std::mem::take(&mut self.password);
+        self.show_password = false;
         self.message = None;
         self.bridge.send(AuthCommand::Login { username, password });
     }
@@ -240,9 +245,22 @@ impl eframe::App for LoginApp {
                             ui.label("Password");
                             let password_response = ui.add(
                                 egui::TextEdit::singleline(&mut self.password)
-                                    .password(true)
+                                    .password(!self.show_password)
                                     .hint_text("Password"),
                             );
+                            if ui
+                                .add_enabled(
+                                    !self.password.is_empty(),
+                                    egui::Button::new(if self.show_password {
+                                        "Hide password"
+                                    } else {
+                                        "Show password"
+                                    }),
+                                )
+                                .clicked()
+                            {
+                                self.show_password = !self.show_password;
+                            }
                             ui.add_space(8.0);
                             let can_login = !self.busy
                                 && !self.username.trim().is_empty()
