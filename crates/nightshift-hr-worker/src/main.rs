@@ -48,11 +48,21 @@ fn socket_path() -> Result<PathBuf> {
     Ok(runtime_dir.join("nightshift").join("nightshift.sock"))
 }
 
-fn configured_device_filter() -> Option<String> {
-    env::var("NIGHTSHIFT_HR_BLE_DEVICE")
-        .ok()
+fn normalize_device_filter(value: Option<String>) -> Option<String> {
+    value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn legacy_device_filter() -> Option<String> {
+    normalize_device_filter(env::var("NIGHTSHIFT_HR_BLE_DEVICE").ok())
+}
+
+fn effective_device_filter(
+    configured: Option<String>,
+    legacy_fallback: &Option<String>,
+) -> Option<String> {
+    normalize_device_filter(configured).or_else(|| legacy_fallback.clone())
 }
 
 async fn write_client_message(
@@ -131,6 +141,42 @@ fn discard_queued_events(events: &mut mpsc::Receiver<BleHeartRateEvent>) {
     while events.try_recv().is_ok() {}
 }
 
+async fn apply_provider_config(
+    new_enabled: bool,
+    new_configured_filter: Option<String>,
+    legacy_filter: &Option<String>,
+    enabled: &mut bool,
+    device_filter: &mut Option<String>,
+    provider: &mut ProviderTask,
+    event_tx: &mpsc::Sender<BleHeartRateEvent>,
+    event_rx: &mut mpsc::Receiver<BleHeartRateEvent>,
+    write_half: &mut tokio::net::unix::OwnedWriteHalf,
+    report_disabled_state: bool,
+) -> Result<()> {
+    let new_filter = effective_device_filter(new_configured_filter, legacy_filter);
+    let filter_changed = new_filter != *device_filter;
+    let restart = new_enabled && *enabled && filter_changed && provider.is_running();
+
+    if restart {
+        provider.stop();
+        discard_queued_events(event_rx);
+        report_runtime(write_half, false, None).await?;
+        info!("BLE heart-rate device selection changed; restarting provider");
+    }
+
+    let was_enabled = *enabled;
+    *enabled = new_enabled;
+    *device_filter = new_filter;
+    set_provider_enabled(*enabled, provider, event_tx, device_filter);
+
+    if !*enabled && (report_disabled_state || was_enabled) {
+        discard_queued_events(event_rx);
+        report_runtime(write_half, false, None).await?;
+    }
+
+    Ok(())
+}
+
 async fn run_connection(stream: UnixStream) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -145,9 +191,10 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     )
     .await?;
 
-    let device_filter = configured_device_filter();
+    let legacy_filter = legacy_device_filter();
     let (event_tx, mut event_rx) = mpsc::channel::<BleHeartRateEvent>(32);
     let mut provider = ProviderTask(None);
+    let mut device_filter = legacy_filter.clone();
     let mut enabled = false;
     let mut line = String::new();
 
@@ -173,32 +220,38 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                         info!(protocol, "Nightshift heart-rate worker connected to daemon");
                     }
                     ServerMessage::FullState { state } => {
-                        enabled = state.heart_rate.enabled;
-                        set_provider_enabled(
-                            enabled,
+                        apply_provider_config(
+                            state.heart_rate.enabled,
+                            state.heart_rate.device_filter,
+                            &legacy_filter,
+                            &mut enabled,
+                            &mut device_filter,
                             &mut provider,
                             &event_tx,
-                            &device_filter,
-                        );
-                        if !enabled {
-                            discard_queued_events(&mut event_rx);
-                            report_runtime(&mut write_half, false, None).await?;
-                        }
+                            &mut event_rx,
+                            &mut write_half,
+                            true,
+                        )
+                        .await?;
                     }
                     ServerMessage::Event { event: StateEvent::HeartRateChanged(state) } => {
-                        let new_enabled = state.enabled;
-                        if new_enabled != enabled {
-                            enabled = new_enabled;
-                            set_provider_enabled(
-                                enabled,
+                        let config_changed = state.enabled != enabled
+                            || effective_device_filter(state.device_filter.clone(), &legacy_filter)
+                                != device_filter;
+                        if config_changed {
+                            apply_provider_config(
+                                state.enabled,
+                                state.device_filter,
+                                &legacy_filter,
+                                &mut enabled,
+                                &mut device_filter,
                                 &mut provider,
                                 &event_tx,
-                                &device_filter,
-                            );
-                            if !enabled {
-                                discard_queued_events(&mut event_rx);
-                                report_runtime(&mut write_half, false, None).await?;
-                            }
+                                &mut event_rx,
+                                &mut write_half,
+                                false,
+                            )
+                            .await?;
                         }
                     }
                     ServerMessage::Error { message } => {
@@ -289,5 +342,27 @@ mod tests {
         discard_queued_events(&mut rx);
 
         assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn configured_filter_overrides_legacy_environment_fallback() {
+        let legacy = Some("legacy strap".into());
+        assert_eq!(
+            effective_device_filter(Some("  Polar H10  ".into()), &legacy).as_deref(),
+            Some("Polar H10")
+        );
+        assert_eq!(
+            effective_device_filter(None, &legacy).as_deref(),
+            Some("legacy strap")
+        );
+    }
+
+    #[test]
+    fn empty_configured_filter_falls_back_to_legacy_selection() {
+        let legacy = Some("AA:BB:CC".into());
+        assert_eq!(
+            effective_device_filter(Some("   ".into()), &legacy).as_deref(),
+            Some("AA:BB:CC")
+        );
     }
 }
