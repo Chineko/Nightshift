@@ -1,7 +1,9 @@
 use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result};
-use nightshift_protocol::{AppState, InviteProfile, OverlaySpawnMode, VrchatStatus};
+use nightshift_protocol::{
+    AppState, InviteProfile, InviteRuleSettings, OverlaySpawnMode, VrchatStatus,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -18,6 +20,7 @@ pub struct PersistedConfig {
     pub wake_vrchat_status: VrchatStatus,
     pub invite_automation: bool,
     pub invite_profile: InviteProfile,
+    pub invite_rules: InviteRuleSettings,
     pub overlay_spawn_distance_m: f32,
     pub overlay_spawn_mode: OverlaySpawnMode,
 }
@@ -42,6 +45,7 @@ impl PersistedConfig {
             wake_vrchat_status: state.settings.wake_vrchat_status,
             invite_automation: state.invites.enabled,
             invite_profile: state.invites.profile,
+            invite_rules: state.invites.rules.clone(),
             overlay_spawn_distance_m: state.overlay.spawn_distance_m,
             overlay_spawn_mode: state.overlay.spawn_mode,
         }
@@ -59,6 +63,7 @@ impl PersistedConfig {
         state.settings.wake_vrchat_status = self.wake_vrchat_status;
         state.invites.enabled = self.invite_automation;
         state.invites.profile = self.invite_profile;
+        state.invites.rules = self.invite_rules.clone();
         state.overlay.spawn_distance_m = self.overlay_spawn_distance_m.clamp(0.25, 5.0);
         state.overlay.spawn_mode = self.overlay_spawn_mode;
     }
