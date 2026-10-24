@@ -40,6 +40,7 @@ impl BleDeviceInfo {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BleHeartRateEvent {
     Searching,
+    Devices(Vec<BleDeviceInfo>),
     Connected(BleDeviceInfo),
     Measurement(u16),
     Error(String),
@@ -125,33 +126,42 @@ fn sort_and_dedup_devices(devices: &mut Vec<BleDeviceInfo>) {
     devices.dedup_by(|left, right| left.id == right.id);
 }
 
-pub async fn discover_devices(adapter: &Adapter) -> Result<Vec<BleDeviceInfo>> {
-    let mut devices = Vec::new();
-    for peripheral in scan_heart_rate_peripherals(adapter).await? {
-        devices.push(device_info(&peripheral).await?);
+pub async fn discover_devices_and_select(
+    adapter: &Adapter,
+    device_filter: Option<&str>,
+) -> Result<(Vec<BleDeviceInfo>, Option<Peripheral>)> {
+    let peripherals = scan_heart_rate_peripherals(adapter).await?;
+    let mut devices = Vec::with_capacity(peripherals.len());
+    let mut selected = None;
+
+    for peripheral in peripherals {
+        let info = device_info(&peripheral).await?;
+        let matches = device_filter.is_none_or(|filter| info.matches_filter(filter));
+        devices.push(info);
+        if selected.is_none() && matches {
+            selected = Some(peripheral);
+        }
     }
+
     sort_and_dedup_devices(&mut devices);
-    Ok(devices)
+    Ok((devices, selected))
+}
+
+pub async fn discover_devices(adapter: &Adapter) -> Result<Vec<BleDeviceInfo>> {
+    discover_devices_and_select(adapter, None)
+        .await
+        .map(|(devices, _)| devices)
 }
 
 pub async fn discover_device(
     adapter: &Adapter,
     device_filter: Option<&str>,
 ) -> Result<Peripheral> {
-    for peripheral in scan_heart_rate_peripherals(adapter).await? {
-        if let Some(filter) = device_filter {
-            let info = device_info(&peripheral).await?;
-            if !info.matches_filter(filter) {
-                continue;
-            }
-        }
-
-        return Ok(peripheral);
-    }
-
-    match device_filter {
-        Some(filter) => bail!("no BLE heart-rate device matched {filter:?}"),
-        None => bail!("no BLE device advertising the Heart Rate service was found"),
+    let (_, selected) = discover_devices_and_select(adapter, device_filter).await?;
+    match (selected, device_filter) {
+        (Some(peripheral), _) => Ok(peripheral),
+        (None, Some(filter)) => bail!("no BLE heart-rate device matched {filter:?}"),
+        (None, None) => bail!("no BLE device advertising the Heart Rate service was found"),
     }
 }
 
