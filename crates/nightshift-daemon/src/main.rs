@@ -16,8 +16,8 @@ use config::PersistedConfig;
 use nightshift_hr::{CalmPeriodConfig, CalmPeriodDetector, DetectionState};
 use nightshift_protocol::{
     AppState, Capability, ClientMessage, HrDeviceInfo, HrProviderStatus, HrStatus, InviteAction,
-    InviteActionKind, PROTOCOL_VERSION, ServerMessage, SleepPhase, SleepingPose, StateEvent,
-    UiCommand, VrchatStatus, WorkerReport,
+    InviteActionKind, OverlaySpawnMode, PROTOCOL_VERSION, ServerMessage, SleepPhase, SleepingPose,
+    StateEvent, UiCommand, VrchatStatus, WorkerReport,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -479,6 +479,8 @@ impl StateStore {
                 | UiCommand::SetInviteAutomation(_)
                 | UiCommand::SetInviteProfile(_)
                 | UiCommand::SetInviteRules(_)
+                | UiCommand::SetOverlaySpawnDistance(_)
+                | UiCommand::SetOverlaySpawnMode(_)
         );
 
         let mut state = self.state.lock().await;
@@ -570,6 +572,10 @@ impl StateStore {
             UiCommand::SetInviteAutomation(enabled) => state.invites.enabled = enabled,
             UiCommand::SetInviteProfile(profile) => state.invites.profile = profile,
             UiCommand::SetInviteRules(rules) => state.invites.rules = rules,
+            UiCommand::SetOverlaySpawnDistance(distance_m) => {
+                state.overlay.spawn_distance_m = distance_m.clamp(0.25, 5.0);
+            }
+            UiCommand::SetOverlaySpawnMode(mode) => state.overlay.spawn_mode = mode,
             UiCommand::ShowOverlay => state.overlay.visible = true,
             UiCommand::HideOverlay => state.overlay.visible = false,
         }
@@ -998,6 +1004,29 @@ mod tests {
         let (snapshot, _) = store.snapshot_and_subscribe().await;
         assert_eq!(snapshot.sleep.phase, SleepPhase::EnteringSleep);
         assert!(snapshot.brightness.transitioning);
+    }
+
+    #[tokio::test]
+    async fn overlay_settings_are_clamped_and_applied() {
+        let store = StateStore::new(AppState::default());
+
+        store.apply(UiCommand::SetOverlaySpawnDistance(99.0)).await;
+        store
+            .apply(UiCommand::SetOverlaySpawnMode(
+                OverlaySpawnMode::RestoreLastPosition,
+            ))
+            .await;
+
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.overlay.spawn_distance_m, 5.0);
+        assert_eq!(
+            snapshot.overlay.spawn_mode,
+            OverlaySpawnMode::RestoreLastPosition
+        );
+
+        store.apply(UiCommand::SetOverlaySpawnDistance(0.0)).await;
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.overlay.spawn_distance_m, 0.25);
     }
 
     #[tokio::test]
