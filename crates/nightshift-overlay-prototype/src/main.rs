@@ -33,7 +33,8 @@ use content::PanelContent;
 use panel::PanelRenderer;
 use panel_cache::PanelBitmapCache;
 use panel_state::PanelStateTracker;
-use surface::{SurfaceController, SurfaceTarget};
+use placement::PanelPose;
+use surface::{SurfaceController, SurfaceTarget, panel_pose_to_protocol};
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const VIEW_COUNT: u32 = 2;
@@ -85,6 +86,19 @@ fn brightness_target(brightness: &BrightnessState, fade_seconds: f32) -> Overlay
     } else {
         overlay_target(brightness.current, 0.0)
     }
+}
+
+fn overlay_pose_report_if_changed(
+    reported: &mut Option<PanelPose>,
+    current: Option<PanelPose>,
+) -> Option<WorkerReport> {
+    if *reported == current {
+        return None;
+    }
+    *reported = current;
+    current.map(|pose| WorkerReport::OverlayRuntimePose {
+        pose: panel_pose_to_protocol(pose),
+    })
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -628,6 +642,7 @@ fn run_overlay(
         let mut fade: Option<Fade> = None;
         let mut surface_target = hidden_surface_target();
         let mut surface_controller = SurfaceController::default();
+        let mut reported_saved_pose = None;
         let mut panel_content = PanelContent::from_state(&AppState::default());
         let mut panel_cache = PanelBitmapCache::default();
         let mut hydra_frame = 0_u64;
@@ -797,6 +812,12 @@ fn run_overlay(
                 head_position,
                 head_orientation,
             );
+            if let Some(report) = overlay_pose_report_if_changed(
+                &mut reported_saved_pose,
+                surface_controller.saved_pose(),
+            ) {
+                let _ = reports.send(report);
+            }
 
             let now_ms = pose_clock.elapsed().as_millis() as u64;
             if let Some(stable_pose) = pose_tracker.advance(now_ms) {
@@ -1098,6 +1119,37 @@ mod tests {
         assert_eq!(sanitize_transition_seconds(f32::INFINITY), 0.0);
         assert_eq!(sanitize_transition_seconds(-1.0), 0.0);
         assert_eq!(sanitize_transition_seconds(999.0), MAX_TRANSITION_SECONDS);
+    }
+
+    #[test]
+    fn overlay_pose_reports_are_deduplicated() {
+        let first = PanelPose {
+            position: [1.0, 2.0, 3.0],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        };
+        let second = PanelPose {
+            position: [4.0, 5.0, 6.0],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        };
+        let mut reported = None;
+
+        assert_eq!(overlay_pose_report_if_changed(&mut reported, None), None);
+        assert_eq!(
+            overlay_pose_report_if_changed(&mut reported, Some(first)),
+            Some(WorkerReport::OverlayRuntimePose {
+                pose: panel_pose_to_protocol(first),
+            })
+        );
+        assert_eq!(
+            overlay_pose_report_if_changed(&mut reported, Some(first)),
+            None
+        );
+        assert_eq!(
+            overlay_pose_report_if_changed(&mut reported, Some(second)),
+            Some(WorkerReport::OverlayRuntimePose {
+                pose: panel_pose_to_protocol(second),
+            })
+        );
     }
 
     #[test]
