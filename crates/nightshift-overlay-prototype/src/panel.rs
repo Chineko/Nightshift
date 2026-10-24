@@ -168,8 +168,7 @@ impl PanelRenderer {
             .context("creating positioned panel staging buffer")?;
 
             let requirements = unsafe { device.get_buffer_memory_requirements(buffer) };
-            let properties =
-                unsafe { instance.get_physical_device_memory_properties(physical_device) };
+            let properties = unsafe { instance.get_physical_device_memory_properties(physical_device) };
             let memory_type_index = match find_memory_type(
                 requirements.memory_type_bits,
                 &properties,
@@ -209,11 +208,7 @@ impl PanelRenderer {
                     let mapped = device
                         .map_memory(memory, 0, upload.len() as u64, vk::MemoryMapFlags::empty())
                         .context("mapping positioned panel staging memory")?;
-                    std::ptr::copy_nonoverlapping(
-                        upload.as_ptr(),
-                        mapped.cast::<u8>(),
-                        upload.len(),
-                    );
+                    std::ptr::copy_nonoverlapping(upload.as_ptr(), mapped.cast::<u8>(), upload.len());
                     device.unmap_memory(memory);
 
                     prepare_command_buffer(device, command_buffer, fence)?;
@@ -312,9 +307,7 @@ impl PanelRenderer {
         self.images
             .get(image_index as usize)
             .copied()
-            .ok_or_else(|| {
-                anyhow!("runtime returned invalid panel swapchain image index {image_index}")
-            })
+            .ok_or_else(|| anyhow!("runtime returned invalid panel swapchain image index {image_index}"))
     }
 }
 
@@ -481,10 +474,6 @@ mod tests {
     fn upload_rejects_unsupported_format_without_debug_formatting() {
         let rgba = pixel_buffer([1, 2, 3, 4]);
         let error = prepare_upload_bytes(&rgba, vk::Format::R16G16B16A16_SFLOAT).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("unsupported positioned panel upload format")
-        );
+        assert!(error.to_string().contains("unsupported positioned panel upload format"));
     }
 }

@@ -20,10 +20,7 @@ pub fn normalize_quaternion_xyzw(value: [f32; 4]) -> Option<[f32; 4]> {
         return None;
     }
 
-    let length_squared = value
-        .iter()
-        .map(|component| component * component)
-        .sum::<f32>();
+    let length_squared = value.iter().map(|component| component * component).sum::<f32>();
     if !length_squared.is_finite() || length_squared <= f32::EPSILON {
         return None;
     }
