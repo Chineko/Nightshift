@@ -1,6 +1,6 @@
 use nightshift_protocol::{
-    AppState, OscState, OverlaySpawnMode, OverlayState, SettingsState, SleepState, SleepingPose,
-    VrchatStatus,
+    AppState, InviteActionKind, InviteState, OscState, OverlaySpawnMode, OverlayState, SettingsState,
+    SleepState, SleepingPose, VrchatStatus,
 };
 
 #[test]
@@ -83,6 +83,24 @@ fn old_sleep_state_defaults_pose_to_unknown() {
 }
 
 #[test]
+fn old_invite_state_defaults_rule_settings() {
+    let old_json = r#"{
+        "enabled": true,
+        "profile": "friends",
+        "last_action": null
+    }"#;
+
+    let state: InviteState = serde_json::from_str(old_json).expect("old invite state must decode");
+
+    assert!(state.enabled);
+    assert!(state.rules.whitelist.is_empty());
+    assert!(state.rules.accept_friends);
+    assert!(state.rules.accept_favorites);
+    assert!(state.rules.accept_whitelist);
+    assert_eq!(state.rules.fallback, InviteActionKind::Ignored);
+}
+
+#[test]
 fn old_full_app_state_decodes_with_additive_defaults() {
     let old_json = r#"{
         "connection": "connected",
@@ -136,6 +154,8 @@ fn old_full_app_state_decodes_with_additive_defaults() {
     assert_eq!(state.osc.avatar_id, None);
     assert_eq!(state.osc.avatar_parameter_count, 0);
     assert!(!state.osc.gogo_detected);
+    assert!(state.invites.rules.whitelist.is_empty());
+    assert_eq!(state.invites.rules.fallback, InviteActionKind::Ignored);
     assert!(!state.overlay.runtime_connected);
     assert_eq!(state.overlay.runtime_client_version, None);
     assert!(!state.settings.vrchat_status_automation_enabled);
