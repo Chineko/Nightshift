@@ -1,0 +1,109 @@
+name: Pointer polish retry
+
+on:
+  push:
+    branches:
+      - prototype/integrated-mvp
+    paths:
+      - .github/workflows/pointer-polish-retry.yml
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libopenxr-dev pkg-config
+
+      - name: Guard helper-only history
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^^)" = "c1994d36a337d9a699fbb0eec62655697a29800e"
+          test "$(git diff --name-only HEAD^^ HEAD | sort)" = $'.github/workflows/pointer-polish-once.yml\n.github/workflows/pointer-polish-retry.yml'
+
+      - name: Apply corrected pointer polish
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import textwrap
+
+          workflow = Path('.github/workflows/pointer-polish-once.yml').read_text()
+          start_marker = "          python3 - <<'PY'\n"
+          end_marker = "\n          PY\n\n      - name: Format touched Rust"
+          start = workflow.index(start_marker) + len(start_marker)
+          end = workflow.index(end_marker, start)
+          script = textwrap.dedent(workflow[start:end])
+
+          old = '''rep("crates/nightshift-overlay-prototype/src/main.rs",\n    "            let now_ms = pose_clock.elapsed().as_millis() as u64;\\n",\n    "            let pointer_now = Instant::now();\\n            let pointer_delta = pointer_now.duration_since(pointer_visual_clock).as_secs_f32();\\n            pointer_visual_clock = pointer_now;\\n            let pointer_segment = match pointer_segment {\\n                Some(segment) => Some(pointer_smoother.update(\\n                    segment,\\n                    smoothing_alpha(pointer_delta),\\n                )),\\n                None => {\\n                    pointer_smoother.reset();\\n                    None\\n                }\\n            };\\n\\n            let now_ms = pose_clock.elapsed().as_millis() as u64;\\n")'''
+          new = '''rep("crates/nightshift-overlay-prototype/src/main.rs",\n    "                    Err(_) => {}\\n                }\\n            }\\n\\n            let now_ms = pose_clock.elapsed().as_millis() as u64;\\n            if let Some(stable_pose) = pose_tracker.advance(now_ms) {\\n",\n    "                    Err(_) => {}\\n                }\\n            }\\n\\n            let pointer_now = Instant::now();\\n            let pointer_delta = pointer_now.duration_since(pointer_visual_clock).as_secs_f32();\\n            pointer_visual_clock = pointer_now;\\n            let pointer_segment = match pointer_segment {\\n                Some(segment) => Some(pointer_smoother.update(\\n                    segment,\\n                    smoothing_alpha(pointer_delta),\\n                )),\\n                None => {\\n                    pointer_smoother.reset();\\n                    None\\n                }\\n            };\\n\\n            let now_ms = pose_clock.elapsed().as_millis() as u64;\\n            if let Some(stable_pose) = pose_tracker.advance(now_ms) {\\n")'''
+          if script.count(old) != 1:
+              raise SystemExit(f'expected one ambiguous timing replacement, got {script.count(old)}')
+          script = script.replace(old, new, 1)
+          exec(compile(script, 'pointer-polish-extracted.py', 'exec'))
+          PY
+
+      - name: Format touched Rust
+        run: |
+          rustfmt crates/nightshift-protocol/src/lib.rs
+          rustfmt crates/nightshift-protocol/tests/compat.rs
+          rustfmt crates/nightshift-daemon/src/config.rs
+          rustfmt crates/nightshift-daemon/src/main.rs
+          rustfmt crates/nightshift-ui/src/main.rs
+          rustfmt crates/nightshift-overlay-prototype/src/surface.rs
+          rustfmt crates/nightshift-overlay-prototype/src/main.rs
+          rustfmt crates/nightshift-overlay-prototype/src/laser.rs
+
+      - name: Verify focused crates
+        run: |
+          cargo test -p nightshift-protocol --locked
+          cargo test -p nightshift-daemon --locked
+          cargo test -p nightshift-ui --locked
+          cargo test -p nightshift-overlay --locked
+          cargo clippy -p nightshift-protocol -p nightshift-daemon -p nightshift-ui -p nightshift-overlay --all-targets --locked
+
+      - name: Scope audit and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git status --short
+          python3 - <<'PY'
+          import subprocess
+          allowed = {
+              '.github/workflows/pointer-polish-once.yml',
+              '.github/workflows/pointer-polish-retry.yml',
+              'crates/nightshift-protocol/src/lib.rs',
+              'crates/nightshift-protocol/tests/compat.rs',
+              'crates/nightshift-daemon/src/config.rs',
+              'crates/nightshift-daemon/src/main.rs',
+              'crates/nightshift-ui/src/main.rs',
+              'crates/nightshift-overlay-prototype/src/surface.rs',
+              'crates/nightshift-overlay-prototype/src/main.rs',
+              'crates/nightshift-overlay-prototype/src/laser.rs',
+          }
+          paths = {line[3:] for line in subprocess.check_output(['git', 'status', '--porcelain'], text=True).splitlines()}
+          extra = paths - allowed
+          if extra:
+              raise SystemExit(f'unexpected changed paths: {sorted(extra)}')
+          PY
+          git rm .github/workflows/pointer-polish-once.yml .github/workflows/pointer-polish-retry.yml
+          git config user.name "Nightshift Integration Bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add crates/nightshift-protocol/src/lib.rs crates/nightshift-protocol/tests/compat.rs \
+            crates/nightshift-daemon/src/config.rs crates/nightshift-daemon/src/main.rs \
+            crates/nightshift-ui/src/main.rs crates/nightshift-overlay-prototype/src/surface.rs \
+            crates/nightshift-overlay-prototype/src/main.rs crates/nightshift-overlay-prototype/src/laser.rs
+          git commit -m "Polish overlay pointer visuals"
+          git push origin HEAD:prototype/integrated-mvp
