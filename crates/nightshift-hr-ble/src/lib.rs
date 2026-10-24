@@ -21,6 +21,22 @@ pub struct BleDeviceInfo {
     pub name: Option<String>,
 }
 
+impl BleDeviceInfo {
+    pub fn matches_filter(&self, filter: &str) -> bool {
+        let filter = filter.trim().to_ascii_lowercase();
+        if filter.is_empty() {
+            return true;
+        }
+
+        self.id.to_ascii_lowercase().contains(&filter)
+            || self.address.to_ascii_lowercase().contains(&filter)
+            || self
+                .name
+                .as_deref()
+                .is_some_and(|name| name.to_ascii_lowercase().contains(&filter))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BleHeartRateEvent {
     Connected(BleDeviceInfo),
@@ -57,10 +73,7 @@ pub async fn first_adapter() -> Result<Adapter> {
         .context("no Bluetooth adapter is available")
 }
 
-pub async fn discover_device(
-    adapter: &Adapter,
-    device_filter: Option<&str>,
-) -> Result<Peripheral> {
+async fn scan_heart_rate_peripherals(adapter: &Adapter) -> Result<Vec<Peripheral>> {
     adapter
         .start_scan(ScanFilter {
             services: vec![HEART_RATE_SERVICE_UUID],
@@ -75,6 +88,7 @@ pub async fn discover_device(
         .peripherals()
         .await
         .context("listing discovered BLE peripherals")?;
+    let mut heart_rate_peripherals = Vec::new();
 
     for peripheral in peripherals {
         let properties = peripheral
@@ -84,22 +98,39 @@ pub async fn discover_device(
         let Some(properties) = properties else {
             continue;
         };
-        if !properties.services.contains(&HEART_RATE_SERVICE_UUID) {
-            continue;
+        if properties.services.contains(&HEART_RATE_SERVICE_UUID) {
+            heart_rate_peripherals.push(peripheral);
         }
+    }
 
+    Ok(heart_rate_peripherals)
+}
+
+pub async fn discover_devices(adapter: &Adapter) -> Result<Vec<BleDeviceInfo>> {
+    let mut devices = Vec::new();
+    for peripheral in scan_heart_rate_peripherals(adapter).await? {
+        devices.push(device_info(&peripheral).await?);
+    }
+    devices.sort_by(|left, right| {
+        left.name
+            .as_deref()
+            .unwrap_or("")
+            .cmp(right.name.as_deref().unwrap_or(""))
+            .then_with(|| left.address.cmp(&right.address))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    devices.dedup_by(|left, right| left.id == right.id);
+    Ok(devices)
+}
+
+pub async fn discover_device(
+    adapter: &Adapter,
+    device_filter: Option<&str>,
+) -> Result<Peripheral> {
+    for peripheral in scan_heart_rate_peripherals(adapter).await? {
         if let Some(filter) = device_filter {
-            let filter = filter.to_ascii_lowercase();
-            let name_matches = properties
-                .local_name
-                .as_deref()
-                .is_some_and(|name| name.to_ascii_lowercase().contains(&filter));
-            let address_matches = peripheral
-                .address()
-                .to_string()
-                .to_ascii_lowercase()
-                .contains(&filter);
-            if !name_matches && !address_matches {
+            let info = device_info(&peripheral).await?;
+            if !info.matches_filter(filter) {
                 continue;
             }
         }
@@ -178,6 +209,14 @@ pub async fn run_device(
 mod tests {
     use super::*;
 
+    fn example_device() -> BleDeviceInfo {
+        BleDeviceInfo {
+            id: "DeviceId(AA:BB:CC:DD:EE:FF)".into(),
+            address: "AA:BB:CC:DD:EE:FF".into(),
+            name: Some("Polar H10 1234".into()),
+        }
+    }
+
     #[test]
     fn parses_eight_bit_measurement() {
         assert_eq!(parse_heart_rate_measurement(&[0x00, 57]).unwrap(), 57);
@@ -204,5 +243,20 @@ mod tests {
         assert!(parse_heart_rate_measurement(&[]).is_err());
         assert!(parse_heart_rate_measurement(&[0x00]).is_err());
         assert!(parse_heart_rate_measurement(&[0x01, 0x34]).is_err());
+    }
+
+    #[test]
+    fn device_filter_matches_id_address_or_name_case_insensitively() {
+        let device = example_device();
+        assert!(device.matches_filter("deviceid"));
+        assert!(device.matches_filter("bb:cc:dd"));
+        assert!(device.matches_filter("polar h10"));
+        assert!(device.matches_filter("  POLAR H10  "));
+        assert!(!device.matches_filter("garmin"));
+    }
+
+    #[test]
+    fn empty_device_filter_matches_any_device() {
+        assert!(example_device().matches_filter("  "));
     }
 }
