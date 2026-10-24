@@ -67,21 +67,15 @@ struct ApiError {
 }
 
 #[derive(Debug, Deserialize)]
-struct FriendRecord {
-    id: String,
+struct FriendStatusResponse {
+    #[serde(rename = "isFriend")]
+    is_friend: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct FavoriteRecord {
     #[serde(rename = "favoriteId")]
     favorite_id: String,
-}
-
-#[derive(Debug, Serialize)]
-struct FriendPageQuery {
-    offline: bool,
-    n: usize,
-    offset: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -159,7 +153,8 @@ impl VrchatApiClient {
     /// Resolve the two social facts needed by Nightshift's pure invite rules.
     ///
     /// Favorite friends are necessarily friends in VRChat, so finding a favorite lets us avoid
-    /// the larger friend-list scan. Otherwise both online and offline friend pages are checked.
+    /// even the targeted friend-status request. Otherwise use VRChat's per-user friend-status
+    /// endpoint rather than paging through the account's entire online/offline friend lists.
     pub async fn invite_sender_relationship(
         &self,
         cookies: &SessionCookies,
@@ -209,43 +204,25 @@ impl VrchatApiClient {
     }
 
     async fn is_friend(&self, cookies: &SessionCookies, user_id: &str) -> Result<bool> {
-        for offline in [false, true] {
-            let mut offset = 0;
-            loop {
-                let response = self
-                    .http
-                    .get(format!("{BASE_URL}/auth/user/friends"))
-                    .header(COOKIE, cookies.cookie_header())
-                    .query(&FriendPageQuery {
-                        offline,
-                        n: PAGE_SIZE,
-                        offset,
-                    })
-                    .send()
-                    .await
-                    .context("listing VRChat friends")?;
+        let response = self
+            .http
+            .get(format!("{BASE_URL}/user/{user_id}/friendStatus"))
+            .header(COOKIE, cookies.cookie_header())
+            .send()
+            .await
+            .context("checking VRChat invite sender friend status")?;
 
-                if response.status() == StatusCode::UNAUTHORIZED {
-                    bail!("VRChat session expired while listing friends");
-                }
-                let response = response
-                    .error_for_status()
-                    .context("VRChat friends request failed")?;
-                let page: Vec<FriendRecord> = response
-                    .json()
-                    .await
-                    .context("decoding VRChat friends")?;
-
-                if page.iter().any(|friend| friend.id == user_id) {
-                    return Ok(true);
-                }
-                if page.len() < PAGE_SIZE {
-                    break;
-                }
-                offset = offset.saturating_add(page.len());
-            }
+        if response.status() == StatusCode::UNAUTHORIZED {
+            bail!("VRChat session expired while checking friend status");
         }
-        Ok(false)
+        let response = response
+            .error_for_status()
+            .context("VRChat friend-status request failed")?;
+        let status: FriendStatusResponse = response
+            .json()
+            .await
+            .context("decoding VRChat friend status")?;
+        Ok(status.is_friend)
     }
 
     /// Invite a user to the current instance. VRChat uses this operation to accept an invite request.
@@ -403,12 +380,12 @@ mod tests {
     }
 
     #[test]
-    fn social_pages_decode_only_ids_needed_by_policy() {
-        let friends: Vec<FriendRecord> = serde_json::from_str(
-            r#"[{"id":"usr_friend","displayName":"Friend","status":"active"}]"#,
+    fn social_responses_decode_only_fields_needed_by_policy() {
+        let friend: FriendStatusResponse = serde_json::from_str(
+            r#"{"incomingRequest":false,"isFriend":true,"outgoingRequest":false}"#,
         )
         .unwrap();
-        assert_eq!(friends[0].id, "usr_friend");
+        assert!(friend.is_friend);
 
         let favorites: Vec<FavoriteRecord> = serde_json::from_str(
             r#"[{"id":"fvrt_1","favoriteId":"usr_favorite","type":"friend","tags":["group_0"]}]"#,
@@ -418,16 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn pagination_queries_use_vrchat_wire_names() {
-        assert_eq!(
-            serde_json::to_value(FriendPageQuery {
-                offline: true,
-                n: 100,
-                offset: 200,
-            })
-            .unwrap(),
-            serde_json::json!({"offline":true,"n":100,"offset":200})
-        );
+    fn favorite_pagination_query_uses_vrchat_wire_names() {
         assert_eq!(
             serde_json::to_value(FavoritePageQuery {
                 kind: "friend",
