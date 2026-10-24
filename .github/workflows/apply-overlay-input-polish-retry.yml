@@ -1,0 +1,92 @@
+name: Apply overlay input polish retry
+
+on:
+  push:
+    branches:
+      - prototype/integrated-mvp
+
+permissions:
+  contents: write
+
+jobs:
+  apply-overlay-input-polish:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libopenxr-dev pkg-config
+      - name: Reuse and tighten guarded transform
+        shell: bash
+        run: |
+          awk '/python3 - <<'\''PY'\''/{flag=1;next} /^          PY$/{flag=0} flag{sub(/^          /,""); print}' \
+            .github/workflows/apply-overlay-input-polish-once.yml > /tmp/apply.py
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('/tmp/apply.py')
+          text = path.read_text()
+          old = "text = replace_once(text, '\\n}\\n', insert + '\\n}\\n', 'panel cache test module end')"
+          new = "text = text.rsplit('\\n}', 1)[0] + insert + '\\n}\\n'"
+          if text.count(old) != 1:
+              raise SystemExit('panel-cache insertion patch guard failed')
+          text = text.replace(old, new, 1)
+          old = "text = replace_once(text, '\\n}\\n', hover_test + '\\n}\\n', 'raster test module end')"
+          new = "text = text.rsplit('\\n}', 1)[0] + hover_test + '\\n}\\n'"
+          if text.count(old) != 1:
+              raise SystemExit('raster insertion patch guard failed')
+          text = text.replace(old, new, 1)
+
+          old = "'        let mut active_grab: Option<ActiveGrab> = None;\\n        let mut hovered_action: Option<PanelAction> = None;\\n        let mut laser_segment: Option<LaserSegment> = None;\\n        let mut laser_easter_egg_fired = false;\\n',"
+          new = "'        let mut active_grab: Option<ActiveGrab> = None;\\n        let mut laser_easter_egg_fired = false;\\n',"
+          if text.count(old) != 1:
+              raise SystemExit('persistent visual state patch guard failed')
+          text = text.replace(old, new, 1)
+          old = "let mut next_hovered_action = None;\n    laser_segment = None;"
+          new = "let mut hovered_action = None;\n    let mut laser_segment = None;"
+          if text.count(old) != 1:
+              raise SystemExit('frame-local visual state patch guard failed')
+          text = text.replace(old, new, 1)
+          text = text.replace('next_hovered_action', 'hovered_action')
+          text = text.replace('    hovered_action = hovered_action;\n\n', '\n')
+          path.write_text(text)
+          PY
+          python3 /tmp/apply.py
+          rm -f \
+            .github/workflows/apply-overlay-input-polish-once.yml \
+            .github/workflows/apply-overlay-input-polish-retry.yml
+
+      - name: Format only touched Rust files
+        run: |
+          rustfmt --edition 2024 \
+            crates/nightshift-overlay-prototype/src/controller_input.rs \
+            crates/nightshift-overlay-prototype/src/interaction.rs \
+            crates/nightshift-overlay-prototype/src/laser.rs \
+            crates/nightshift-overlay-prototype/src/panel_cache.rs \
+            crates/nightshift-overlay-prototype/src/raster.rs \
+            crates/nightshift-overlay-prototype/tests/interaction.rs
+          rustfmt --edition 2024 crates/nightshift-overlay-prototype/src/main.rs
+          git checkout HEAD -- \
+            crates/nightshift-overlay-prototype/src/content.rs \
+            crates/nightshift-overlay-prototype/src/panel.rs \
+            crates/nightshift-overlay-prototype/src/panel_state.rs \
+            crates/nightshift-overlay-prototype/src/placement.rs \
+            crates/nightshift-overlay-prototype/src/surface.rs
+
+      - name: Test overlay interaction polish
+        run: |
+          cargo test --manifest-path crates/nightshift-overlay-prototype/Cargo.toml
+          cargo clippy --manifest-path crates/nightshift-overlay-prototype/Cargo.toml --all-targets
+
+      - name: Commit tested interaction polish
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add README.md crates/nightshift-overlay-prototype .github/workflows/apply-overlay-input-polish-once.yml .github/workflows/apply-overlay-input-polish-retry.yml
+          git diff --cached --check
+          git commit -m 'Polish overlay controller interaction'
+          git push
