@@ -1,3 +1,7 @@
+mod panel;
+mod placement;
+mod surface;
+
 use std::env;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -21,6 +25,9 @@ use openxr as xr;
 use xr::OverlaySessionCreateFlagsEXTX;
 use xr::sys::Handle as XrHandle;
 
+use panel::PanelRenderer;
+use surface::{SurfaceController, SurfaceTarget};
+
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const VIEW_COUNT: u32 = 2;
 const DIMMER_TEXTURE_SIZE: u32 = 4;
@@ -33,6 +40,12 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 struct OverlayTarget {
     brightness: f32,
     transition_seconds: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RuntimeUpdate {
+    Brightness(OverlayTarget),
+    Surface(SurfaceTarget),
 }
 
 fn sanitize_brightness(value: f32) -> f32 {
@@ -164,9 +177,13 @@ fn socket_path() -> Result<PathBuf> {
     Ok(runtime_dir.join("nightshift").join("nightshift.sock"))
 }
 
+fn hidden_surface_target() -> SurfaceTarget {
+    SurfaceTarget::from(&nightshift_protocol::OverlayState::default())
+}
+
 fn spawn_ipc_client(
     running: Arc<AtomicBool>,
-    updates: Sender<OverlayTarget>,
+    updates: Sender<RuntimeUpdate>,
     reports: Receiver<WorkerReport>,
     hydra_mode: bool,
 ) {
@@ -193,6 +210,7 @@ fn spawn_ipc_client(
                             eprintln!("Nightshift overlay IPC disconnected: {error:#}");
                         }
                     }
+                    let _ = updates.send(RuntimeUpdate::Surface(hidden_surface_target()));
                 }
                 Err(error) => {
                     if !announced_waiting {
@@ -236,7 +254,7 @@ fn flush_worker_reports(
 
 fn run_ipc_connection(
     stream: UnixStream,
-    updates: &Sender<OverlayTarget>,
+    updates: &Sender<RuntimeUpdate>,
     reports: &Receiver<WorkerReport>,
     running: &AtomicBool,
     hydra_mode: bool,
@@ -293,12 +311,13 @@ fn run_ipc_connection(
             }
             ServerMessage::FullState { state } => {
                 fade_seconds = sanitize_transition_seconds(state.settings.fade_duration_seconds);
-                send_state_target(updates, &state, fade_seconds)?;
+                send_state_targets(updates, &state, fade_seconds)?;
                 if hydra_mode {
                     println!(
-                        "[Hydra/IPC] snapshot target={:.2}% fade={:.2}s",
+                        "[Hydra/IPC] snapshot target={:.2}% fade={:.2}s surface_visible={}",
                         state.brightness.target * 100.0,
-                        fade_seconds
+                        fade_seconds,
+                        state.overlay.visible
                     );
                 }
             }
@@ -306,7 +325,7 @@ fn run_ipc_connection(
                 StateEvent::BrightnessChanged(brightness) => {
                     let target = brightness_target(&brightness, fade_seconds);
                     updates
-                        .send(target)
+                        .send(RuntimeUpdate::Brightness(target))
                         .map_err(|_| anyhow!("overlay renderer stopped"))?;
 
                     if hydra_mode {
@@ -315,6 +334,18 @@ fn run_ipc_connection(
                             target.brightness * 100.0,
                             target.transition_seconds,
                             brightness.transitioning
+                        );
+                    }
+                }
+                StateEvent::OverlayChanged(overlay) => {
+                    let target = SurfaceTarget::from(&overlay);
+                    updates
+                        .send(RuntimeUpdate::Surface(target))
+                        .map_err(|_| anyhow!("overlay renderer stopped"))?;
+                    if hydra_mode {
+                        println!(
+                            "[Hydra/IPC] surface visible={} distance={:.2}m mode={:?}",
+                            target.visible, target.distance_m, target.spawn_mode
                         );
                     }
                 }
@@ -333,13 +364,19 @@ fn run_ipc_connection(
     Ok(())
 }
 
-fn send_state_target(
-    updates: &Sender<OverlayTarget>,
+fn send_state_targets(
+    updates: &Sender<RuntimeUpdate>,
     state: &AppState,
     fade_seconds: f32,
 ) -> Result<()> {
     updates
-        .send(brightness_target(&state.brightness, fade_seconds))
+        .send(RuntimeUpdate::Brightness(brightness_target(
+            &state.brightness,
+            fade_seconds,
+        )))
+        .map_err(|_| anyhow!("overlay renderer stopped"))?;
+    updates
+        .send(RuntimeUpdate::Surface(SurfaceTarget::from(&state.overlay)))
         .map_err(|_| anyhow!("overlay renderer stopped"))
 }
 
@@ -360,7 +397,7 @@ fn report_pose(reports: &Sender<WorkerReport>, pose: SleepingPose) {
 #[allow(clippy::too_many_lines)]
 fn run_overlay(
     running: Arc<AtomicBool>,
-    updates: Receiver<OverlayTarget>,
+    updates: Receiver<RuntimeUpdate>,
     reports: Sender<WorkerReport>,
     placement: u32,
     hydra_mode: bool,
@@ -509,6 +546,9 @@ fn run_overlay(
         let local_space = session
             .create_reference_space(xr::ReferenceSpaceType::LOCAL, xr::Posef::IDENTITY)
             .context("creating LOCAL reference space")?;
+        let view_space = session
+            .create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)
+            .context("creating VIEW reference space")?;
 
         let formats = session
             .enumerate_swapchain_formats()
@@ -537,6 +577,7 @@ fn run_overlay(
             .into_iter()
             .map(vk::Image::from_raw)
             .collect::<Vec<_>>();
+        let mut panel_renderer = PanelRenderer::new(&session, format)?;
 
         let command_pool = vk_device
             .create_command_pool(
@@ -564,6 +605,8 @@ fn run_overlay(
         let mut session_running = false;
         let mut current_brightness = 1.0_f32;
         let mut fade: Option<Fade> = None;
+        let mut surface_target = hidden_surface_target();
+        let mut surface_controller = SurfaceController::default();
         let mut hydra_frame = 0_u64;
         let pose_clock = Instant::now();
         let mut pose_tracker = PoseTracker::new(0);
@@ -633,11 +676,18 @@ fn run_overlay(
                 continue;
             }
 
-            let mut latest_update = None;
+            let mut latest_brightness = None;
+            let mut latest_surface = None;
             while let Ok(update) = updates.try_recv() {
-                latest_update = Some(update);
+                match update {
+                    RuntimeUpdate::Brightness(update) => latest_brightness = Some(update),
+                    RuntimeUpdate::Surface(update) => latest_surface = Some(update),
+                }
             }
-            if let Some(update) = latest_update {
+            if let Some(update) = latest_surface {
+                surface_target = update;
+            }
+            if let Some(update) = latest_brightness {
                 if let Some(active_fade) = fade {
                     let (sampled, _, _) = active_fade.sample();
                     current_brightness = sampled;
@@ -685,6 +735,39 @@ fn run_overlay(
             if views.len() != VIEW_COUNT as usize {
                 bail!("expected {VIEW_COUNT} views, runtime returned {}", views.len());
             }
+
+            let needs_spawn_tracking = surface_target.visible && surface_controller.active_pose().is_none();
+            let (head_position, head_orientation) = if needs_spawn_tracking {
+                let location = view_space
+                    .locate(&local_space, frame_state.predicted_display_time)
+                    .context("locating HMD VIEW space for panel spawn")?;
+                let tracking_valid = location
+                    .location_flags
+                    .contains(xr::SpaceLocationFlags::POSITION_VALID)
+                    && location
+                        .location_flags
+                        .contains(xr::SpaceLocationFlags::ORIENTATION_VALID);
+                if tracking_valid {
+                    (
+                        [location.pose.position.x, location.pose.position.y, location.pose.position.z],
+                        [
+                            location.pose.orientation.x,
+                            location.pose.orientation.y,
+                            location.pose.orientation.z,
+                            location.pose.orientation.w,
+                        ],
+                    )
+                } else {
+                    ([f32::NAN; 3], [f32::NAN; 4])
+                }
+            } else {
+                ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0])
+            };
+            let panel_pose = surface_controller.sync(
+                surface_target,
+                head_position,
+                head_orientation,
+            );
 
             let now_ms = pose_clock.elapsed().as_millis() as u64;
             if let Some(stable_pose) = pose_tracker.advance(now_ms) {
@@ -821,13 +904,25 @@ fn run_overlay(
                 .space(&local_space)
                 .views(&projection_views);
 
-            frame_stream
-                .end(
-                    frame_state.predicted_display_time,
-                    blend_mode,
-                    &[&layer],
-                )
-                .context("submitting dimmer composition layer")?;
+            if let Some(panel_pose) = panel_pose {
+                panel_renderer.ensure_initialized(&vk_device, queue, command_buffer, fence)?;
+                let panel_layer = panel_renderer.layer(&local_space, panel_pose);
+                frame_stream
+                    .end(
+                        frame_state.predicted_display_time,
+                        blend_mode,
+                        &[&layer, &panel_layer],
+                    )
+                    .context("submitting dimmer and positioned panel layers")?;
+            } else {
+                frame_stream
+                    .end(
+                        frame_state.predicted_display_time,
+                        blend_mode,
+                        &[&layer],
+                    )
+                    .context("submitting dimmer composition layer")?;
+            }
         }
 
         report_pose(&reports, SleepingPose::Unknown);
@@ -838,7 +933,9 @@ fn run_overlay(
 
         vk_device.device_wait_idle().ok();
 
+        drop(panel_renderer);
         drop(swapchain);
+        drop(view_space);
         drop(local_space);
         drop(frame_stream);
         drop(frame_waiter);
@@ -964,5 +1061,12 @@ mod tests {
         assert_eq!(fade.start, 1.0);
         assert_eq!(fade.target, 1.0);
         assert_eq!(fade.duration_seconds, 0.0);
+    }
+
+    #[test]
+    fn hidden_surface_target_is_safe_by_default() {
+        let target = hidden_surface_target();
+        assert!(!target.visible);
+        assert_eq!(target.distance_m, 1.0);
     }
 }
