@@ -1,4 +1,6 @@
 mod content;
+mod controller_input;
+mod interaction;
 mod panel;
 mod panel_cache;
 mod panel_state;
@@ -23,14 +25,16 @@ use ash::vk::{self, Handle};
 use nightshift_pose::{PoseTracker, SleepingPose as DetectedPose};
 use nightshift_protocol::{
     AppState, BrightnessState, ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepingPose,
-    StateEvent, WorkerReport,
+    StateEvent, UiCommand, WorkerReport,
 };
 use openxr as xr;
 use xr::OverlaySessionCreateFlagsEXTX;
 use xr::sys::Handle as XrHandle;
 
 use content::PanelContent;
-use panel::PanelRenderer;
+use controller_input::ControllerInput;
+use interaction::{PanelAction, action_at_uv, hit_test_panel};
+use panel::{PANEL_HEIGHT_M, PANEL_WIDTH_M, PanelRenderer};
 use panel_cache::PanelBitmapCache;
 use panel_state::PanelStateTracker;
 use placement::PanelPose;
@@ -154,9 +158,10 @@ fn main() -> Result<()> {
 
     let (updates_tx, updates_rx) = mpsc::channel();
     let (reports_tx, reports_rx) = mpsc::channel();
-    spawn_ipc_client(running.clone(), updates_tx, reports_rx, hydra_mode);
+    let (commands_tx, commands_rx) = mpsc::channel();
+    spawn_ipc_client(running.clone(), updates_tx, reports_rx, commands_rx, hydra_mode);
 
-    run_overlay(running, updates_rx, reports_tx, placement, hydra_mode)
+    run_overlay(running, updates_rx, reports_tx, commands_tx, placement, hydra_mode)
 }
 
 fn parse_flag_u32(name: &str) -> Result<Option<u32>> {
@@ -207,6 +212,7 @@ fn spawn_ipc_client(
     running: Arc<AtomicBool>,
     updates: Sender<RuntimeUpdate>,
     reports: Receiver<WorkerReport>,
+    commands: Receiver<UiCommand>,
     hydra_mode: bool,
 ) {
     thread::spawn(move || {
@@ -226,12 +232,13 @@ fn spawn_ipc_client(
                     announced_waiting = false;
                     println!("Nightshift overlay connected to daemon IPC.");
                     if let Err(error) =
-                        run_ipc_connection(stream, &updates, &reports, &running, hydra_mode)
+                        run_ipc_connection(stream, &updates, &reports, &commands, &running, hydra_mode)
                     {
                         if running.load(Ordering::Relaxed) {
                             eprintln!("Nightshift overlay IPC disconnected: {error:#}");
                         }
                     }
+                    while commands.try_recv().is_ok() {}
                     let _ = updates.send(RuntimeUpdate::Surface(hidden_surface_target()));
                 }
                 Err(error) => {
@@ -260,9 +267,10 @@ fn write_client_message(writer: &mut UnixStream, message: &ClientMessage) -> Res
     Ok(())
 }
 
-fn flush_worker_reports(
+fn flush_client_messages(
     writer: &mut UnixStream,
     reports: &Receiver<WorkerReport>,
+    commands: &Receiver<UiCommand>,
     hydra_mode: bool,
 ) -> Result<()> {
     while let Ok(report) = reports.try_recv() {
@@ -271,6 +279,12 @@ fn flush_worker_reports(
         }
         write_client_message(writer, &ClientMessage::Report { report })?;
     }
+    while let Ok(command) = commands.try_recv() {
+        if hydra_mode {
+            println!("[Hydra/Input] daemon command={command:?}");
+        }
+        write_client_message(writer, &ClientMessage::Command { command })?;
+    }
     Ok(())
 }
 
@@ -278,6 +292,7 @@ fn run_ipc_connection(
     stream: UnixStream,
     updates: &Sender<RuntimeUpdate>,
     reports: &Receiver<WorkerReport>,
+    commands: &Receiver<UiCommand>,
     running: &AtomicBool,
     hydra_mode: bool,
 ) -> Result<()> {
@@ -301,7 +316,7 @@ fn run_ipc_connection(
     let mut panel_state = PanelStateTracker::default();
 
     while running.load(Ordering::Relaxed) {
-        flush_worker_reports(&mut writer, reports, hydra_mode)?;
+        flush_client_messages(&mut writer, reports, commands, hydra_mode)?;
         line.clear();
         match reader.read_line(&mut line) {
             Ok(0) => bail!("daemon closed the socket"),
@@ -429,11 +444,25 @@ fn report_pose(reports: &Sender<WorkerReport>, pose: SleepingPose) {
     let _ = reports.send(WorkerReport::SleepingPose { pose });
 }
 
+fn panel_command(action: PanelAction, current_brightness: f32) -> UiCommand {
+    match action {
+        PanelAction::EnterSleep => UiCommand::EnterSleep,
+        PanelAction::Wake => UiCommand::Wake,
+        PanelAction::BrightnessDown => {
+            UiCommand::SetBrightness(sanitize_brightness(current_brightness - 0.1))
+        }
+        PanelAction::BrightnessUp => {
+            UiCommand::SetBrightness(sanitize_brightness(current_brightness + 0.1))
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_overlay(
     running: Arc<AtomicBool>,
     updates: Receiver<RuntimeUpdate>,
     reports: Sender<WorkerReport>,
+    commands: Sender<UiCommand>,
     placement: u32,
     hydra_mode: bool,
 ) -> Result<()> {
@@ -584,6 +613,13 @@ fn run_overlay(
         let view_space = session
             .create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)
             .context("creating VIEW reference space")?;
+        let controller_input = match ControllerInput::new(&xr_instance, &session) {
+            Ok(input) => Some(input),
+            Err(error) => {
+                eprintln!("Nightshift panel controller input disabled: {error:#}");
+                None
+            }
+        };
 
         let formats = session
             .enumerate_swapchain_formats()
@@ -648,6 +684,7 @@ fn run_overlay(
         let mut hydra_frame = 0_u64;
         let pose_clock = Instant::now();
         let mut pose_tracker = PoseTracker::new(0);
+        let mut input_error_reported = false;
         let rect = xr::Rect2Di {
             offset: xr::Offset2Di { x: 0, y: 0 },
             extent: xr::Extent2Di {
@@ -817,6 +854,48 @@ fn run_overlay(
                 surface_controller.saved_pose(),
             ) {
                 let _ = reports.send(report);
+            }
+
+            if let Some(controller_input) = controller_input.as_ref() {
+                match controller_input.samples(
+                    &session,
+                    frame_state.predicted_display_time,
+                    &local_space,
+                ) {
+                    Ok(samples) => {
+                        input_error_reported = false;
+                        if surface_target.visible {
+                            if let Some(panel_pose) = panel_pose {
+                                for sample in samples {
+                                    let Some(ray) = sample.ray else {
+                                        continue;
+                                    };
+                                    let Some(uv) = hit_test_panel(
+                                        ray,
+                                        panel_pose,
+                                        PANEL_WIDTH_M,
+                                        PANEL_HEIGHT_M,
+                                    ) else {
+                                        continue;
+                                    };
+                                    if sample.just_pressed {
+                                        if let Some(action) = action_at_uv(uv) {
+                                            if hydra_mode {
+                                                println!("[Hydra/Input] hand={:?} action={action:?} uv=({:.3},{:.3})", sample.hand, uv.u, uv.v);
+                                            }
+                                            let _ = commands.send(panel_command(action, current_brightness));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(error) if !input_error_reported => {
+                        eprintln!("Nightshift panel input sample failed: {error:#}");
+                        input_error_reported = true;
+                    }
+                    Err(_) => {}
+                }
             }
 
             let now_ms = pose_clock.elapsed().as_millis() as u64;

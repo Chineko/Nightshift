@@ -7,6 +7,9 @@ const BACKGROUND: [u8; 4] = [9, 10, 14, 255];
 const TITLE: [u8; 4] = [190, 160, 255, 255];
 const TEXT: [u8; 4] = [236, 238, 245, 255];
 const DIVIDER: [u8; 4] = [58, 61, 75, 255];
+const BUTTON_FILL: [u8; 4] = [34, 36, 48, 255];
+const BUTTON_BORDER: [u8; 4] = [92, 82, 122, 255];
+const BUTTON_TEXT: [u8; 4] = [228, 220, 248, 255];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PanelBitmap {
@@ -29,7 +32,23 @@ impl PanelBitmap {
         for (index, line) in content.lines.iter().skip(1).enumerate() {
             bitmap.draw_text(36, 100 + index as u32 * 60, line, 3, TEXT);
         }
+        bitmap.draw_button(36, 388, 165, 44, "SLEEP");
+        bitmap.draw_button(213, 388, 165, 44, "WAKE");
+        bitmap.draw_button(390, 388, 165, 44, "DARKER");
+        bitmap.draw_button(567, 388, 165, 44, "BRIGHT");
         bitmap
+    }
+
+    fn draw_button(&mut self, x: u32, y: u32, width: u32, height: u32, label: &str) {
+        self.fill_rect(x, y, width, height, BUTTON_BORDER);
+        self.fill_rect(
+            x + 2,
+            y + 2,
+            width.saturating_sub(4),
+            height.saturating_sub(4),
+            BUTTON_FILL,
+        );
+        self.draw_text(x + 18, y + 11, label, 3, BUTTON_TEXT);
     }
 
     fn fill(&mut self, color: [u8; 4]) {
@@ -157,6 +176,14 @@ mod tests {
         assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel == TITLE));
         assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel == TEXT));
         assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel == DIVIDER));
+    }
+
+    #[test]
+    fn raster_contains_visible_interaction_controls() {
+        let bitmap = PanelBitmap::from_content(&PanelContent::from_state(&AppState::default()));
+        assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel == BUTTON_FILL));
+        assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel == BUTTON_BORDER));
+        assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel == BUTTON_TEXT));
     }
 
     #[test]
