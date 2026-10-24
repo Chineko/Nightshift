@@ -12,7 +12,7 @@ use nightshift_protocol::{
     AppState, ClientMessage, InviteProfile, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
     UiCommand, VrchatStatus,
 };
-use nightshift_ui::vrchat_auth_ui::VrchatAuthUi;
+use nightshift_ui::{invite_settings_ui::InviteSettingsUi, vrchat_auth_ui::VrchatAuthUi};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -185,6 +185,7 @@ struct NightshiftApp {
     daemon_connected: bool,
     bridge: Bridge,
     vrchat_auth: VrchatAuthUi,
+    invite_settings: InviteSettingsUi,
     brightness_send_at: Instant,
 }
 
@@ -196,6 +197,7 @@ impl NightshiftApp {
             daemon_connected: false,
             bridge: Bridge::spawn(ctx.clone()),
             vrchat_auth: VrchatAuthUi::new(ctx),
+            invite_settings: InviteSettingsUi::default(),
             brightness_send_at: Instant::now() - Duration::from_secs(1),
         }
     }
@@ -455,10 +457,13 @@ impl NightshiftApp {
                 .color(MUTED)
                 .small(),
             );
+        });
 
-            let mut invites = self.state.invites.enabled;
-            if ui.checkbox(&mut invites, "Invite automation").changed() {
-                self.send_command(UiCommand::SetInviteAutomation(invites));
+        ui.add_space(12.0);
+        setting_card(ui, "Invite automation", |ui| {
+            let commands = self.invite_settings.render(ui, &self.state.invites);
+            for command in commands {
+                self.send_command(command);
             }
         });
     }
