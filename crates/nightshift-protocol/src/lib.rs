@@ -167,6 +167,8 @@ pub struct InviteState {
     pub rules: InviteRuleSettings,
     #[serde(default)]
     pub last_action: Option<InviteAction>,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 impl Default for InviteState {
     fn default() -> Self {
@@ -175,6 +177,7 @@ impl Default for InviteState {
             profile: InviteProfile::Disabled,
             rules: InviteRuleSettings::default(),
             last_action: None,
+            last_error: None,
         }
     }
 }
@@ -251,6 +254,10 @@ pub enum WorkerReport {
         connected: bool,
         display_name: Option<String>,
         status: VrchatStatus,
+        #[serde(default)]
+        last_invite_action: Option<InviteAction>,
+        #[serde(default)]
+        invite_error: Option<String>,
     },
 }
 
