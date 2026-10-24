@@ -301,6 +301,11 @@ pub enum WorkerReport {
     },
     SleepingPose { pose: SleepingPose },
     HeartRateRuntime { connected: bool, bpm: Option<u16> },
+    HeartRateProviderRuntime {
+        status: HrProviderStatus,
+        connected_device: Option<String>,
+        last_error: Option<String>,
+    },
     VrchatRuntime {
         connected: bool,
         display_name: Option<String>,
