@@ -17,6 +17,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - name: Install Linux system dependencies
         run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libopenxr-dev pkg-config
@@ -27,56 +29,65 @@ jobs:
       - name: Verify Cargo lockfile
         run: cargo metadata --locked --no-deps > /dev/null
 
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --locked
+
       - name: Test protocol compatibility
-        run: cargo test -p nightshift-protocol
+        run: cargo test -p nightshift-protocol --locked
 
       - name: Test invite rules
-        run: cargo test -p nightshift-invites
+        run: cargo test -p nightshift-invites --locked
 
       - name: Test GoGo presets
-        run: cargo test -p nightshift-gogo
+        run: cargo test -p nightshift-gogo --locked
 
       - name: Test OSC script engine
-        run: cargo test -p nightshift-osc-script
+        run: cargo test -p nightshift-osc-script --locked
 
       - name: Test sleeping-pose classifier
-        run: cargo test -p nightshift-pose
+        run: cargo test -p nightshift-pose --locked
 
       - name: Test heart-rate detector
-        run: cargo test -p nightshift-hr
+        run: cargo test -p nightshift-hr --locked
 
       - name: Test BLE heart-rate provider
-        run: cargo test -p nightshift-hr-ble
+        run: cargo test -p nightshift-hr-ble --locked
 
       - name: Test heart-rate worker
-        run: cargo test -p nightshift-hr-worker
+        run: cargo test -p nightshift-hr-worker --locked
 
       - name: Test VRChat API transport
-        run: cargo test -p nightshift-vrchat-api
+        run: cargo test -p nightshift-vrchat-api --locked
 
       - name: Test VRChat session storage
-        run: cargo test -p nightshift-vrchat-session
+        run: cargo test -p nightshift-vrchat-session --locked
 
       - name: Test VRChat authentication service
-        run: cargo test -p nightshift-vrchat-auth
+        run: cargo test -p nightshift-vrchat-auth --locked
 
       - name: Test VRChat status policy
-        run: cargo test -p nightshift-vrchat-status
+        run: cargo test -p nightshift-vrchat-status --locked
 
-      - name: Check VRChat runtime worker
-        run: cargo test -p nightshift-vrchat-worker
+      - name: Test VRChat runtime worker
+        run: cargo test -p nightshift-vrchat-worker --locked
 
       - name: Test daemon state machine
-        run: cargo test -p nightshift-daemon
+        run: cargo test -p nightshift-daemon --locked
 
       - name: Test overlay
-        run: cargo test -p nightshift-overlay
+        run: cargo test -p nightshift-overlay --locked
 
       - name: Test desktop UI
-        run: cargo test -p nightshift-ui
+        run: cargo test -p nightshift-ui --locked
 
-      - name: Check CLI
-        run: cargo check -p nightshiftctl
+      - name: Test CLI
+        run: cargo test -p nightshiftctl --locked
 
       - name: Test OSC worker
-        run: cargo test -p nightshift-osc
+        run: cargo test -p nightshift-osc --locked
+
+      - name: Test complete workspace
+        run: cargo test --workspace --locked
