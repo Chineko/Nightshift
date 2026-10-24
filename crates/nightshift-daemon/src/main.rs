@@ -15,8 +15,9 @@ use anyhow::{Context, Result, bail};
 use config::PersistedConfig;
 use nightshift_hr::{CalmPeriodConfig, CalmPeriodDetector, DetectionState};
 use nightshift_protocol::{
-    AppState, Capability, ClientMessage, HrStatus, InviteAction, InviteActionKind, PROTOCOL_VERSION,
-    ServerMessage, SleepPhase, SleepingPose, StateEvent, UiCommand, VrchatStatus, WorkerReport,
+    AppState, Capability, ClientMessage, HrProviderStatus, HrStatus, InviteAction, InviteActionKind,
+    PROTOCOL_VERSION, ServerMessage, SleepPhase, SleepingPose, StateEvent, UiCommand, VrchatStatus,
+    WorkerReport,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -214,6 +215,41 @@ impl StateStore {
         }
     }
 
+    async fn set_hr_provider_runtime(
+        &self,
+        status: HrProviderStatus,
+        connected_device: Option<String>,
+        last_error: Option<String>,
+    ) {
+        let mut state = self.state.lock().await;
+        let before = state.clone();
+
+        state.heart_rate.provider_status = status;
+        state.heart_rate.connected_device = if status == HrProviderStatus::Connected {
+            connected_device
+        } else {
+            None
+        };
+
+        match status {
+            HrProviderStatus::Error => state.heart_rate.last_error = last_error,
+            HrProviderStatus::Connected
+            | HrProviderStatus::Searching
+            | HrProviderStatus::Disabled => state.heart_rate.last_error = None,
+            HrProviderStatus::Unknown => {}
+        }
+
+        if status != HrProviderStatus::Connected {
+            state.heart_rate.connected = false;
+            state.heart_rate.bpm = None;
+            state.heart_rate.status = HrStatus::Unknown;
+        }
+
+        if *state != before {
+            self.emit_changes(&before, &state);
+        }
+    }
+
     async fn set_hr_runtime(&self, connected: bool, bpm: Option<u16>) {
         if !connected {
             let mut state = self.state.lock().await;
@@ -320,6 +356,15 @@ impl StateStore {
             }
             WorkerReport::HeartRateRuntime { connected, bpm } if client == "nightshift-hr" => {
                 self.set_hr_runtime(connected, bpm).await;
+                true
+            }
+            WorkerReport::HeartRateProviderRuntime {
+                status,
+                connected_device,
+                last_error,
+            } if client == "nightshift-hr" => {
+                self.set_hr_provider_runtime(status, connected_device, last_error)
+                    .await;
                 true
             }
             WorkerReport::VrchatRuntime {
@@ -483,6 +528,10 @@ impl StateStore {
             UiCommand::HideOverlay => state.overlay.visible = false,
         }
 
+        if let Some(config) = hr_detector_config {
+            self.hr_detector.lock().await.set_config(config);
+        }
+
         if *state != before {
             self.emit_changes(&before, &state);
         }
@@ -491,10 +540,6 @@ impl StateStore {
                 .send_replace(PersistedConfig::from_state(&state));
         }
         drop(state);
-
-        if let Some(config) = hr_detector_config {
-            self.hr_detector.lock().await.set_config(config);
-        }
 
         if manual_wake {
             self.hr_detector
@@ -566,6 +611,9 @@ impl Drop for HrClientGuard {
             let store = self.store.clone();
             tokio::spawn(async move {
                 store.set_hr_runtime(false, None).await;
+                store
+                    .set_hr_provider_runtime(HrProviderStatus::Unknown, None, None)
+                    .await;
                 info!("Nightshift heart-rate worker disconnected");
             });
         }
@@ -943,6 +991,55 @@ mod tests {
         assert_eq!(config.heart_rate_threshold_bpm, 72);
         assert_eq!(config.calm_period_ms, 45_000);
         assert_eq!(config.manual_wake_cooldown_ms, 300_000);
+    }
+
+    #[tokio::test]
+    async fn hr_provider_reports_are_worker_scoped_and_manage_health_state() {
+        let store = StateStore::new(AppState::default());
+        assert!(
+            store
+                .apply_worker_report(
+                    "nightshift-hr",
+                    WorkerReport::HeartRateProviderRuntime {
+                        status: HrProviderStatus::Error,
+                        connected_device: None,
+                        last_error: Some("bluetooth unavailable".into()),
+                    },
+                )
+                .await
+        );
+        assert!(
+            !store
+                .apply_worker_report(
+                    "nightshift-osc",
+                    WorkerReport::HeartRateProviderRuntime {
+                        status: HrProviderStatus::Connected,
+                        connected_device: Some("Impostor".into()),
+                        last_error: None,
+                    },
+                )
+                .await
+        );
+
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.heart_rate.provider_status, HrProviderStatus::Error);
+        assert_eq!(snapshot.heart_rate.last_error.as_deref(), Some("bluetooth unavailable"));
+        assert_eq!(snapshot.heart_rate.connected_device, None);
+
+        store
+            .apply_worker_report(
+                "nightshift-hr",
+                WorkerReport::HeartRateProviderRuntime {
+                    status: HrProviderStatus::Connected,
+                    connected_device: Some("Polar H10".into()),
+                    last_error: None,
+                },
+            )
+            .await;
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.heart_rate.provider_status, HrProviderStatus::Connected);
+        assert_eq!(snapshot.heart_rate.connected_device.as_deref(), Some("Polar H10"));
+        assert_eq!(snapshot.heart_rate.last_error, None);
     }
 
     #[tokio::test]
