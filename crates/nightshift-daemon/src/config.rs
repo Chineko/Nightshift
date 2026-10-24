@@ -126,3 +126,59 @@ fn config_path() -> Result<PathBuf> {
         .join("nightshift")
         .join("config.json"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hr_settings_round_trip_through_persisted_config() {
+        let mut state = AppState::default();
+        state.heart_rate.enabled = true;
+        state.heart_rate.device_filter = Some("Polar H10".into());
+        state.heart_rate.threshold_bpm = 64;
+        state.heart_rate.calm_period_seconds = 180;
+        state.heart_rate.cooldown_seconds = 600;
+
+        let config = PersistedConfig::from_state(&state);
+        let mut restored = AppState::default();
+        config.apply_to_state(&mut restored);
+
+        assert!(restored.heart_rate.enabled);
+        assert_eq!(restored.heart_rate.device_filter.as_deref(), Some("Polar H10"));
+        assert_eq!(restored.heart_rate.threshold_bpm, 64);
+        assert_eq!(restored.heart_rate.calm_period_seconds, 180);
+        assert_eq!(restored.heart_rate.cooldown_seconds, 600);
+    }
+
+    #[test]
+    fn hr_settings_are_sanitized_when_loaded() {
+        let mut config = PersistedConfig::default();
+        config.hr_device_filter = Some("   ".into());
+        config.hr_threshold_bpm = 1;
+        config.hr_calm_period_seconds = 1;
+        config.hr_cooldown_seconds = u64::MAX;
+
+        let mut state = AppState::default();
+        config.apply_to_state(&mut state);
+
+        assert_eq!(state.heart_rate.device_filter, None);
+        assert_eq!(state.heart_rate.threshold_bpm, 20);
+        assert_eq!(state.heart_rate.calm_period_seconds, 10);
+        assert_eq!(state.heart_rate.cooldown_seconds, 24 * 60 * 60);
+    }
+
+    #[test]
+    fn hr_device_filter_is_trimmed_when_loaded() {
+        let mut config = PersistedConfig::default();
+        config.hr_device_filter = Some("  AA:BB:CC:DD:EE:FF  ".into());
+
+        let mut state = AppState::default();
+        config.apply_to_state(&mut state);
+
+        assert_eq!(
+            state.heart_rate.device_filter.as_deref(),
+            Some("AA:BB:CC:DD:EE:FF")
+        );
+    }
+}
