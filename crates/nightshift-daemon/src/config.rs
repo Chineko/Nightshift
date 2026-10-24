@@ -1,10 +1,15 @@
-use std::{env, path::PathBuf};
+use std::{
+    env,
+    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use nightshift_protocol::{
     AppState, InviteProfile, InviteRuleSettings, OverlaySpawnMode, VrchatStatus,
 };
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -94,25 +99,71 @@ impl PersistedConfig {
         let bytes = tokio::fs::read(&path)
             .await
             .with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_slice(&bytes)
-            .with_context(|| format!("parsing {}", path.display()))
+        match serde_json::from_slice(&bytes) {
+            Ok(config) => Ok(config),
+            Err(error) => {
+                let backup_path = path.with_extension("json.bak");
+                write_private_file(&backup_path, &bytes)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "backing up unparseable config {} to {}",
+                            path.display(),
+                            backup_path.display()
+                        )
+                    })?;
+                Err(error).with_context(|| {
+                    format!(
+                        "parsing {}; corrupt bytes preserved at {}",
+                        path.display(),
+                        backup_path.display()
+                    )
+                })
+            }
+        }
     }
 
     pub async fn save(&self) -> Result<()> {
         let path = config_path()?;
         let parent = path.parent().context("config path has no parent")?;
         tokio::fs::create_dir_all(parent).await?;
+        tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .await
+            .with_context(|| format!("securing config directory {}", parent.display()))?;
 
         let tmp_path = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self)?;
-        tokio::fs::write(&tmp_path, bytes)
-            .await
-            .with_context(|| format!("writing {}", tmp_path.display()))?;
+        write_private_file(&tmp_path, &bytes).await?;
         tokio::fs::rename(&tmp_path, &path)
             .await
             .with_context(|| format!("replacing {}", path.display()))?;
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .with_context(|| format!("securing {}", path.display()))?;
         Ok(())
     }
+}
+
+async fn write_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true).mode(0o600);
+    let mut file = options
+        .open(path)
+        .await
+        .with_context(|| format!("opening {}", path.display()))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .await
+        .with_context(|| format!("securing {}", path.display()))?;
+    file.write_all(bytes)
+        .await
+        .with_context(|| format!("writing {}", path.display()))?;
+    file.flush()
+        .await
+        .with_context(|| format!("flushing {}", path.display()))?;
+    file.sync_all()
+        .await
+        .with_context(|| format!("syncing {}", path.display()))?;
+    Ok(())
 }
 
 fn config_path() -> Result<PathBuf> {
@@ -130,6 +181,18 @@ fn config_path() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_path(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "nightshift-config-test-{}-{nonce}-{name}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn overlay_settings_round_trip_through_persisted_config() {
@@ -210,5 +273,26 @@ mod tests {
             state.heart_rate.device_filter.as_deref(),
             Some("AA:BB:CC:DD:EE:FF")
         );
+    }
+
+    #[tokio::test]
+    async fn private_file_writer_enforces_owner_only_permissions() {
+        let path = unique_temp_path("permissions");
+        write_private_file(&path, b"secret settings").await.unwrap();
+        let metadata = tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"secret settings");
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn corrupt_config_bytes_can_be_preserved_privately() {
+        let path = unique_temp_path("backup.json.bak");
+        let bytes = b"{ definitely not valid json";
+        write_private_file(&path, bytes).await.unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), bytes);
+        let metadata = tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        let _ = tokio::fs::remove_file(path).await;
     }
 }
