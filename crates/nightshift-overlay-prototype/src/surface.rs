@@ -119,3 +119,71 @@ impl SurfaceController {
         pose
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(spawn_mode: OverlaySpawnMode, remembered_pose: Option<PanelPose>) -> SurfaceTarget {
+        SurfaceTarget {
+            visible: true,
+            distance_m: 1.0,
+            spawn_mode,
+            remembered_pose,
+        }
+    }
+
+    fn pose(x: f32) -> PanelPose {
+        PanelPose {
+            position: [x, 1.5, -1.0],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        }
+    }
+
+    #[test]
+    fn persisted_pose_seeds_restore_after_fresh_start() {
+        let mut controller = SurfaceController::default();
+        let persisted = pose(2.0);
+        let restored = controller.sync(
+            target(OverlaySpawnMode::RestoreLastPosition, Some(persisted)),
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        assert_eq!(restored, Some(persisted));
+        assert_eq!(controller.saved_pose(), Some(persisted));
+    }
+
+    #[test]
+    fn current_process_pose_wins_over_stale_persisted_pose() {
+        let mut controller = SurfaceController::default();
+        let current = pose(1.0);
+        assert!(controller.remember_pose(current));
+        let restored = controller.sync(
+            target(OverlaySpawnMode::RestoreLastPosition, Some(pose(9.0))),
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        assert_eq!(restored, Some(current));
+    }
+
+    #[test]
+    fn invalid_persisted_pose_falls_back_to_in_front() {
+        let state = OverlayState {
+            visible: true,
+            spawn_mode: OverlaySpawnMode::RestoreLastPosition,
+            remembered_pose: Some(OverlayPose {
+                position: [f32::NAN, 0.0, 0.0],
+                orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            }),
+            ..OverlayState::default()
+        };
+        let mut controller = SurfaceController::default();
+        let restored = controller.sync(
+            SurfaceTarget::from(&state),
+            [0.0, 1.6, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        assert!(restored.is_some());
+        assert_ne!(restored.unwrap().position[0].is_nan(), true);
+    }
+}
