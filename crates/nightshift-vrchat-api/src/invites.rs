@@ -9,6 +9,7 @@ use crate::{BASE_URL, SessionCookies, VrchatApiClient};
 
 const PIPELINE_URL: &str = "wss://pipeline.vrchat.cloud/";
 const PAGE_SIZE: usize = 100;
+const MAX_FAVORITE_PAGES: usize = 100;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NotificationKind {
@@ -169,7 +170,7 @@ impl VrchatApiClient {
         user_id: &str,
     ) -> Result<bool> {
         let mut offset = 0;
-        loop {
+        for _ in 0..MAX_FAVORITE_PAGES {
             let response = self
                 .http
                 .get(format!("{BASE_URL}/favorites"))
@@ -200,8 +201,12 @@ impl VrchatApiClient {
             if page.len() < PAGE_SIZE {
                 return Ok(false);
             }
-            offset = offset.saturating_add(page.len());
+            offset = offset
+                .checked_add(page.len())
+                .context("VRChat favorite-friends pagination offset overflow")?;
         }
+
+        bail!("VRChat favorite-friends pagination exceeded safety limit")
     }
 
     /// Check only whether the invite sender is a friend using VRChat's targeted endpoint.
@@ -411,6 +416,7 @@ mod tests {
             .unwrap(),
             serde_json::json!({"type":"friend","n":100,"offset":0})
         );
+        assert_eq!(MAX_FAVORITE_PAGES, 100);
     }
 
     #[test]
