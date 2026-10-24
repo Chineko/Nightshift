@@ -15,8 +15,8 @@ use anyhow::{Context, Result, bail};
 use config::PersistedConfig;
 use nightshift_hr::{CalmPeriodDetector, DetectionState};
 use nightshift_protocol::{
-    AppState, Capability, ClientMessage, HrStatus, PROTOCOL_VERSION, ServerMessage, SleepPhase,
-    SleepingPose, StateEvent, UiCommand, VrchatStatus, WorkerReport,
+    AppState, Capability, ClientMessage, HrStatus, InviteAction, InviteActionKind, PROTOCOL_VERSION,
+    ServerMessage, SleepPhase, SleepingPose, StateEvent, UiCommand, VrchatStatus, WorkerReport,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -182,12 +182,22 @@ impl StateStore {
         connected: bool,
         display_name: Option<String>,
         status: VrchatStatus,
+        last_invite_action: Option<InviteAction>,
+        invite_error: Option<String>,
     ) {
         let mut state = self.state.lock().await;
         let before = state.clone();
         state.vrchat.connected = connected;
         state.vrchat.display_name = if connected { display_name } else { None };
         state.vrchat.status = if connected { status } else { VrchatStatus::Offline };
+
+        if let Some(action) = last_invite_action {
+            state.invites.last_action = Some(action);
+            state.invites.last_error = None;
+        }
+        if let Some(error) = invite_error {
+            state.invites.last_error = Some(error);
+        }
 
         if *state != before {
             self.emit_changes(&before, &state);
@@ -306,8 +316,17 @@ impl StateStore {
                 connected,
                 display_name,
                 status,
+                last_invite_action,
+                invite_error,
             } if client == "nightshift-vrchat" => {
-                self.set_vrchat_runtime(connected, display_name, status).await;
+                self.set_vrchat_runtime(
+                    connected,
+                    display_name,
+                    status,
+                    last_invite_action,
+                    invite_error,
+                )
+                .await;
                 true
             }
             _ => false,
@@ -526,7 +545,7 @@ impl Drop for VrchatClientGuard {
             let store = self.store.clone();
             tokio::spawn(async move {
                 store
-                    .set_vrchat_runtime(false, None, VrchatStatus::Offline)
+                    .set_vrchat_runtime(false, None, VrchatStatus::Offline, None, None)
                     .await;
                 info!("Nightshift VRChat worker disconnected");
             });
@@ -933,8 +952,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vrchat_reports_are_worker_scoped() {
+    async fn vrchat_reports_are_worker_scoped_and_invite_feedback_is_additive() {
         let store = StateStore::new(AppState::default());
+        let accepted = InviteAction {
+            kind: InviteActionKind::Accepted,
+            display_name: Some("Friend".into()),
+        };
         assert!(
             store
                 .apply_worker_report(
@@ -943,6 +966,8 @@ mod tests {
                         connected: true,
                         display_name: Some("Hydra Employee".into()),
                         status: VrchatStatus::AskMe,
+                        last_invite_action: Some(accepted.clone()),
+                        invite_error: None,
                     },
                 )
                 .await
@@ -955,6 +980,8 @@ mod tests {
                         connected: true,
                         display_name: Some("Impostor".into()),
                         status: VrchatStatus::Busy,
+                        last_invite_action: None,
+                        invite_error: Some("should not apply".into()),
                     },
                 )
                 .await
@@ -964,5 +991,42 @@ mod tests {
         assert!(snapshot.vrchat.connected);
         assert_eq!(snapshot.vrchat.display_name.as_deref(), Some("Hydra Employee"));
         assert_eq!(snapshot.vrchat.status, VrchatStatus::AskMe);
+        assert_eq!(snapshot.invites.last_action, Some(accepted));
+        assert_eq!(snapshot.invites.last_error, None);
+
+        assert!(
+            store
+                .apply_worker_report(
+                    "nightshift-vrchat",
+                    WorkerReport::VrchatRuntime {
+                        connected: true,
+                        display_name: Some("Hydra Employee".into()),
+                        status: VrchatStatus::AskMe,
+                        last_invite_action: None,
+                        invite_error: Some("network failure".into()),
+                    },
+                )
+                .await
+        );
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.invites.last_action.as_ref().map(|action| action.kind), Some(InviteActionKind::Accepted));
+        assert_eq!(snapshot.invites.last_error.as_deref(), Some("network failure"));
+
+        assert!(
+            store
+                .apply_worker_report(
+                    "nightshift-vrchat",
+                    WorkerReport::VrchatRuntime {
+                        connected: true,
+                        display_name: Some("Hydra Employee".into()),
+                        status: VrchatStatus::AskMe,
+                        last_invite_action: None,
+                        invite_error: None,
+                    },
+                )
+                .await
+        );
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.invites.last_error.as_deref(), Some("network failure"));
     }
 }
