@@ -14,6 +14,8 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InviteHandlingOutcome {
     Execution(InviteExecutionOutcome),
+    /// Retained while protocol-v1 callers transition to persisted invite rule settings.
+    ConfigurationUnavailable(InviteProfile),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
