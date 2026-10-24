@@ -43,7 +43,17 @@ Persisted settings live under the user's Nightshift config directory. The daemon
 
 ## Run locally
 
-Start the daemon:
+With WiVRn/Monado running and Fish installed, the full local stack is one command:
+
+```fish
+scripts/nightshift-dev.fish --full
+```
+
+`--full` builds and starts the daemon, OSC worker, BLE heart-rate worker, VRChat runtime worker, OpenXR overlay, and desktop UI. Heart-rate scanning still follows the persisted monitoring setting, so starting the worker does not enable monitoring by itself. The VRChat worker uses the stored keyring session when one is available and otherwise remains disconnected. Add `--hydra` for verbose overlay diagnostics.
+
+The launcher keeps its lightweight historical default: running it with no options starts only the daemon, OSC worker, and OpenXR overlay. Optional components can also be selected individually with `--ui`, `--hr`, and `--vrchat`. Ctrl+C stops every child the launcher started.
+
+For manual development, the components can still be started separately. Start the daemon:
 
 ```bash
 cargo run -p nightshift-daemon
@@ -61,7 +71,7 @@ Start the OpenXR worker while WiVRn/Monado is running:
 cargo run -p nightshift-overlay --release
 ```
 
-The UI and workers reconnect automatically if the daemon is restarted.
+Workers reconnect automatically if the daemon is restarted.
 
 ## UI behavior
 
