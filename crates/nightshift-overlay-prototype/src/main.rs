@@ -1,5 +1,9 @@
+mod content;
 mod panel;
+mod panel_cache;
+mod panel_state;
 mod placement;
+mod raster;
 mod surface;
 
 use std::env;
@@ -25,7 +29,10 @@ use openxr as xr;
 use xr::OverlaySessionCreateFlagsEXTX;
 use xr::sys::Handle as XrHandle;
 
+use content::PanelContent;
 use panel::PanelRenderer;
+use panel_cache::PanelBitmapCache;
+use panel_state::PanelStateTracker;
 use surface::{SurfaceController, SurfaceTarget};
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
@@ -42,10 +49,11 @@ struct OverlayTarget {
     transition_seconds: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum RuntimeUpdate {
     Brightness(OverlayTarget),
     Surface(SurfaceTarget),
+    Panel(PanelContent),
 }
 
 fn sanitize_brightness(value: f32) -> f32 {
@@ -276,6 +284,7 @@ fn run_ipc_connection(
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let mut fade_seconds = DEFAULT_TRANSITION_SECONDS;
+    let mut panel_state = PanelStateTracker::default();
 
     while running.load(Ordering::Relaxed) {
         flush_worker_reports(&mut writer, reports, hydra_mode)?;
@@ -311,7 +320,11 @@ fn run_ipc_connection(
             }
             ServerMessage::FullState { state } => {
                 fade_seconds = sanitize_transition_seconds(state.settings.fade_duration_seconds);
+                panel_state = PanelStateTracker::from_state(state.clone());
                 send_state_targets(updates, &state, fade_seconds)?;
+                updates
+                    .send(RuntimeUpdate::Panel(panel_state.content().clone()))
+                    .map_err(|_| anyhow!("overlay renderer stopped"))?;
                 if hydra_mode {
                     println!(
                         "[Hydra/IPC] snapshot target={:.2}% fade={:.2}s surface_visible={}",
@@ -321,42 +334,50 @@ fn run_ipc_connection(
                     );
                 }
             }
-            ServerMessage::Event { event } => match event {
-                StateEvent::BrightnessChanged(brightness) => {
-                    let target = brightness_target(&brightness, fade_seconds);
+            ServerMessage::Event { event } => {
+                if let Some(content) = panel_state.apply_event(&event) {
                     updates
-                        .send(RuntimeUpdate::Brightness(target))
+                        .send(RuntimeUpdate::Panel(content))
                         .map_err(|_| anyhow!("overlay renderer stopped"))?;
+                }
 
-                    if hydra_mode {
-                        println!(
-                            "[Hydra/IPC] brightness target={:.2}% transition={:.2}s daemon_transitioning={}",
-                            target.brightness * 100.0,
-                            target.transition_seconds,
-                            brightness.transitioning
-                        );
+                match event {
+                    StateEvent::BrightnessChanged(brightness) => {
+                        let target = brightness_target(&brightness, fade_seconds);
+                        updates
+                            .send(RuntimeUpdate::Brightness(target))
+                            .map_err(|_| anyhow!("overlay renderer stopped"))?;
+
+                        if hydra_mode {
+                            println!(
+                                "[Hydra/IPC] brightness target={:.2}% transition={:.2}s daemon_transitioning={}",
+                                target.brightness * 100.0,
+                                target.transition_seconds,
+                                brightness.transitioning
+                            );
+                        }
                     }
-                }
-                StateEvent::OverlayChanged(overlay) => {
-                    let target = SurfaceTarget::from(&overlay);
-                    updates
-                        .send(RuntimeUpdate::Surface(target))
-                        .map_err(|_| anyhow!("overlay renderer stopped"))?;
-                    if hydra_mode {
-                        println!(
-                            "[Hydra/IPC] surface visible={} distance={:.2}m mode={:?}",
-                            target.visible, target.distance_m, target.spawn_mode
-                        );
+                    StateEvent::OverlayChanged(overlay) => {
+                        let target = SurfaceTarget::from(&overlay);
+                        updates
+                            .send(RuntimeUpdate::Surface(target))
+                            .map_err(|_| anyhow!("overlay renderer stopped"))?;
+                        if hydra_mode {
+                            println!(
+                                "[Hydra/IPC] surface visible={} distance={:.2}m mode={:?}",
+                                target.visible, target.distance_m, target.spawn_mode
+                            );
+                        }
                     }
-                }
-                StateEvent::SettingsChanged(settings) => {
-                    fade_seconds = sanitize_transition_seconds(settings.fade_duration_seconds);
-                    if hydra_mode {
-                        println!("[Hydra/IPC] fade default={fade_seconds:.2}s");
+                    StateEvent::SettingsChanged(settings) => {
+                        fade_seconds = sanitize_transition_seconds(settings.fade_duration_seconds);
+                        if hydra_mode {
+                            println!("[Hydra/IPC] fade default={fade_seconds:.2}s");
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
             ServerMessage::Error { message } => bail!("daemon rejected overlay: {message}"),
         }
     }
@@ -607,6 +628,8 @@ fn run_overlay(
         let mut fade: Option<Fade> = None;
         let mut surface_target = hidden_surface_target();
         let mut surface_controller = SurfaceController::default();
+        let mut panel_content = PanelContent::from_state(&AppState::default());
+        let mut panel_cache = PanelBitmapCache::default();
         let mut hydra_frame = 0_u64;
         let pose_clock = Instant::now();
         let mut pose_tracker = PoseTracker::new(0);
@@ -637,6 +660,7 @@ fn run_overlay(
                             session_running = true;
                             let now_ms = pose_clock.elapsed().as_millis() as u64;
                             pose_tracker = PoseTracker::new(now_ms);
+                            panel_cache.invalidate();
                             println!("Overlay session running. Tiny evil square deployed.");
                         }
                         xr::SessionState::STOPPING => {
@@ -678,14 +702,19 @@ fn run_overlay(
 
             let mut latest_brightness = None;
             let mut latest_surface = None;
+            let mut latest_panel = None;
             while let Ok(update) = updates.try_recv() {
                 match update {
                     RuntimeUpdate::Brightness(update) => latest_brightness = Some(update),
                     RuntimeUpdate::Surface(update) => latest_surface = Some(update),
+                    RuntimeUpdate::Panel(update) => latest_panel = Some(update),
                 }
             }
             if let Some(update) = latest_surface {
                 surface_target = update;
+            }
+            if let Some(update) = latest_panel {
+                panel_content = update;
             }
             if let Some(update) = latest_brightness {
                 if let Some(active_fade) = fade {
@@ -905,7 +934,23 @@ fn run_overlay(
                 .views(&projection_views);
 
             if let Some(panel_pose) = panel_pose {
-                panel_renderer.ensure_initialized(&vk_device, queue, command_buffer, fence)?;
+                if let Some(bitmap) = panel_cache.render_if_changed(&panel_content) {
+                    panel_renderer.upload_rgba(
+                        &vk_instance,
+                        vk_physical_device,
+                        &vk_device,
+                        queue,
+                        command_buffer,
+                        fence,
+                        format,
+                        &bitmap.rgba,
+                    )?;
+                    if hydra_mode {
+                        println!("[Hydra/Panel] status parchment refreshed; rectangle knows too much.");
+                    }
+                } else {
+                    panel_renderer.ensure_initialized(&vk_device, queue, command_buffer, fence)?;
+                }
                 let panel_layer = panel_renderer.layer(&local_space, panel_pose);
                 frame_stream
                     .end(
