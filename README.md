@@ -82,9 +82,9 @@ Nightshift's OpenXR worker owns two separate composition responsibilities inside
 - a stereo projection-layer dimmer that follows canonical daemon brightness/fade state
 - a world-locked `CompositionLayerQuad` panel submitted after the dimmer, so the Nightshift panel itself remains undimmed
 
-`ShowOverlay`/`HideOverlay`, `spawn_distance_m`, and `spawn_mode` control the positioned panel only; they do not disable or reposition the sleep dimmer. `InFront` captures the HMD-centered VIEW pose once on the hidden-to-visible edge and then leaves the panel world-locked. `RestoreLastPosition` reuses the most recent valid panel pose remembered by the running overlay process, falling back to `InFront` when no remembered pose exists.
+`ShowOverlay`/`HideOverlay`, `spawn_distance_m`, and `spawn_mode` control the positioned panel only; they do not disable or reposition the sleep dimmer. `InFront` captures the HMD-centered VIEW pose once on the hidden-to-visible edge and then leaves the panel world-locked. `RestoreLastPosition` prefers the most recent valid pose remembered by the running overlay process, then the validated pose persisted by the daemon, and falls back to `InFront` when neither exists. Valid captured poses are reported only when the remembered pose changes and are normalized before persistence; panel visibility itself is never persisted.
 
-The first panel renderer is intentionally minimal: it renders a fixed-size dark surface while positioning, lifecycle, compositor ordering, and daemon control are validated. Rich panel content, direct grabbing/repositioning, and persistence of the panel transform across overlay-worker restarts remain future work.
+The positioned panel renders live Nightshift status on a fixed-size dark surface. Positioning, lifecycle, compositor ordering, daemon control, and restart-safe remembered placement are now wired. Direct grabbing/repositioning and richer interactive panel controls remain future work.
 
 Nightshift uses OpenXR overlay placement 4. Current WayVR uses a higher placement, so WayVR can continue to render above Nightshift when both are running.
 
@@ -98,6 +98,7 @@ Nightshift is designed around event-driven updates:
 - brightness slider IPC is rate-limited while dragging
 - VRChat favorite-friend membership is cached briefly per authenticated session to avoid repeatedly paging the favorites API during invite bursts
 - positioned-panel texture initialization happens once and the HMD VIEW pose is only located when a new panel spawn pose is needed
+- remembered panel poses are reported only when they change rather than once per rendered frame
 - external integrations should use events where possible and the lowest practical polling frequency otherwise
 
 ## License
