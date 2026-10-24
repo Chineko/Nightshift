@@ -8,8 +8,8 @@ use std::{
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use nightshift_protocol::{
-    ClientMessage, InviteState, PROTOCOL_VERSION, ServerMessage, StateEvent, VrchatStatus,
-    WorkerReport,
+    ClientMessage, InviteAction, InviteActionKind, InviteState, PROTOCOL_VERSION, ServerMessage,
+    StateEvent, VrchatStatus, WorkerReport,
 };
 use nightshift_vrchat_api::{
     SessionCookies, VrchatApiClient, VrchatNotification, parse_pipeline_notification, pipeline_url,
@@ -179,32 +179,32 @@ fn sync_invite_session(
     *current = next;
 }
 
+fn invite_policy_changed(current: &InviteState, next: &InviteState) -> bool {
+    current.enabled != next.enabled
+        || current.profile != next.profile
+        || current.rules != next.rules
+}
+
 fn sync_invite_state(
     current: &mut InviteState,
     next: InviteState,
     tasks: &mut JoinSet<Result<InviteHandlingResult>>,
 ) {
-    if current.enabled != next.enabled || current.profile != next.profile {
+    if invite_policy_changed(current, &next) {
         tasks.abort_all();
     }
     *current = next;
 }
 
-fn log_invite_result(result: InviteHandlingResult) {
-    let InviteHandlingResult {
-        notification_id,
-        sender_user_id,
-        sender_username,
-        outcome,
-    } = result;
-    let sender_username = sender_username.as_deref().unwrap_or("<unknown>");
+fn log_invite_result(result: &InviteHandlingResult) {
+    let sender_username = result.sender_username.as_deref().unwrap_or("<unknown>");
 
-    match outcome {
+    match &result.outcome {
         InviteHandlingOutcome::ConfigurationUnavailable(profile) => {
             warn!(
                 ?profile,
-                notification_id = %notification_id,
-                sender_user_id = %sender_user_id,
+                notification_id = %result.notification_id,
+                sender_user_id = %result.sender_user_id,
                 sender_username = %sender_username,
                 "invite automation profile requires configuration that is not available yet"
             );
@@ -213,24 +213,24 @@ fn log_invite_result(result: InviteHandlingResult) {
             InviteExecutionOutcome::None => {}
             InviteExecutionOutcome::AcceptedRequest => {
                 info!(
-                    notification_id = %notification_id,
-                    sender_user_id = %sender_user_id,
+                    notification_id = %result.notification_id,
+                    sender_user_id = %result.sender_user_id,
                     sender_username = %sender_username,
                     "accepted VRChat invite request"
                 );
             }
             InviteExecutionOutcome::Declined => {
                 info!(
-                    notification_id = %notification_id,
-                    sender_user_id = %sender_user_id,
+                    notification_id = %result.notification_id,
+                    sender_user_id = %result.sender_user_id,
                     sender_username = %sender_username,
                     "declined VRChat invite notification"
                 );
             }
             InviteExecutionOutcome::InviteRefused { message } => {
                 warn!(
-                    notification_id = %notification_id,
-                    sender_user_id = %sender_user_id,
+                    notification_id = %result.notification_id,
+                    sender_user_id = %result.sender_user_id,
                     sender_username = %sender_username,
                     vrchat_message = message.as_deref().unwrap_or("<none>"),
                     "VRChat refused invite-request acceptance; original request was left visible"
@@ -238,22 +238,89 @@ fn log_invite_result(result: InviteHandlingResult) {
             }
             InviteExecutionOutcome::MissingCurrentInstance => {
                 warn!(
-                    notification_id = %notification_id,
-                    sender_user_id = %sender_user_id,
+                    notification_id = %result.notification_id,
+                    sender_user_id = %result.sender_user_id,
                     sender_username = %sender_username,
                     "invite request matched policy but current VRChat instance is unavailable"
                 );
             }
             InviteExecutionOutcome::UnsupportedIncomingInviteAcceptance => {
                 info!(
-                    notification_id = %notification_id,
-                    sender_user_id = %sender_user_id,
+                    notification_id = %result.notification_id,
+                    sender_user_id = %result.sender_user_id,
                     sender_username = %sender_username,
                     "incoming VRChat invite matched accept policy, but automatic joining is not implemented"
                 );
             }
         },
     }
+}
+
+fn invite_feedback(result: &InviteHandlingResult) -> (Option<InviteAction>, Option<String>) {
+    let action = |kind| InviteAction {
+        kind,
+        display_name: result.sender_username.clone(),
+    };
+
+    match &result.outcome {
+        InviteHandlingOutcome::ConfigurationUnavailable(profile) => (
+            None,
+            Some(format!(
+                "Invite automation profile {profile:?} is not fully configured"
+            )),
+        ),
+        InviteHandlingOutcome::Execution(InviteExecutionOutcome::None) => (None, None),
+        InviteHandlingOutcome::Execution(InviteExecutionOutcome::AcceptedRequest) => {
+            (Some(action(InviteActionKind::Accepted)), None)
+        }
+        InviteHandlingOutcome::Execution(InviteExecutionOutcome::Declined) => {
+            (Some(action(InviteActionKind::Declined)), None)
+        }
+        InviteHandlingOutcome::Execution(InviteExecutionOutcome::InviteRefused { message }) => (
+            None,
+            Some(match message {
+                Some(message) => format!("VRChat refused the invite: {message}"),
+                None => "VRChat refused the invite to the current instance".into(),
+            }),
+        ),
+        InviteHandlingOutcome::Execution(InviteExecutionOutcome::MissingCurrentInstance) => (
+            None,
+            Some("Current VRChat instance is unavailable; invite request was left visible".into()),
+        ),
+        InviteHandlingOutcome::Execution(
+            InviteExecutionOutcome::UnsupportedIncomingInviteAcceptance,
+        ) => (
+            None,
+            Some("Automatic joining for incoming VRChat invites is not implemented".into()),
+        ),
+    }
+}
+
+fn runtime_feedback_report(
+    runtime: &Option<WorkerReport>,
+    last_invite_action: Option<InviteAction>,
+    invite_error: Option<String>,
+) -> Option<WorkerReport> {
+    let WorkerReport::VrchatRuntime {
+        connected,
+        display_name,
+        status,
+        ..
+    } = runtime.as_ref()?
+    else {
+        return None;
+    };
+    if !connected {
+        return None;
+    }
+
+    Some(WorkerReport::VrchatRuntime {
+        connected: true,
+        display_name: display_name.clone(),
+        status: *status,
+        last_invite_action,
+        invite_error,
+    })
 }
 
 fn pipeline_error_message(frame: &str) -> Option<String> {
@@ -272,10 +339,14 @@ fn pipeline_error_message(frame: &str) -> Option<String> {
 
 fn redact_pipeline_secret(message: &str, auth_token: &str) -> String {
     if auth_token.is_empty() {
-        message.to_owned()
-    } else {
-        message.replace(auth_token, "<redacted>")
+        return message.to_owned();
     }
+
+    let mut redacted = message.replace(auth_token, "<redacted>");
+    if let Some((_, encoded)) = pipeline_url(auth_token).split_once("authToken=") {
+        redacted = redacted.replace(encoded, "<redacted>");
+    }
+    redacted
 }
 
 async fn pipeline_loop(
@@ -785,13 +856,39 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
             }
             Some(join_result) = invite_tasks.join_next(), if !invite_tasks.is_empty() => {
                 match join_result {
-                    Ok(Ok(result)) => log_invite_result(result),
+                    Ok(Ok(result)) => {
+                        log_invite_result(&result);
+                        let (last_invite_action, invite_error) = invite_feedback(&result);
+                        if (last_invite_action.is_some() || invite_error.is_some())
+                            && let Some(report) = runtime_feedback_report(
+                                &last_report,
+                                last_invite_action,
+                                invite_error,
+                            )
+                        {
+                            report_if_changed(&mut write_half, &mut last_report, report).await?;
+                        }
+                    }
                     Ok(Err(error)) => {
                         warn!(%error, "VRChat invite automation task failed without taking a fallback action");
+                        if let Some(report) = runtime_feedback_report(
+                            &last_report,
+                            None,
+                            Some(error.to_string()),
+                        ) {
+                            report_if_changed(&mut write_half, &mut last_report, report).await?;
+                        }
                     }
                     Err(error) if error.is_cancelled() => {}
                     Err(error) => {
                         warn!(%error, "VRChat invite automation task stopped unexpectedly");
+                        if let Some(report) = runtime_feedback_report(
+                            &last_report,
+                            None,
+                            Some("VRChat invite automation task stopped unexpectedly".into()),
+                        ) {
+                            report_if_changed(&mut write_half, &mut last_report, report).await?;
+                        }
                     }
                 }
             }
@@ -827,7 +924,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nightshift_protocol::SettingsState;
+    use nightshift_protocol::{InviteRuleSettings, SettingsState};
 
     #[test]
     fn converts_stored_session_to_vrchat_cookie_names() {
@@ -870,12 +967,92 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_server_error_redacts_auth_token() {
+    fn pipeline_server_error_redacts_raw_and_encoded_auth_token() {
+        let message = "raw abc+/= and encoded abc%2B%2F%3D";
         assert_eq!(
-            redact_pipeline_secret("auth token secret-token expired", "secret-token"),
-            "auth token <redacted> expired"
+            redact_pipeline_secret(message, "abc+/="),
+            "raw <redacted> and encoded <redacted>"
         );
         assert_eq!(redact_pipeline_secret("ordinary error", ""), "ordinary error");
+    }
+
+    #[test]
+    fn invite_policy_change_includes_rule_edits_but_not_feedback_updates() {
+        let current = InviteState {
+            enabled: true,
+            ..Default::default()
+        };
+        let mut rules_changed = current.clone();
+        rules_changed.rules = InviteRuleSettings {
+            whitelist: vec!["usr_friend".into()],
+            ..Default::default()
+        };
+        assert!(invite_policy_changed(&current, &rules_changed));
+
+        let mut feedback_only = current.clone();
+        feedback_only.last_error = Some("test".into());
+        assert!(!invite_policy_changed(&current, &feedback_only));
+    }
+
+    #[test]
+    fn invite_feedback_maps_success_and_failure_without_runtime_secrets() {
+        let accepted = InviteHandlingResult {
+            notification_id: "not_1".into(),
+            sender_user_id: "usr_1".into(),
+            sender_username: Some("Friend".into()),
+            outcome: InviteHandlingOutcome::Execution(InviteExecutionOutcome::AcceptedRequest),
+        };
+        assert_eq!(
+            invite_feedback(&accepted),
+            (
+                Some(InviteAction {
+                    kind: InviteActionKind::Accepted,
+                    display_name: Some("Friend".into()),
+                }),
+                None,
+            )
+        );
+
+        let missing_instance = InviteHandlingResult {
+            outcome: InviteHandlingOutcome::Execution(
+                InviteExecutionOutcome::MissingCurrentInstance,
+            ),
+            ..accepted
+        };
+        let (action, error) = invite_feedback(&missing_instance);
+        assert_eq!(action, None);
+        assert!(error.unwrap().contains("instance"));
+    }
+
+    #[test]
+    fn runtime_feedback_uses_current_identity_and_status() {
+        let runtime = Some(WorkerReport::VrchatRuntime {
+            connected: true,
+            display_name: Some("Hydra Employee".into()),
+            status: VrchatStatus::AskMe,
+            last_invite_action: None,
+            invite_error: None,
+        });
+        assert_eq!(
+            runtime_feedback_report(
+                &runtime,
+                Some(InviteAction {
+                    kind: InviteActionKind::Declined,
+                    display_name: Some("Friend".into()),
+                }),
+                None,
+            ),
+            Some(WorkerReport::VrchatRuntime {
+                connected: true,
+                display_name: Some("Hydra Employee".into()),
+                status: VrchatStatus::AskMe,
+                last_invite_action: Some(InviteAction {
+                    kind: InviteActionKind::Declined,
+                    display_name: Some("Friend".into()),
+                }),
+                invite_error: None,
+            })
+        );
     }
 
     #[test]
