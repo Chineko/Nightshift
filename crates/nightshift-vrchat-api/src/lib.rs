@@ -238,7 +238,7 @@ impl VrchatApiClient {
 
     pub async fn verify_two_factor(
         &self,
-        pending: &PendingTwoFactor,
+        pending: PendingTwoFactor,
         code: &str,
     ) -> Result<AuthenticatedSession> {
         let response = self
@@ -271,10 +271,10 @@ impl VrchatApiClient {
         }
 
         let cookies = SessionCookies {
-            auth: captured.auth.unwrap_or_else(|| pending.cookies.auth.clone()),
+            auth: captured.auth.unwrap_or(pending.cookies.auth),
             two_factor_auth: captured
                 .two_factor_auth
-                .or_else(|| pending.cookies.two_factor_auth.clone()),
+                .or(pending.cookies.two_factor_auth),
         };
         if cookies.two_factor_auth.is_none() {
             bail!("VRChat verified two-factor authentication without providing a session cookie");
