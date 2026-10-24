@@ -1,5 +1,3 @@
-use font8x8::{BASIC_FONTS, UnicodeFonts};
-
 use crate::content::PanelContent;
 
 pub const PANEL_BITMAP_WIDTH: u32 = 768;
@@ -25,11 +23,11 @@ impl PanelBitmap {
             rgba: vec![0; PANEL_BITMAP_WIDTH as usize * PANEL_BITMAP_HEIGHT as usize * 4],
         };
         bitmap.fill(BACKGROUND);
-        bitmap.draw_text(36, 28, &content.lines[0], 3, TITLE);
-        bitmap.fill_rect(36, 66, PANEL_BITMAP_WIDTH - 72, 2, DIVIDER);
+        bitmap.draw_text(36, 28, &content.lines[0], 5, TITLE);
+        bitmap.fill_rect(36, 72, PANEL_BITMAP_WIDTH - 72, 2, DIVIDER);
 
         for (index, line) in content.lines.iter().skip(1).enumerate() {
-            bitmap.draw_text(36, 92 + index as u32 * 58, line, 2, TEXT);
+            bitmap.draw_text(36, 100 + index as u32 * 60, line, 3, TEXT);
         }
         bitmap
     }
@@ -52,27 +50,30 @@ impl PanelBitmap {
 
     fn draw_text(&mut self, x: u32, y: u32, text: &str, scale: u32, color: [u8; 4]) {
         let mut cursor_x = x;
-        let advance = 9 * scale;
+        let advance = 6 * scale;
         for character in text.chars() {
-            if cursor_x.saturating_add(8 * scale) > self.width {
+            if cursor_x.saturating_add(5 * scale) > self.width {
                 break;
             }
-            if let Some(glyph) = BASIC_FONTS.get(character) {
-                self.draw_glyph(cursor_x, y, glyph, scale, color);
-            }
+            self.draw_glyph(cursor_x, y, glyph5x7(character), scale, color);
             cursor_x = cursor_x.saturating_add(advance);
         }
     }
 
-    fn draw_glyph(&mut self, x: u32, y: u32, glyph: [u8; 8], scale: u32, color: [u8; 4]) {
+    fn draw_glyph(&mut self, x: u32, y: u32, glyph: [u8; 7], scale: u32, color: [u8; 4]) {
         for (row, bits) in glyph.into_iter().enumerate() {
-            for column in 0..8_u32 {
-                if bits & (1 << column) == 0 {
+            for column in 0..5_u32 {
+                let mask = 1 << (4 - column);
+                if bits & mask == 0 {
                     continue;
                 }
-                let px = x + column * scale;
-                let py = y + row as u32 * scale;
-                self.fill_rect(px, py, scale, scale, color);
+                self.fill_rect(
+                    x + column * scale,
+                    y + row as u32 * scale,
+                    scale,
+                    scale,
+                    color,
+                );
             }
         }
     }
@@ -83,6 +84,56 @@ impl PanelBitmap {
         }
         let offset = ((y * self.width + x) * 4) as usize;
         self.rgba[offset..offset + 4].copy_from_slice(&color);
+    }
+}
+
+fn glyph5x7(character: char) -> [u8; 7] {
+    match character.to_ascii_uppercase() {
+        'A' => [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
+        'C' => [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111],
+        'D' => [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
+        'E' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111],
+        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
+        'G' => [0b01111, 0b10000, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111],
+        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        'I' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111],
+        'J' => [0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100],
+        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
+        'L' => [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
+        'M' => [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001],
+        'N' => [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001],
+        'O' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'P' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
+        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
+        'R' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001],
+        'S' => [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110],
+        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+        'U' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+        'W' => [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b10101, 0b01010],
+        'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
+        'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
+        'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
+        '0' => [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
+        '1' => [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+        '2' => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
+        '3' => [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110],
+        '4' => [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
+        '5' => [0b11111, 0b10000, 0b10000, 0b11110, 0b00001, 0b00001, 0b11110],
+        '6' => [0b01110, 0b10000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
+        '7' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
+        '8' => [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
+        '9' => [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00001, 0b01110],
+        ':' => [0b00000, 0b00100, 0b00100, 0b00000, 0b00100, 0b00100, 0b00000],
+        '%' => [0b11001, 0b11010, 0b00100, 0b01000, 0b10110, 0b10011, 0b00000],
+        '-' => [0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000],
+        '>' => [0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000],
+        '|' => [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+        '(' => [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010],
+        ')' => [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000],
+        ' ' => [0; 7],
+        _ => [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b00000, 0b00100],
     }
 }
 
@@ -114,5 +165,11 @@ mod tests {
         content.lines[5] = "X".repeat(500);
         let bitmap = PanelBitmap::from_content(&content);
         assert_eq!(bitmap.rgba.len(), (PANEL_BITMAP_WIDTH * PANEL_BITMAP_HEIGHT * 4) as usize);
+    }
+
+    #[test]
+    fn lowercase_text_uses_readable_uppercase_glyphs() {
+        assert_eq!(glyph5x7('a'), glyph5x7('A'));
+        assert_ne!(glyph5x7('A'), [0; 7]);
     }
 }
