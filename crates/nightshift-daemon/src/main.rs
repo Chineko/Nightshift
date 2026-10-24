@@ -354,6 +354,7 @@ impl StateStore {
                 | UiCommand::SetVrchatWakeStatus(_)
                 | UiCommand::SetInviteAutomation(_)
                 | UiCommand::SetInviteProfile(_)
+                | UiCommand::SetInviteRules(_)
         );
 
         let mut state = self.state.lock().await;
@@ -424,6 +425,7 @@ impl StateStore {
             UiCommand::SetVrchatWakeStatus(status) => state.settings.wake_vrchat_status = status,
             UiCommand::SetInviteAutomation(enabled) => state.invites.enabled = enabled,
             UiCommand::SetInviteProfile(profile) => state.invites.profile = profile,
+            UiCommand::SetInviteRules(rules) => state.invites.rules = rules,
             UiCommand::ShowOverlay => state.overlay.visible = true,
             UiCommand::HideOverlay => state.overlay.visible = false,
         }
