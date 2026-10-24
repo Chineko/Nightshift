@@ -1,4 +1,4 @@
-use nightshift_protocol::{OverlaySpawnMode, OverlayState};
+use nightshift_protocol::{OverlayPose, OverlaySpawnMode, OverlayState};
 
 use crate::placement::{PanelPose, normalize_quaternion_xyzw, panel_pose_in_front, sanitize_panel_distance};
 
@@ -7,6 +7,7 @@ pub struct SurfaceTarget {
     pub visible: bool,
     pub distance_m: f32,
     pub spawn_mode: OverlaySpawnMode,
+    pub remembered_pose: Option<PanelPose>,
 }
 
 impl From<&OverlayState> for SurfaceTarget {
@@ -15,7 +16,22 @@ impl From<&OverlayState> for SurfaceTarget {
             visible: state.visible,
             distance_m: sanitize_panel_distance(state.spawn_distance_m),
             spawn_mode: state.spawn_mode,
+            remembered_pose: state.remembered_pose.map(panel_pose_from_protocol).and_then(sanitize_pose),
         }
+    }
+}
+
+pub const fn panel_pose_to_protocol(pose: PanelPose) -> OverlayPose {
+    OverlayPose {
+        position: pose.position,
+        orientation_xyzw: pose.orientation_xyzw,
+    }
+}
+
+const fn panel_pose_from_protocol(pose: OverlayPose) -> PanelPose {
+    PanelPose {
+        position: pose.position,
+        orientation_xyzw: pose.orientation_xyzw,
     }
 }
 
@@ -82,10 +98,14 @@ impl SurfaceController {
         }
 
         let pose = match target.spawn_mode {
-            OverlaySpawnMode::RestoreLastPosition => self.saved_pose.and_then(sanitize_pose).or_else(|| {
-                // No old parking spot? Fine. Materialize politely in front of the headset instead.
-                panel_pose_in_front(head_position, head_orientation_xyzw, target.distance_m)
-            }),
+            OverlaySpawnMode::RestoreLastPosition => self
+                .saved_pose
+                .and_then(sanitize_pose)
+                .or(target.remembered_pose.and_then(sanitize_pose))
+                .or_else(|| {
+                    // No old parking spot? Fine. Materialize politely in front of the headset instead.
+                    panel_pose_in_front(head_position, head_orientation_xyzw, target.distance_m)
+                }),
             OverlaySpawnMode::InFront => {
                 panel_pose_in_front(head_position, head_orientation_xyzw, target.distance_m)
             }
