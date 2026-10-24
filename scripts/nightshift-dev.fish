@@ -43,20 +43,19 @@ end
 
 cd $root; or exit 1
 
-set -l debug_packages -p nightshift-daemon -p nightshift-osc
+echo "Building Nightshift core..."
+cargo build -p nightshift-daemon -p nightshift-osc; or exit $status
+cargo build --release -p nightshift-overlay; or exit $status
+
 if test $with_ui -eq 1
-    set -a debug_packages -p nightshift-ui
+    cargo build -p nightshift-ui; or exit $status
 end
 if test $with_hr -eq 1
-    set -a debug_packages -p nightshift-hr-worker
+    cargo build -p nightshift-hr-worker; or exit $status
 end
 if test $with_vrchat -eq 1
-    set -a debug_packages -p nightshift-vrchat-worker
+    cargo build -p nightshift-vrchat-worker; or exit $status
 end
-
-echo "Building Nightshift core..."
-cargo build $debug_packages; or exit $status
-cargo build --release -p nightshift-overlay; or exit $status
 
 set -g nightshift_children
 
