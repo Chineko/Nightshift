@@ -2,7 +2,7 @@ use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use nightshift_protocol::{
-    AppState, ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepPhase, UiCommand,
+    AppState, ClientMessage, OverlaySpawnMode, PROTOCOL_VERSION, ServerMessage, SleepPhase, UiCommand,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -23,7 +23,11 @@ fn usage() -> &'static str {
        wake\n\
        brightness <2-100 percent>\n\
        sleep-brightness <2-100 percent>\n\
-       fade <seconds>"
+       fade <seconds>\n\
+       overlay-distance <0.25-5.0 meters>\n\
+       overlay-mode <in-front|restore-last-position>\n\n\
+       Overlay distance/mode are reserved defaults for the future positioned panel;\n\
+       they do not reposition the current full-screen OpenXR dimmer."
 }
 
 fn parse_percent(value: Option<String>, command: &str) -> Result<f32> {
@@ -46,6 +50,26 @@ fn parse_seconds(value: Option<String>) -> Result<f32> {
         bail!("fade duration must be between 0 and 120 seconds");
     }
     Ok(seconds)
+}
+
+fn parse_overlay_distance(value: Option<String>) -> Result<f32> {
+    let raw = value.ok_or_else(|| anyhow!("overlay-distance requires meters\n\n{}", usage()))?;
+    let meters = raw
+        .parse::<f32>()
+        .with_context(|| format!("invalid overlay distance {raw:?}"))?;
+    if !meters.is_finite() || !(0.25..=5.0).contains(&meters) {
+        bail!("overlay distance must be between 0.25 and 5.0 meters");
+    }
+    Ok(meters)
+}
+
+fn parse_overlay_mode(value: Option<String>) -> Result<OverlaySpawnMode> {
+    let raw = value.ok_or_else(|| anyhow!("overlay-mode requires a mode\n\n{}", usage()))?;
+    match raw.as_str() {
+        "in-front" => Ok(OverlaySpawnMode::InFront),
+        "restore-last-position" => Ok(OverlaySpawnMode::RestoreLastPosition),
+        _ => bail!("overlay mode must be in-front or restore-last-position"),
+    }
 }
 
 async fn write_message(
@@ -123,6 +147,13 @@ fn phase_name(phase: SleepPhase) -> &'static str {
     }
 }
 
+fn overlay_mode_name(mode: OverlaySpawnMode) -> &'static str {
+    match mode {
+        OverlaySpawnMode::InFront => "in-front",
+        OverlaySpawnMode::RestoreLastPosition => "restore-last-position",
+    }
+}
+
 fn print_status(state: &AppState) {
     println!("Nightshift");
     println!("  sleep       : {}", phase_name(state.sleep.phase));
@@ -134,7 +165,7 @@ fn print_status(state: &AppState) {
     println!("  sleep target: {:.0}%", state.brightness.sleep_target * 100.0);
     println!("  fade        : {:.2}s", state.settings.fade_duration_seconds);
     println!(
-        "  overlay     : {}",
+        "  dimmer      : {}",
         if state.overlay.runtime_connected {
             "connected"
         } else {
@@ -142,8 +173,16 @@ fn print_status(state: &AppState) {
         }
     );
     if let Some(version) = state.overlay.runtime_client_version.as_deref() {
-        println!("  overlay ver : {version}");
+        println!("  dimmer ver  : {version}");
     }
+    println!(
+        "  panel dist  : {:.2}m (reserved)",
+        state.overlay.spawn_distance_m
+    );
+    println!(
+        "  panel mode  : {} (reserved)",
+        overlay_mode_name(state.overlay.spawn_mode)
+    );
     println!(
         "  vrchat      : {}",
         if state.vrchat.connected { "connected" } else { "disconnected" }
@@ -185,6 +224,10 @@ async fn main() -> Result<()> {
             "sleep-brightness",
         )?)),
         "fade" => Some(UiCommand::SetFadeDuration(parse_seconds(args.next())?)),
+        "overlay-distance" => Some(UiCommand::SetOverlaySpawnDistance(parse_overlay_distance(
+            args.next(),
+        )?)),
+        "overlay-mode" => Some(UiCommand::SetOverlaySpawnMode(parse_overlay_mode(args.next())?)),
         "help" | "--help" | "-h" => {
             println!("{}", usage());
             return Ok(());
@@ -208,4 +251,31 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_overlay_distance_bounds() {
+        assert_eq!(parse_overlay_distance(Some("0.25".into())).unwrap(), 0.25);
+        assert_eq!(parse_overlay_distance(Some("5.0".into())).unwrap(), 5.0);
+        assert!(parse_overlay_distance(Some("0.24".into())).is_err());
+        assert!(parse_overlay_distance(Some("5.01".into())).is_err());
+        assert!(parse_overlay_distance(Some("NaN".into())).is_err());
+    }
+
+    #[test]
+    fn parses_overlay_modes() {
+        assert_eq!(
+            parse_overlay_mode(Some("in-front".into())).unwrap(),
+            OverlaySpawnMode::InFront
+        );
+        assert_eq!(
+            parse_overlay_mode(Some("restore-last-position".into())).unwrap(),
+            OverlaySpawnMode::RestoreLastPosition
+        );
+        assert!(parse_overlay_mode(Some("dimmer".into())).is_err());
+    }
 }
