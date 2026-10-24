@@ -11,7 +11,7 @@ The workspace is intentionally split into small policy, transport, worker, and U
 - `nightshift-protocol` — shared state, commands, events, capability handshake, and versioned IPC types.
 - `nightshift-daemon` — canonical source of truth, persistence, sleep-state transitions, and event-driven Unix-socket server.
 - `nightshift-ui` — desktop UI client. It keeps IPC off the UI thread and requests repaints only when state changes.
-- `nightshift-overlay-prototype` (`nightshift-overlay`) — OpenXR worker for the full-screen sleep dimmer, HMD pose reporting, and the first world-locked positioned panel surface.
+- `nightshift-overlay-prototype` (`nightshift-overlay`) — OpenXR worker for the full-screen sleep dimmer, HMD pose reporting, and the world-locked positioned status/control panel.
 - `nightshiftctl` — command-line client for inspecting daemon state and exercising supported controls.
 - `nightshift-osc` — OSC/OSCQuery runtime worker that connects VRChat avatar parameters to daemon automation.
 - `nightshift-osc-script` — bounded OSC automation script engine.
@@ -83,7 +83,7 @@ The Home view currently includes:
 - sleep brightness target/status
 - heart-rate, OSC, VRChat status, and invite-rule summaries
 
-The Settings view includes sleep and automation controls, heart-rate provider discovery/selection and HR tuning, and positioned-overlay visibility/placement controls. Controller shortcuts are intentionally deferred until later project polish.
+The Settings view includes sleep and automation controls, heart-rate provider discovery/selection and HR tuning, and positioned-overlay visibility/placement controls. Global controller shortcuts are intentionally deferred until later project polish.
 
 ## Overlay behavior
 
@@ -94,7 +94,9 @@ Nightshift's OpenXR worker owns two separate composition responsibilities inside
 
 `ShowOverlay`/`HideOverlay`, `spawn_distance_m`, and `spawn_mode` control the positioned panel only; they do not disable or reposition the sleep dimmer. `InFront` captures the HMD-centered VIEW pose once on the hidden-to-visible edge and then leaves the panel world-locked. `RestoreLastPosition` prefers the most recent valid pose remembered by the running overlay process, then the validated pose persisted by the daemon, and falls back to `InFront` when neither exists. Valid captured poses are reported only when the remembered pose changes and are normalized before persistence; panel visibility itself is never persisted.
 
-The positioned panel renders live Nightshift status on a fixed-size dark surface. Positioning, lifecycle, compositor ordering, daemon control, and restart-safe remembered placement are now wired. Direct grabbing/repositioning and richer interactive panel controls remain future work.
+The positioned panel renders live Nightshift status on a fixed-size dark surface and now includes four controller-selectable controls: `SLEEP`, `WAKE`, `DARKER`, and `BRIGHT`. Nightshift uses OpenXR aim poses plus the simple-controller select action, ray-tests the world-locked quad, and sends the resulting action through the same daemon command path used by the desktop UI. Misses and the gaps between buttons remain non-actions rather than snapping to a nearby control. Brightness buttons adjust the current canonical brightness in 10-percentage-point steps. If controller-action setup is unavailable on a runtime, the status panel continues rendering while interaction is disabled. Direct grabbing/repositioning remains future work.
+
+For a hardware smoke test, show the panel, aim either controller at each bottom-row button, and press the normal select/trigger action. Confirm `SLEEP` and `WAKE` change canonical sleep state, `DARKER`/`BRIGHT` change brightness, clicks outside the buttons do nothing, and the panel remains world-locked and undimmed while the scene dims. With `--hydra`, successful button activations emit `[Hydra/Input]` diagnostics without logging account/session secrets.
 
 Nightshift uses OpenXR overlay placement 4. Current WayVR uses a higher placement, so WayVR can continue to render above Nightshift when both are running.
 
