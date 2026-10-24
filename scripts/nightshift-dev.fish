@@ -4,6 +4,18 @@ set -l script_dir (dirname (status --current-filename))
 set -l root (realpath "$script_dir/..")
 set -l hydra
 set -l with_ui 0
+set -l with_hr 0
+set -l with_vrchat 0
+
+function nightshift_usage
+    echo "Usage: scripts/nightshift-dev.fish [--hydra] [--ui] [--hr] [--vrchat] [--full]"
+    echo
+    echo "  --hydra    Enable overlay Hydra diagnostics"
+    echo "  --ui       Start the desktop UI"
+    echo "  --hr       Start the BLE heart-rate worker"
+    echo "  --vrchat   Start the VRChat runtime worker"
+    echo "  --full     Start UI, heart-rate, and VRChat workers"
+end
 
 for arg in $argv
     switch $arg
@@ -11,22 +23,40 @@ for arg in $argv
             set hydra --hydra-mode
         case --ui
             set with_ui 1
+        case --hr
+            set with_hr 1
+        case --vrchat
+            set with_vrchat 1
+        case --full --all
+            set with_ui 1
+            set with_hr 1
+            set with_vrchat 1
+        case --help -h
+            nightshift_usage
+            exit 0
         case '*'
             echo "Unknown option: $arg" >&2
-            echo "Usage: scripts/nightshift-dev.fish [--hydra] [--ui]" >&2
+            nightshift_usage >&2
             exit 2
     end
 end
 
 cd $root; or exit 1
 
-echo "Building Nightshift core..."
-cargo build -p nightshift-daemon -p nightshift-osc; or exit $status
-cargo build --release -p nightshift-overlay; or exit $status
-
+set -l debug_packages -p nightshift-daemon -p nightshift-osc
 if test $with_ui -eq 1
-    cargo build -p nightshift-ui; or exit $status
+    set -a debug_packages -p nightshift-ui
 end
+if test $with_hr -eq 1
+    set -a debug_packages -p nightshift-hr-worker
+end
+if test $with_vrchat -eq 1
+    set -a debug_packages -p nightshift-vrchat-worker
+end
+
+echo "Building Nightshift core..."
+cargo build $debug_packages; or exit $status
+cargo build --release -p nightshift-overlay; or exit $status
 
 set -g nightshift_children
 
@@ -59,6 +89,18 @@ echo "Starting Nightshift OSC worker..."
 $root/target/debug/nightshift-osc &
 set -a nightshift_children $last_pid
 
+if test $with_hr -eq 1
+    echo "Starting Nightshift heart-rate worker..."
+    $root/target/debug/nightshift-hr-worker &
+    set -a nightshift_children $last_pid
+end
+
+if test $with_vrchat -eq 1
+    echo "Starting Nightshift VRChat worker..."
+    $root/target/debug/nightshift-vrchat-worker &
+    set -a nightshift_children $last_pid
+end
+
 echo "Starting Nightshift OpenXR overlay..."
 $root/target/release/nightshift-overlay $hydra &
 set -a nightshift_children $last_pid
@@ -71,6 +113,15 @@ end
 
 echo
 echo "Nightshift is running. Ctrl+C stops the whole local stack."
+if test $with_hr -eq 0
+    echo "  heart-rate worker: off (use --hr or --full)"
+end
+if test $with_vrchat -eq 0
+    echo "  VRChat worker: off (use --vrchat or --full)"
+end
+if test $with_ui -eq 0
+    echo "  desktop UI: off (use --ui or --full)"
+end
 echo "WayVR remains a separate process, because one hydra is enough."
 echo
 
