@@ -29,6 +29,12 @@ jobs:
       - name: Verify Cargo lockfile
         run: cargo metadata --locked --no-deps > /dev/null
 
+      - name: Keep Hydra healthy
+        run: |
+          grep -Fq -- '--hydra-mode' crates/nightshift-overlay-prototype/src/main.rs
+          grep -Fq 'Hydra has entered the chat' crates/nightshift-overlay-prototype/src/main.rs
+          grep -Fq '[Hydra/IPC]' crates/nightshift-overlay-prototype/src/main.rs
+
       - name: Report formatting drift
         continue-on-error: true
         run: cargo fmt --all -- --check
