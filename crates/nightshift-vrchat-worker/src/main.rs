@@ -1,6 +1,7 @@
 use std::{
     env,
     path::PathBuf,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -18,6 +19,7 @@ use nightshift_vrchat_status::{
     StatusAutomationConfig, sleeping_phase, target_for_transition,
 };
 use nightshift_vrchat_worker::{
+    instance_context::InstanceSource,
     invite_bridge::{
         InviteHandlingOutcome, InviteHandlingResult, handle_invite_notification,
     },
@@ -527,7 +529,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut interval = tokio::time::interval(REFRESH_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut line = String::new();
-    let mut handshake_complete = false;
+    let mut state_synchronized = false;
 
     let mut sleeping = false;
     let mut vrchat_connected = false;
@@ -546,6 +548,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut active_session: Option<SessionCookies> = None;
     let mut invite_tasks = JoinSet::<Result<InviteHandlingResult>>::new();
     let mut recent_invites = RecentInviteNotifications::default();
+    let instance_source = Arc::new(Mutex::new(InstanceSource::default()));
 
     loop {
         tokio::select! {
@@ -566,33 +569,36 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                                 PROTOCOL_VERSION
                             );
                         }
-                        handshake_complete = true;
                         info!(protocol, "Nightshift VRChat worker connected to daemon");
-                        let RuntimeRefresh {
-                            report,
-                            pipeline_auth_token: next_pipeline_auth_token,
-                            session_cookies: next_session,
-                        } = refresh_runtime(&api, &store).await;
-                        (vrchat_connected, current_status) = report_runtime(&report);
-                        sync_invite_session(
-                            &mut active_session,
-                            next_session,
-                            &mut invite_tasks,
-                            &mut recent_invites,
-                        );
-                        sync_pipeline_task(
-                            &mut pipeline_task,
-                            &mut pipeline_auth_token,
-                            next_pipeline_auth_token,
-                            &pipeline_tx,
-                        );
-                        report_if_changed(&mut write_half, &mut last_report, report).await?;
                     }
                     ServerMessage::FullState { state } => {
                         // Snapshot is synchronization, not a fresh Sleep/Wake edge.
                         sleeping = sleeping_phase(state.sleep.phase);
                         automation = status_config(&state.settings);
                         sync_invite_state(&mut invite_state, state.invites, &mut invite_tasks);
+
+                        if !state_synchronized {
+                            state_synchronized = true;
+                            let RuntimeRefresh {
+                                report,
+                                pipeline_auth_token: next_pipeline_auth_token,
+                                session_cookies: next_session,
+                            } = refresh_runtime(&api, &store).await;
+                            (vrchat_connected, current_status) = report_runtime(&report);
+                            sync_invite_session(
+                                &mut active_session,
+                                next_session,
+                                &mut invite_tasks,
+                                &mut recent_invites,
+                            );
+                            sync_pipeline_task(
+                                &mut pipeline_task,
+                                &mut pipeline_auth_token,
+                                next_pipeline_auth_token,
+                                &pipeline_tx,
+                            );
+                            report_if_changed(&mut write_half, &mut last_report, report).await?;
+                        }
                     }
                     ServerMessage::Event { event } => match event {
                         StateEvent::SettingsChanged(settings) => {
@@ -677,7 +683,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                     }
                 }
             }
-            _ = interval.tick(), if handshake_complete => {
+            _ = interval.tick(), if state_synchronized => {
                 let RuntimeRefresh {
                     report,
                     pipeline_auth_token: next_pipeline_auth_token,
@@ -752,8 +758,16 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 if let Some(cookies) = active_session.clone() {
                     let api = api.clone();
                     let state = invite_state.clone();
+                    let instance_source = instance_source.clone();
                     invite_tasks.spawn(async move {
-                        handle_invite_notification(api, cookies, state, notification).await
+                        handle_invite_notification(
+                            api,
+                            cookies,
+                            state,
+                            instance_source,
+                            notification,
+                        )
+                        .await
                     });
                 } else {
                     warn!(
