@@ -9,8 +9,8 @@ use std::{
 use chrono::{Local, Timelike};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use nightshift_protocol::{
-    AppState, ClientMessage, InviteProfile, PROTOCOL_VERSION, ServerMessage, SleepPhase, StateEvent,
-    UiCommand, VrchatStatus,
+    AppState, ClientMessage, HrProviderStatus, InviteProfile, PROTOCOL_VERSION, ServerMessage,
+    SleepPhase, StateEvent, UiCommand, VrchatStatus,
 };
 use nightshift_ui::{invite_settings_ui::InviteSettingsUi, vrchat_auth_ui::VrchatAuthUi};
 use tokio::{
@@ -187,6 +187,7 @@ struct NightshiftApp {
     vrchat_auth: VrchatAuthUi,
     invite_settings: InviteSettingsUi,
     brightness_send_at: Instant,
+    hr_device_filter_draft: String,
 }
 
 impl NightshiftApp {
@@ -199,6 +200,7 @@ impl NightshiftApp {
             vrchat_auth: VrchatAuthUi::new(ctx),
             invite_settings: InviteSettingsUi::default(),
             brightness_send_at: Instant::now() - Duration::from_secs(1),
+            hr_device_filter_draft: String::new(),
         }
     }
 
@@ -208,12 +210,17 @@ impl NightshiftApp {
         }
     }
 
+    fn set_full_state(&mut self, state: AppState) {
+        self.hr_device_filter_draft = state.heart_rate.device_filter.clone().unwrap_or_default();
+        self.state = state;
+    }
+
     fn drain_updates(&mut self) {
         self.vrchat_auth.drain_updates();
         while let Ok(update) = self.bridge.updates.try_recv() {
             match update {
                 UiUpdate::Connected(connected) => self.daemon_connected = connected,
-                UiUpdate::Message(ServerMessage::FullState { state }) => self.state = state,
+                UiUpdate::Message(ServerMessage::FullState { state }) => self.set_full_state(state),
                 UiUpdate::Message(ServerMessage::Event { event }) => self.apply_event(event),
                 UiUpdate::Message(ServerMessage::Hello { .. }) => {}
                 UiUpdate::Message(ServerMessage::Error { .. }) => {}
@@ -225,7 +232,13 @@ impl NightshiftApp {
         match event {
             StateEvent::SleepChanged(state) => self.state.sleep = state,
             StateEvent::BrightnessChanged(state) => self.state.brightness = state,
-            StateEvent::HeartRateChanged(state) => self.state.heart_rate = state,
+            StateEvent::HeartRateChanged(state) => {
+                let canonical = self.state.heart_rate.device_filter.as_deref().unwrap_or("");
+                if self.hr_device_filter_draft.trim() == canonical {
+                    self.hr_device_filter_draft = state.device_filter.clone().unwrap_or_default();
+                }
+                self.state.heart_rate = state;
+            }
             StateEvent::OscChanged(state) => self.state.osc = state,
             StateEvent::VrchatChanged(state) => self.state.vrchat = state,
             StateEvent::InvitesChanged(state) => self.state.invites = state,
@@ -338,8 +351,14 @@ impl NightshiftApp {
     }
 
     fn glance_cards(&self, ui: &mut egui::Ui) {
+        let heart_rate = self
+            .state
+            .heart_rate
+            .bpm
+            .map(|bpm| format!("{bpm} BPM"))
+            .unwrap_or_else(|| hr_provider_status_name(self.state.heart_rate.provider_status).into());
         ui.columns(2, |columns| {
-            small_card(&mut columns[0], "♥  Heart rate", self.state.heart_rate.bpm.map(|bpm| format!("{bpm} BPM")).as_deref().unwrap_or("— BPM"));
+            small_card(&mut columns[0], "♥  Heart rate", &heart_rate);
             small_card(&mut columns[1], "≋  OSC automation", if self.state.osc.enabled { "Running" } else { "Off" });
         });
         ui.add_space(8.0);
@@ -362,16 +381,90 @@ impl NightshiftApp {
         self.glance_cards(ui);
     }
 
+    fn heart_rate_settings(&mut self, ui: &mut egui::Ui) {
+        let mut monitoring = self.state.heart_rate.enabled;
+        if ui.checkbox(&mut monitoring, "Heart-rate monitoring").changed() {
+            self.send_command(UiCommand::SetHrMonitoring(monitoring));
+        }
+
+        status_row(ui, "Provider", hr_provider_status_name(self.state.heart_rate.provider_status));
+        status_row(
+            ui,
+            "Connected device",
+            self.state.heart_rate.connected_device.as_deref().unwrap_or("—"),
+        );
+        if let Some(error) = self.state.heart_rate.last_error.as_deref() {
+            ui.label(RichText::new(error).color(AMBER).small());
+        }
+
+        ui.add_space(8.0);
+        ui.label("Preferred BLE device");
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.hr_device_filter_draft)
+                    .hint_text("Auto-select, name, address, or provider ID"),
+            );
+            let canonical = self.state.heart_rate.device_filter.as_deref().unwrap_or("");
+            let draft = self.hr_device_filter_draft.trim();
+            let changed = draft != canonical;
+            if ui.add_enabled(changed, egui::Button::new("Apply")).clicked()
+                || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) && changed)
+            {
+                self.send_command(UiCommand::SetHrDeviceFilter(
+                    (!draft.is_empty()).then(|| draft.to_string()),
+                ));
+            }
+            if ui.button("Auto").clicked() {
+                self.hr_device_filter_draft.clear();
+                self.send_command(UiCommand::SetHrDeviceFilter(None));
+            }
+        });
+        ui.label(
+            RichText::new("Use a device name, Bluetooth address, or provider ID. Empty means auto-select the first HR device.")
+                .color(MUTED)
+                .small(),
+        );
+
+        ui.add_space(8.0);
+        let mut threshold = self.state.heart_rate.threshold_bpm;
+        ui.label("Sleep threshold");
+        if ui
+            .add(egui::Slider::new(&mut threshold, 20..=240).suffix(" BPM"))
+            .changed()
+        {
+            self.send_command(UiCommand::SetHrThreshold(threshold));
+        }
+
+        let mut calm = self.state.heart_rate.calm_period_seconds;
+        ui.label("Calm period below threshold");
+        if ui
+            .add(egui::Slider::new(&mut calm, 10..=3_600).suffix(" s"))
+            .changed()
+        {
+            self.send_command(UiCommand::SetHrCalmPeriod(calm));
+        }
+
+        let mut cooldown = self.state.heart_rate.cooldown_seconds;
+        ui.label("Manual-wake cooldown");
+        if ui
+            .add(egui::Slider::new(&mut cooldown, 0..=24 * 60 * 60).suffix(" s"))
+            .changed()
+        {
+            self.send_command(UiCommand::SetHrCooldown(cooldown));
+        }
+        ui.label(
+            RichText::new("Changing HR tuning resets calm/retrigger progress but preserves the manual-wake safety cooldown.")
+                .color(MUTED)
+                .small(),
+        );
+    }
+
     fn settings(&mut self, ui: &mut egui::Ui) {
         ui.heading("Settings");
         ui.label(RichText::new("Changes are sent to the daemon immediately and only changed state is broadcast back.").color(MUTED));
         ui.add_space(16.0);
 
         setting_card(ui, "Sleep", |ui| {
-            let mut hr = self.state.heart_rate.enabled;
-            if ui.checkbox(&mut hr, "Heart-rate monitoring").changed() {
-                self.send_command(UiCommand::SetHrMonitoring(hr));
-            }
             let mut detection = self.state.sleep.detection_enabled;
             if ui.checkbox(&mut detection, "Sleep detection").changed() {
                 self.send_command(UiCommand::SetSleepDetection(detection));
@@ -393,6 +486,9 @@ impl NightshiftApp {
                 self.send_command(UiCommand::SetFadeDuration(fade));
             }
         });
+
+        ui.add_space(12.0);
+        setting_card(ui, "Heart rate", |ui| self.heart_rate_settings(ui));
 
         ui.add_space(12.0);
         setting_card(ui, "VRChat", |ui| {
@@ -542,6 +638,16 @@ fn vrchat_status_picker(
         });
     });
     before != *status
+}
+
+fn hr_provider_status_name(status: HrProviderStatus) -> &'static str {
+    match status {
+        HrProviderStatus::Disabled => "Disabled",
+        HrProviderStatus::Searching => "Searching",
+        HrProviderStatus::Connected => "Connected",
+        HrProviderStatus::Error => "Error",
+        HrProviderStatus::Unknown => "Unknown",
+    }
 }
 
 fn invite_profile_name(profile: InviteProfile) -> &'static str {
