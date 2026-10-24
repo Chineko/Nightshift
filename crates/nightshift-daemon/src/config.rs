@@ -12,6 +12,10 @@ pub struct PersistedConfig {
     pub sleep_brightness: f32,
     pub fade_duration_seconds: f32,
     pub hr_monitoring: bool,
+    pub hr_device_filter: Option<String>,
+    pub hr_threshold_bpm: u16,
+    pub hr_calm_period_seconds: u64,
+    pub hr_cooldown_seconds: u64,
     pub sleep_detection: bool,
     pub osc_automation: bool,
     pub gogo_automation: bool,
@@ -37,6 +41,10 @@ impl PersistedConfig {
             sleep_brightness: state.brightness.sleep_target,
             fade_duration_seconds: state.settings.fade_duration_seconds,
             hr_monitoring: state.heart_rate.enabled,
+            hr_device_filter: state.heart_rate.device_filter.clone(),
+            hr_threshold_bpm: state.heart_rate.threshold_bpm,
+            hr_calm_period_seconds: state.heart_rate.calm_period_seconds,
+            hr_cooldown_seconds: state.heart_rate.cooldown_seconds,
             sleep_detection: state.sleep.detection_enabled,
             osc_automation: state.osc.enabled,
             gogo_automation: state.settings.gogo_automation_enabled,
@@ -55,6 +63,15 @@ impl PersistedConfig {
         state.brightness.sleep_target = self.sleep_brightness.clamp(0.02, 1.0);
         state.settings.fade_duration_seconds = self.fade_duration_seconds.clamp(0.0, 120.0);
         state.heart_rate.enabled = self.hr_monitoring;
+        state.heart_rate.device_filter = self
+            .hr_device_filter
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        state.heart_rate.threshold_bpm = self.hr_threshold_bpm.clamp(20, 240);
+        state.heart_rate.calm_period_seconds = self.hr_calm_period_seconds.clamp(10, 3_600);
+        state.heart_rate.cooldown_seconds = self.hr_cooldown_seconds.min(24 * 60 * 60);
         state.sleep.detection_enabled = self.sleep_detection;
         state.osc.enabled = self.osc_automation;
         state.settings.gogo_automation_enabled = self.gogo_automation;
