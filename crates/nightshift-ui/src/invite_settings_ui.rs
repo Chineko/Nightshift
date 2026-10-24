@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Color32, RichText};
 use nightshift_protocol::{InviteActionKind, InviteProfile, InviteRuleSettings, InviteState, UiCommand};
+
+const ERROR_RED: Color32 = Color32::from_rgb(235, 112, 112);
 
 pub struct InviteSettingsUi {
     draft_rules: InviteRuleSettings,
@@ -88,6 +90,7 @@ impl InviteSettingsUi {
             }
         }
 
+        render_feedback(ui, state);
         commands
     }
 
@@ -178,6 +181,36 @@ impl InviteSettingsUi {
     }
 }
 
+fn render_feedback(ui: &mut egui::Ui, state: &InviteState) {
+    if state.last_action.is_none() && state.last_error.is_none() {
+        return;
+    }
+
+    ui.add_space(10.0);
+    ui.separator();
+    ui.add_space(6.0);
+
+    if let Some(action) = &state.last_action {
+        let who = action.display_name.as_deref().unwrap_or("Unknown user");
+        ui.label(
+            RichText::new(format!(
+                "Last action: {} — {who}",
+                action_name(action.kind)
+            ))
+            .weak()
+            .small(),
+        );
+    }
+
+    if let Some(error) = &state.last_error {
+        ui.label(
+            RichText::new(format!("Last failure: {error}"))
+                .color(ERROR_RED)
+                .small(),
+        );
+    }
+}
+
 fn parse_whitelist(value: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
@@ -203,6 +236,15 @@ fn profile_name(profile: InviteProfile) -> &'static str {
     }
 }
 
+fn action_name(action: InviteActionKind) -> &'static str {
+    match action {
+        InviteActionKind::Accepted => "Accepted",
+        InviteActionKind::Declined => "Declined",
+        InviteActionKind::Ignored => "Ignored",
+        InviteActionKind::Asked => "Asked",
+    }
+}
+
 fn fallback_name(action: InviteActionKind) -> &'static str {
     match action {
         InviteActionKind::Accepted => "Accept",
@@ -222,5 +264,13 @@ mod tests {
             parse_whitelist(" usr_one\nusr_two, usr_one\n\nusr_three "),
             vec!["usr_one", "usr_two", "usr_three"]
         );
+    }
+
+    #[test]
+    fn feedback_action_names_are_user_facing() {
+        assert_eq!(action_name(InviteActionKind::Accepted), "Accepted");
+        assert_eq!(action_name(InviteActionKind::Declined), "Declined");
+        assert_eq!(action_name(InviteActionKind::Ignored), "Ignored");
+        assert_eq!(action_name(InviteActionKind::Asked), "Asked");
     }
 }
