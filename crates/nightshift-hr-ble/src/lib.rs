@@ -39,8 +39,10 @@ impl BleDeviceInfo {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BleHeartRateEvent {
+    Searching,
     Connected(BleDeviceInfo),
     Measurement(u16),
+    Error(String),
     Disconnected,
 }
 

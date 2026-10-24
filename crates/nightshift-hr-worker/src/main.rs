@@ -1,9 +1,9 @@
 use std::{env, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
-use nightshift_hr_ble::{BleHeartRateEvent, discover_device, first_adapter, run_device};
+use nightshift_hr_ble::{BleDeviceInfo, BleHeartRateEvent, discover_device, first_adapter, run_device};
 use nightshift_protocol::{
-    ClientMessage, PROTOCOL_VERSION, ServerMessage, StateEvent, WorkerReport,
+    ClientMessage, HrProviderStatus, PROTOCOL_VERSION, ServerMessage, StateEvent, WorkerReport,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -65,6 +65,14 @@ fn effective_device_filter(
     normalize_device_filter(configured).or_else(|| legacy_fallback.clone())
 }
 
+fn device_label(device: &BleDeviceInfo) -> String {
+    device
+        .name
+        .clone()
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| device.address.clone())
+}
+
 async fn write_client_message(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
     message: &ClientMessage,
@@ -92,12 +100,35 @@ async fn report_runtime(
     .await
 }
 
+async fn report_provider(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    status: HrProviderStatus,
+    connected_device: Option<String>,
+    last_error: Option<String>,
+) -> Result<()> {
+    write_client_message(
+        writer,
+        &ClientMessage::Report {
+            report: WorkerReport::HeartRateProviderRuntime {
+                status,
+                connected_device,
+                last_error,
+            },
+        },
+    )
+    .await
+}
+
 fn spawn_ble_provider(
     events: mpsc::Sender<BleHeartRateEvent>,
     device_filter: Option<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
+            if events.send(BleHeartRateEvent::Searching).await.is_err() {
+                return;
+            }
+
             let result = async {
                 let adapter = first_adapter().await?;
                 let peripheral = discover_device(&adapter, device_filter.as_deref()).await?;
@@ -107,7 +138,13 @@ fn spawn_ble_provider(
 
             if let Err(error) = result {
                 warn!(%error, "BLE heart-rate provider failed; retrying");
-                let _ = events.send(BleHeartRateEvent::Disconnected).await;
+                if events
+                    .send(BleHeartRateEvent::Error(error.to_string()))
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
             }
 
             tokio::time::sleep(BLE_RETRY_DELAY).await;
@@ -162,6 +199,7 @@ async fn apply_provider_config(
         provider.stop();
         discard_queued_events(event_rx);
         report_runtime(write_half, false, None).await?;
+        report_provider(write_half, HrProviderStatus::Searching, None, None).await?;
         info!("BLE heart-rate device selection changed; restarting provider");
     }
 
@@ -173,6 +211,7 @@ async fn apply_provider_config(
     if !*enabled && (report_disabled_state || was_enabled) {
         discard_queued_events(event_rx);
         report_runtime(write_half, false, None).await?;
+        report_provider(write_half, HrProviderStatus::Disabled, None, None).await?;
     }
 
     Ok(())
@@ -267,19 +306,42 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 };
 
                 match event {
+                    BleHeartRateEvent::Searching => {
+                        report_runtime(&mut write_half, false, None).await?;
+                        report_provider(&mut write_half, HrProviderStatus::Searching, None, None).await?;
+                    }
                     BleHeartRateEvent::Connected(device) => {
+                        let label = device_label(&device);
                         info!(
                             name = device.name.as_deref().unwrap_or("<unnamed>"),
                             address = %device.address,
                             "BLE heart-rate device connected"
                         );
+                        report_provider(
+                            &mut write_half,
+                            HrProviderStatus::Connected,
+                            Some(label),
+                            None,
+                        )
+                        .await?;
                         report_runtime(&mut write_half, true, None).await?;
                     }
                     BleHeartRateEvent::Measurement(bpm) => {
                         report_runtime(&mut write_half, true, Some(bpm)).await?;
                     }
+                    BleHeartRateEvent::Error(error) => {
+                        report_runtime(&mut write_half, false, None).await?;
+                        report_provider(
+                            &mut write_half,
+                            HrProviderStatus::Error,
+                            None,
+                            Some(error),
+                        )
+                        .await?;
+                    }
                     BleHeartRateEvent::Disconnected => {
                         report_runtime(&mut write_half, false, None).await?;
+                        report_provider(&mut write_half, HrProviderStatus::Searching, None, None).await?;
                     }
                 }
             }
@@ -374,5 +436,22 @@ mod tests {
             effective_device_filter(Some("   ".into()), &legacy).as_deref(),
             Some("AA:BB:CC")
         );
+    }
+
+    #[test]
+    fn device_label_prefers_name_and_falls_back_to_address() {
+        let named = BleDeviceInfo {
+            id: "named".into(),
+            address: "AA:BB".into(),
+            name: Some("Polar H10".into()),
+        };
+        assert_eq!(device_label(&named), "Polar H10");
+
+        let unnamed = BleDeviceInfo {
+            id: "unnamed".into(),
+            address: "CC:DD".into(),
+            name: None,
+        };
+        assert_eq!(device_label(&unnamed), "CC:DD");
     }
 }
