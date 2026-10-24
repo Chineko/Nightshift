@@ -9,7 +9,7 @@ default-run = "nightshift-ui"
 [dependencies]
 anyhow.workspace = true
 chrono = "0.4"
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+eframe = { version = "0.37", default-features = false, features = ["clipboard", "default_fonts", "glow", "wayland", "x11"] }
 nightshift-protocol = { path = "../nightshift-protocol" }
 nightshift-vrchat-auth = { path = "../nightshift-vrchat-auth" }
 serde_json.workspace = true
