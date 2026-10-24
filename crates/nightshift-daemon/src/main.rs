@@ -20,14 +20,15 @@ use nightshift_protocol::{
     StateEvent, UiCommand, VrchatStatus, WorkerReport,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
-    sync::{Mutex, broadcast, watch},
+    sync::{Mutex, broadcast, mpsc, watch},
 };
 use tracing::{info, warn};
 
 const CONFIG_WRITE_DEBOUNCE: Duration = Duration::from_millis(250);
 const MAX_HR_DISCOVERED_DEVICES: usize = 32;
+const MAX_IPC_LINE_BYTES: usize = 64 * 1024;
 
 fn detector_config_from_state(state: &AppState) -> CalmPeriodConfig {
     CalmPeriodConfig {
@@ -708,6 +709,43 @@ async fn send_message(
     Ok(())
 }
 
+async fn read_ipc_line<R>(reader: &mut R, buffer: &mut Vec<u8>) -> Result<Option<String>>
+where
+    R: AsyncRead + Unpin,
+{
+    loop {
+        if let Some(newline) = buffer.iter().position(|byte| *byte == b'\n') {
+            if newline > MAX_IPC_LINE_BYTES {
+                bail!("IPC message exceeds {MAX_IPC_LINE_BYTES} byte limit");
+            }
+            let mut bytes: Vec<u8> = buffer.drain(..=newline).collect();
+            bytes.pop();
+            if bytes.last() == Some(&b'\r') {
+                bytes.pop();
+            }
+            let line = String::from_utf8(bytes).context("IPC message is not valid UTF-8")?;
+            return Ok(Some(line));
+        }
+
+        if buffer.len() > MAX_IPC_LINE_BYTES {
+            bail!("IPC message exceeds {MAX_IPC_LINE_BYTES} byte limit");
+        }
+
+        let read = reader.read_buf(buffer).await?;
+        if read == 0 {
+            if buffer.is_empty() {
+                return Ok(None);
+            }
+            if buffer.len() > MAX_IPC_LINE_BYTES {
+                bail!("IPC message exceeds {MAX_IPC_LINE_BYTES} byte limit");
+            }
+            let bytes = std::mem::take(buffer);
+            let line = String::from_utf8(bytes).context("IPC message is not valid UTF-8")?;
+            return Ok(Some(line));
+        }
+    }
+}
+
 enum ClientStep {
     Continue,
     Resync,
@@ -715,15 +753,14 @@ enum ClientStep {
 }
 
 async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
-    let (read_half, mut write_half) = stream.into_split();
-    let mut reader = BufReader::new(read_half);
-    let mut line = String::new();
+    let (mut read_half, mut write_half) = stream.into_split();
+    let mut read_buffer = Vec::with_capacity(4096);
 
-    if reader.read_line(&mut line).await? == 0 {
+    let Some(line) = read_ipc_line(&mut read_half, &mut read_buffer).await? else {
         return Ok(());
-    }
+    };
 
-    let hello: ClientMessage = serde_json::from_str(line.trim_end())?;
+    let hello: ClientMessage = serde_json::from_str(&line)?;
     let ClientMessage::Hello {
         protocol,
         client,
@@ -819,43 +856,66 @@ async fn handle_client(stream: UnixStream, store: StateStore) -> Result<()> {
     )
     .await?;
 
+    let (line_tx, mut line_rx) = mpsc::channel::<std::result::Result<String, String>>(16);
+    tokio::spawn(async move {
+        let mut buffer = read_buffer;
+        loop {
+            match read_ipc_line(&mut read_half, &mut buffer).await {
+                Ok(Some(line)) => {
+                    if line_tx.send(Ok(line)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    let _ = line_tx.send(Err(error.to_string())).await;
+                    break;
+                }
+            }
+        }
+    });
+
     loop {
-        line.clear();
         let step = tokio::select! {
-            read = reader.read_line(&mut line) => {
-                if read? == 0 {
-                    ClientStep::Break
-                } else {
-                    match serde_json::from_str::<ClientMessage>(line.trim_end()) {
-                        Ok(ClientMessage::GetState) => ClientStep::Resync,
-                        Ok(ClientMessage::Command { command }) => {
-                            store.apply(command).await;
-                            ClientStep::Continue
-                        }
-                        Ok(ClientMessage::Report { report }) => {
-                            if !store.apply_worker_report(&client, report).await {
+            read = line_rx.recv() => {
+                match read {
+                    None => ClientStep::Break,
+                    Some(Err(error)) => {
+                        warn!(%error, client = %client, "rejecting Nightshift IPC client input");
+                        ClientStep::Break
+                    }
+                    Some(Ok(line)) => {
+                        match serde_json::from_str::<ClientMessage>(&line) {
+                            Ok(ClientMessage::GetState) => ClientStep::Resync,
+                            Ok(ClientMessage::Command { command }) => {
+                                store.apply(command).await;
+                                ClientStep::Continue
+                            }
+                            Ok(ClientMessage::Report { report }) => {
+                                if !store.apply_worker_report(&client, report).await {
+                                    send_message(
+                                        &mut write_half,
+                                        &ServerMessage::Error {
+                                            message: "client is not authorized for this worker report".into(),
+                                        },
+                                    ).await?;
+                                }
+                                ClientStep::Continue
+                            }
+                            Ok(ClientMessage::Hello { .. }) => {
                                 send_message(
                                     &mut write_half,
-                                    &ServerMessage::Error {
-                                        message: "client is not authorized for this worker report".into(),
-                                    },
+                                    &ServerMessage::Error { message: "hello already completed".into() },
                                 ).await?;
+                                ClientStep::Continue
                             }
-                            ClientStep::Continue
-                        }
-                        Ok(ClientMessage::Hello { .. }) => {
-                            send_message(
-                                &mut write_half,
-                                &ServerMessage::Error { message: "hello already completed".into() },
-                            ).await?;
-                            ClientStep::Continue
-                        }
-                        Err(error) => {
-                            send_message(
-                                &mut write_half,
-                                &ServerMessage::Error { message: error.to_string() },
-                            ).await?;
-                            ClientStep::Continue
+                            Err(error) => {
+                                send_message(
+                                    &mut write_half,
+                                    &ServerMessage::Error { message: error.to_string() },
+                                ).await?;
+                                ClientStep::Continue
+                            }
                         }
                     }
                 }
@@ -898,6 +958,9 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| "nightshift_daemon=info".into()),
         )
         .init();
+
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("installing SIGTERM handler")?;
 
     let path = socket_path()?;
     let parent = path.parent().context("socket path has no parent")?;
@@ -943,34 +1006,86 @@ async fn main() -> Result<()> {
     }
     let store = StateStore::new(initial_state);
 
-    loop {
-        tokio::select! {
-            accept = listener.accept() => {
-                let (stream, _) = accept?;
-                let store = store.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = handle_client(stream, store).await {
-                        warn!(%error, "Nightshift IPC client disconnected with an error");
+    let run_result: Result<()> = async {
+        loop {
+            tokio::select! {
+                accept = listener.accept() => {
+                    let (stream, _) = accept?;
+                    let store = store.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = handle_client(stream, store).await {
+                            warn!(%error, "Nightshift IPC client disconnected with an error");
+                        }
+                    });
+                }
+                result = tokio::signal::ctrl_c() => {
+                    result.context("waiting for Ctrl-C")?;
+                    info!(signal = "SIGINT", "shutting down");
+                    break;
+                }
+                signal = terminate.recv() => {
+                    if signal.is_none() {
+                        bail!("SIGTERM signal stream closed");
                     }
-                });
-            }
-            _ = tokio::signal::ctrl_c() => {
-                info!("shutting down");
-                break;
+                    info!(signal = "SIGTERM", "shutting down");
+                    break;
+                }
             }
         }
+        Ok(())
     }
+    .await;
 
     if let Err(error) = store.flush_config().await {
         warn!(%error, "failed to flush Nightshift settings during shutdown");
     }
-    let _ = tokio::fs::remove_file(&path);
-    Ok(())
+    if let Err(error) = tokio::fs::remove_file(&path).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        warn!(%error, path = %path.display(), "failed to remove Nightshift IPC socket during shutdown");
+    }
+
+    run_result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ipc_line_reader_preserves_multiple_frames() {
+        let (mut writer, mut reader) = tokio::io::duplex(128);
+        let write_task = tokio::spawn(async move {
+            writer.write_all(b"first\nsecond\r\n").await.unwrap();
+        });
+        let mut buffer = Vec::new();
+
+        assert_eq!(
+            read_ipc_line(&mut reader, &mut buffer).await.unwrap().as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            read_ipc_line(&mut reader, &mut buffer).await.unwrap().as_deref(),
+            Some("second")
+        );
+        write_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ipc_line_reader_rejects_oversized_frames() {
+        let (mut writer, mut reader) = tokio::io::duplex(MAX_IPC_LINE_BYTES + 2);
+        let write_task = tokio::spawn(async move {
+            writer
+                .write_all(&vec![b'x'; MAX_IPC_LINE_BYTES + 1])
+                .await
+                .unwrap();
+        });
+        let mut buffer = Vec::new();
+
+        let error = read_ipc_line(&mut reader, &mut buffer).await.unwrap_err();
+        assert!(error.to_string().contains("exceeds"));
+        write_task.await.unwrap();
+    }
 
     #[tokio::test]
     async fn repeated_same_transition_is_idempotent() {
