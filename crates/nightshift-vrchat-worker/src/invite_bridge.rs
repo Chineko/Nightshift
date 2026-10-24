@@ -38,12 +38,46 @@ pub fn invite_rules_from_state(state: &InviteState) -> InviteRules {
     }
 }
 
-fn relationship_context_needed(rules: &InviteRules) -> bool {
+fn relationship_needs(rules: &InviteRules) -> (bool, bool) {
     match rules.profile {
-        InviteProfile::Disabled | InviteProfile::Whitelist => false,
-        InviteProfile::Friends | InviteProfile::Favorites => true,
-        InviteProfile::Custom => rules.custom_accept_friends || rules.custom_accept_favorites,
+        InviteProfile::Disabled | InviteProfile::Whitelist => (false, false),
+        InviteProfile::Friends => (true, false),
+        InviteProfile::Favorites => (false, true),
+        InviteProfile::Custom => (
+            rules.custom_accept_friends,
+            rules.custom_accept_favorites,
+        ),
     }
+}
+
+async fn resolve_relationship_context(
+    api: &VrchatApiClient,
+    cookies: &SessionCookies,
+    user_id: &str,
+    rules: &InviteRules,
+) -> Result<(bool, bool)> {
+    let (need_friend, need_favorite) = relationship_needs(rules);
+    let is_favorite = if need_favorite {
+        api.invite_sender_is_favorite(cookies, user_id)
+            .await
+            .context("checking whether VRChat invite sender is a favorite friend")?
+    } else {
+        false
+    };
+
+    // Favorite friends are necessarily friends, so a positive favorite lookup also satisfies the
+    // friend fact without a second HTTP request when Custom enables both sources.
+    let is_friend = if is_favorite {
+        true
+    } else if need_friend {
+        api.invite_sender_is_friend(cookies, user_id)
+            .await
+            .context("checking whether VRChat invite sender is a friend")?
+    } else {
+        false
+    };
+
+    Ok((is_friend, is_favorite))
 }
 
 pub async fn handle_invite_notification(
@@ -67,13 +101,13 @@ pub async fn handle_invite_notification(
         )));
     }
 
-    let (is_friend, is_favorite) = if relationship_context_needed(&rules) {
-        api.invite_sender_relationship(&cookies, &notification.sender_user_id)
-            .await
-            .context("resolving VRChat invite sender relationship")?
-    } else {
-        (false, false)
-    };
+    let (is_friend, is_favorite) = resolve_relationship_context(
+        &api,
+        &cookies,
+        &notification.sender_user_id,
+        &rules,
+    )
+    .await?;
 
     let decision = rules.decide(&InviteContext {
         user_id: notification.sender_user_id.clone(),
@@ -117,20 +151,24 @@ mod tests {
         let rules = invite_rules_from_state(&InviteState::default());
         assert!(!rules.enabled);
         assert_eq!(rules.profile, InviteProfile::Disabled);
+        assert_eq!(relationship_needs(&rules), (false, false));
     }
 
     #[test]
-    fn friends_and_favorites_are_supported_without_extra_user_config() {
-        for profile in [InviteProfile::Friends, InviteProfile::Favorites] {
-            let state = InviteState {
-                enabled: true,
-                profile,
-                ..Default::default()
-            };
-            let rules = invite_rules_from_state(&state);
-            assert!(rules.enabled);
-            assert_eq!(rules.profile, profile);
-        }
+    fn simple_profiles_request_only_the_fact_they_use() {
+        let friends = invite_rules_from_state(&InviteState {
+            enabled: true,
+            profile: InviteProfile::Friends,
+            ..Default::default()
+        });
+        let favorites = invite_rules_from_state(&InviteState {
+            enabled: true,
+            profile: InviteProfile::Favorites,
+            ..Default::default()
+        });
+
+        assert_eq!(relationship_needs(&friends), (true, false));
+        assert_eq!(relationship_needs(&favorites), (false, true));
     }
 
     #[test]
@@ -146,11 +184,11 @@ mod tests {
         };
         let rules = invite_rules_from_state(&state);
         assert!(rules.whitelist.contains("usr_allowed"));
-        assert!(!relationship_context_needed(&rules));
+        assert_eq!(relationship_needs(&rules), (false, false));
     }
 
     #[test]
-    fn custom_settings_map_to_pure_rules() {
+    fn custom_settings_map_to_pure_rules_and_lookup_needs() {
         let state = InviteState {
             enabled: true,
             profile: InviteProfile::Custom,
@@ -168,7 +206,7 @@ mod tests {
         assert!(rules.custom_accept_favorites);
         assert!(!rules.custom_accept_whitelist);
         assert_eq!(rules.custom_fallback, InviteActionKind::Declined);
-        assert!(relationship_context_needed(&rules));
+        assert_eq!(relationship_needs(&rules), (false, true));
     }
 
     #[test]
@@ -184,6 +222,9 @@ mod tests {
             },
             last_action: None,
         };
-        assert!(!relationship_context_needed(&invite_rules_from_state(&state)));
+        assert_eq!(
+            relationship_needs(&invite_rules_from_state(&state)),
+            (false, false)
+        );
     }
 }
