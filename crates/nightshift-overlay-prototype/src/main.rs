@@ -1189,7 +1189,7 @@ fn run_overlay(
                             .end(
                                 frame_state.predicted_display_time,
                                 blend_mode,
-                                &[&layer, &laser_layers[0], &laser_layers[1], &panel_layer],
+                                &[&layer, &panel_layer, &laser_layers[0], &laser_layers[1]],
                             )
                             .context("submitting dimmer, laser, and positioned panel layers")?;
                     } else {
