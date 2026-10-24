@@ -20,6 +20,7 @@ impl From<&OverlayState> for SurfaceTarget {
 }
 
 fn sanitize_pose(pose: PanelPose) -> Option<PanelPose> {
+    // Reality occasionally hands us NaNs. Hydra does not get to keep those as souvenirs.
     if !pose.position.iter().all(|component| component.is_finite()) {
         return None;
     }
@@ -49,6 +50,7 @@ impl SurfaceController {
         let Some(pose) = sanitize_pose(pose) else {
             return false;
         };
+        // Put the shiny thing somewhere safe before a compositor gremlin eats it.
         self.saved_pose = Some(pose);
         if self.visible {
             self.active_pose = Some(pose);
@@ -64,6 +66,7 @@ impl SurfaceController {
     ) -> Option<PanelPose> {
         if !target.visible {
             if self.visible {
+                // Hide the panel, not the memory of where we parked it.
                 self.saved_pose = self.active_pose.and_then(sanitize_pose).or(self.saved_pose);
             }
             self.visible = false;
@@ -73,12 +76,14 @@ impl SurfaceController {
 
         // Placement is captured only on the hidden -> visible edge. This keeps the panel
         // world-locked instead of accidentally turning an "in front" spawn into a head-locked HUD.
+        // The panel is furniture, not a face-hugger.
         if self.visible {
             return self.active_pose;
         }
 
         let pose = match target.spawn_mode {
             OverlaySpawnMode::RestoreLastPosition => self.saved_pose.and_then(sanitize_pose).or_else(|| {
+                // No old parking spot? Fine. Materialize politely in front of the headset instead.
                 panel_pose_in_front(head_position, head_orientation_xyzw, target.distance_m)
             }),
             OverlaySpawnMode::InFront => {
