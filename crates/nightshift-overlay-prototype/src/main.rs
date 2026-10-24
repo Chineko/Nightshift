@@ -14,7 +14,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use ash::vk::{self, Handle};
 use nightshift_pose::{PoseTracker, SleepingPose as DetectedPose};
 use nightshift_protocol::{
-    AppState, ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepingPose, StateEvent, WorkerReport,
+    AppState, BrightnessState, ClientMessage, PROTOCOL_VERSION, ServerMessage, SleepingPose,
+    StateEvent, WorkerReport,
 };
 use openxr as xr;
 use xr::OverlaySessionCreateFlagsEXTX;
@@ -25,12 +26,44 @@ const VIEW_COUNT: u32 = 2;
 const DIMMER_TEXTURE_SIZE: u32 = 4;
 const DEFAULT_PLACEMENT: u32 = 4;
 const DEFAULT_TRANSITION_SECONDS: f32 = 3.0;
+const MAX_TRANSITION_SECONDS: f32 = 120.0;
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct OverlayTarget {
     brightness: f32,
     transition_seconds: f32,
+}
+
+fn sanitize_brightness(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.02, 1.0)
+    } else {
+        1.0
+    }
+}
+
+fn sanitize_transition_seconds(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, MAX_TRANSITION_SECONDS)
+    } else {
+        0.0
+    }
+}
+
+fn overlay_target(brightness: f32, transition_seconds: f32) -> OverlayTarget {
+    OverlayTarget {
+        brightness: sanitize_brightness(brightness),
+        transition_seconds: sanitize_transition_seconds(transition_seconds),
+    }
+}
+
+fn brightness_target(brightness: &BrightnessState, fade_seconds: f32) -> OverlayTarget {
+    if brightness.transitioning {
+        overlay_target(brightness.target, fade_seconds)
+    } else {
+        overlay_target(brightness.current, 0.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -44,10 +77,10 @@ struct Fade {
 impl Fade {
     fn new(start: f32, target: f32, duration_seconds: f32) -> Self {
         Self {
-            start,
-            target,
+            start: sanitize_brightness(start),
+            target: sanitize_brightness(target),
             started: Instant::now(),
-            duration_seconds: duration_seconds.max(0.0),
+            duration_seconds: sanitize_transition_seconds(duration_seconds),
         }
     }
 
@@ -259,7 +292,7 @@ fn run_ipc_connection(
                 }
             }
             ServerMessage::FullState { state } => {
-                fade_seconds = state.settings.fade_duration_seconds;
+                fade_seconds = sanitize_transition_seconds(state.settings.fade_duration_seconds);
                 send_state_target(updates, &state, fade_seconds)?;
                 if hydra_mode {
                     println!(
@@ -271,34 +304,22 @@ fn run_ipc_connection(
             }
             ServerMessage::Event { event } => match event {
                 StateEvent::BrightnessChanged(brightness) => {
-                    let target = if brightness.transitioning {
-                        brightness.target
-                    } else {
-                        brightness.current
-                    };
-                    let transition_seconds = if brightness.transitioning {
-                        fade_seconds
-                    } else {
-                        0.0
-                    };
+                    let target = brightness_target(&brightness, fade_seconds);
                     updates
-                        .send(OverlayTarget {
-                            brightness: target.clamp(0.02, 1.0),
-                            transition_seconds,
-                        })
+                        .send(target)
                         .map_err(|_| anyhow!("overlay renderer stopped"))?;
 
                     if hydra_mode {
                         println!(
                             "[Hydra/IPC] brightness target={:.2}% transition={:.2}s daemon_transitioning={}",
-                            target * 100.0,
-                            transition_seconds,
+                            target.brightness * 100.0,
+                            target.transition_seconds,
                             brightness.transitioning
                         );
                     }
                 }
                 StateEvent::SettingsChanged(settings) => {
-                    fade_seconds = settings.fade_duration_seconds;
+                    fade_seconds = sanitize_transition_seconds(settings.fade_duration_seconds);
                     if hydra_mode {
                         println!("[Hydra/IPC] fade default={fade_seconds:.2}s");
                     }
@@ -317,22 +338,8 @@ fn send_state_target(
     state: &AppState,
     fade_seconds: f32,
 ) -> Result<()> {
-    let target = if state.brightness.transitioning {
-        state.brightness.target
-    } else {
-        state.brightness.current
-    };
-    let transition_seconds = if state.brightness.transitioning {
-        fade_seconds
-    } else {
-        0.0
-    };
-
     updates
-        .send(OverlayTarget {
-            brightness: target.clamp(0.02, 1.0),
-            transition_seconds,
-        })
+        .send(brightness_target(&state.brightness, fade_seconds))
         .map_err(|_| anyhow!("overlay renderer stopped"))
 }
 
@@ -626,21 +633,26 @@ fn run_overlay(
                 continue;
             }
 
+            let mut latest_update = None;
             while let Ok(update) = updates.try_recv() {
+                latest_update = Some(update);
+            }
+            if let Some(update) = latest_update {
                 if let Some(active_fade) = fade {
                     let (sampled, _, _) = active_fade.sample();
                     current_brightness = sampled;
                 }
 
-                let target = update.brightness.clamp(0.02, 1.0);
-                if update.transition_seconds <= f32::EPSILON {
+                let target = sanitize_brightness(update.brightness);
+                let transition_seconds = sanitize_transition_seconds(update.transition_seconds);
+                if transition_seconds <= f32::EPSILON {
                     current_brightness = target;
                     fade = None;
                 } else {
                     fade = Some(Fade::new(
                         current_brightness,
                         target,
-                        update.transition_seconds,
+                        transition_seconds,
                     ));
                 }
             }
@@ -893,5 +905,64 @@ unsafe fn create_overlay_session(
         Ok(out)
     } else {
         Err(anyhow!("xrCreateSession failed: {result:?}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brightness_targets_follow_transition_state() {
+        let transitioning = BrightnessState {
+            current: 0.9,
+            target: 0.1,
+            sleep_target: 0.06,
+            transitioning: true,
+            manual_override: false,
+        };
+        assert_eq!(
+            brightness_target(&transitioning, 4.0),
+            OverlayTarget {
+                brightness: 0.1,
+                transition_seconds: 4.0,
+            }
+        );
+
+        let settled = BrightnessState {
+            current: 0.65,
+            target: 0.1,
+            sleep_target: 0.06,
+            transitioning: false,
+            manual_override: true,
+        };
+        assert_eq!(
+            brightness_target(&settled, 4.0),
+            OverlayTarget {
+                brightness: 0.65,
+                transition_seconds: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn overlay_targets_reject_non_finite_values_and_bound_ranges() {
+        assert_eq!(sanitize_brightness(f32::NAN), 1.0);
+        assert_eq!(sanitize_brightness(f32::INFINITY), 1.0);
+        assert_eq!(sanitize_brightness(-5.0), 0.02);
+        assert_eq!(sanitize_brightness(8.0), 1.0);
+
+        assert_eq!(sanitize_transition_seconds(f32::NAN), 0.0);
+        assert_eq!(sanitize_transition_seconds(f32::INFINITY), 0.0);
+        assert_eq!(sanitize_transition_seconds(-1.0), 0.0);
+        assert_eq!(sanitize_transition_seconds(999.0), MAX_TRANSITION_SECONDS);
+    }
+
+    #[test]
+    fn fade_constructor_sanitizes_inputs() {
+        let fade = Fade::new(f32::NAN, f32::NEG_INFINITY, f32::INFINITY);
+        assert_eq!(fade.start, 1.0);
+        assert_eq!(fade.target, 1.0);
+        assert_eq!(fade.duration_seconds, 0.0);
     }
 }
