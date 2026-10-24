@@ -1,6 +1,6 @@
 use nightshift_protocol::{
-    AppState, InviteActionKind, InviteRuleSettings, InviteState, OscState, OverlaySpawnMode,
-    OverlayState, SettingsState, SleepState, SleepingPose, VrchatStatus,
+    AppState, HeartRateState, HrProviderStatus, InviteActionKind, InviteRuleSettings, InviteState,
+    OscState, OverlaySpawnMode, OverlayState, SettingsState, SleepState, SleepingPose, VrchatStatus,
 };
 
 #[test]
@@ -80,6 +80,28 @@ fn old_sleep_state_defaults_pose_to_unknown() {
     let state: SleepState = serde_json::from_str(old_json).expect("old sleep state must decode");
 
     assert_eq!(state.pose, SleepingPose::Unknown);
+}
+
+#[test]
+fn old_heart_rate_state_defaults_new_settings_and_health() {
+    let old_json = r#"{
+        "enabled": true,
+        "connected": false,
+        "bpm": null,
+        "status": "unknown"
+    }"#;
+
+    let state: HeartRateState =
+        serde_json::from_str(old_json).expect("old heart-rate state must decode");
+
+    assert!(state.enabled);
+    assert_eq!(state.device_filter, None);
+    assert_eq!(state.connected_device, None);
+    assert_eq!(state.provider_status, HrProviderStatus::Unknown);
+    assert_eq!(state.last_error, None);
+    assert_eq!(state.threshold_bpm, 60);
+    assert_eq!(state.calm_period_seconds, 120);
+    assert_eq!(state.cooldown_seconds, 15 * 60);
 }
 
 #[test]
@@ -165,6 +187,13 @@ fn old_full_app_state_decodes_with_additive_defaults() {
     let state: AppState = serde_json::from_str(old_json).expect("old full app state must decode");
 
     assert_eq!(state.sleep.pose, SleepingPose::Unknown);
+    assert_eq!(state.heart_rate.device_filter, None);
+    assert_eq!(state.heart_rate.connected_device, None);
+    assert_eq!(state.heart_rate.provider_status, HrProviderStatus::Unknown);
+    assert_eq!(state.heart_rate.last_error, None);
+    assert_eq!(state.heart_rate.threshold_bpm, 60);
+    assert_eq!(state.heart_rate.calm_period_seconds, 120);
+    assert_eq!(state.heart_rate.cooldown_seconds, 15 * 60);
     assert_eq!(state.osc.avatar_id, None);
     assert_eq!(state.osc.avatar_parameter_count, 0);
     assert!(!state.osc.gogo_detected);
