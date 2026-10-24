@@ -1,7 +1,7 @@
 use nightshift_protocol::{
     AppState, HeartRateState, HrProviderStatus, InviteActionKind, InviteRuleSettings, InviteState,
-    OscState, OverlaySpawnMode, OverlayState, SettingsState, SleepState, SleepingPose, UiCommand,
-    VrchatStatus,
+    OscState, OverlayPose, OverlaySpawnMode, OverlayState, SettingsState, SleepState, SleepingPose,
+    UiCommand, VrchatStatus, WorkerReport,
 };
 
 #[test]
@@ -19,6 +19,21 @@ fn overlay_setting_commands_round_trip_on_the_wire() {
 }
 
 #[test]
+fn overlay_runtime_pose_report_round_trips_on_the_wire() {
+    let report = WorkerReport::OverlayRuntimePose {
+        pose: OverlayPose {
+            position: [1.0, 2.0, -3.0],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        },
+    };
+
+    let json = serde_json::to_string(&report).expect("serialize overlay pose report");
+    let decoded: WorkerReport =
+        serde_json::from_str(&json).expect("deserialize overlay pose report");
+    assert_eq!(decoded, report);
+}
+
+#[test]
 fn old_overlay_state_defaults_runtime_health() {
     let old_json = r#"{
         "visible": false,
@@ -31,6 +46,7 @@ fn old_overlay_state_defaults_runtime_health() {
     assert!(!state.visible);
     assert_eq!(state.spawn_distance_m, 1.0);
     assert_eq!(state.spawn_mode, OverlaySpawnMode::InFront);
+    assert_eq!(state.remembered_pose, None);
     assert!(!state.runtime_connected);
     assert_eq!(state.runtime_client_version, None);
 }
@@ -215,6 +231,7 @@ fn old_full_app_state_decodes_with_additive_defaults() {
     assert!(!state.osc.gogo_detected);
     assert!(state.invites.rules.whitelist.is_empty());
     assert_eq!(state.invites.rules.fallback, InviteActionKind::Ignored);
+    assert_eq!(state.overlay.remembered_pose, None);
     assert!(!state.overlay.runtime_connected);
     assert_eq!(state.overlay.runtime_client_version, None);
     assert!(!state.settings.vrchat_status_automation_enabled);
