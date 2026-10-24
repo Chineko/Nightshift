@@ -60,6 +60,7 @@ struct ButtonRegion {
 }
 
 // Keep interaction regions aligned with the vertical dashboards in raster.rs.
+// The panel is furniture, not a face-hugger: misses stay misses instead of snapping.
 const NAV_HOME: ButtonRegion = region(PanelAction::NavigateHome, 500.0, 594.0, 38.0, 86.0);
 const NAV_SETTINGS: ButtonRegion = region(PanelAction::NavigateSettings, 602.0, 720.0, 38.0, 86.0);
 const BRIGHTNESS_DOWN: ButtonRegion =
