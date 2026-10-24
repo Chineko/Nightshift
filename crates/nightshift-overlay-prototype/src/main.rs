@@ -35,8 +35,8 @@ use xr::sys::Handle as XrHandle;
 use content::PanelContent;
 use controller_input::{ControllerHand, ControllerInput, select_active_pointer_hand};
 use interaction::{
-    PanelAction, PanelGrab, action_at_uv, begin_panel_grab, hit_test_panel_with_distance,
-    update_panel_grab,
+    PanelAction, PanelGrab, action_at_uv_for_sleep_state, begin_panel_grab,
+    hit_test_panel_with_distance, update_panel_grab,
 };
 use laser::{LaserRenderer, LaserSegment, PointerSmoother, smoothing_alpha};
 use panel::{PANEL_HEIGHT_M, PANEL_WIDTH_M, PanelRenderer};
@@ -988,7 +988,10 @@ fn run_overlay(
                                                 ray,
                                                 distance_m: hit.distance_m,
                                             });
-                                            hovered_action = action_at_uv(hit.uv);
+                                            hovered_action = action_at_uv_for_sleep_state(
+                                                hit.uv,
+                                                panel_content.sleep_action_is_wake(),
+                                            );
 
                                             if sample.trigger_just_pressed {
                                                 if let Some(action) = hovered_action {

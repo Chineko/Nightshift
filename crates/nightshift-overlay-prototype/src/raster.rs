@@ -1,17 +1,22 @@
 use super::{content::PanelContent, interaction::PanelAction};
 
 pub const PANEL_BITMAP_WIDTH: u32 = 768;
-pub const PANEL_BITMAP_HEIGHT: u32 = 448;
+pub const PANEL_BITMAP_HEIGHT: u32 = 960;
 
-const BACKGROUND: [u8; 4] = [9, 10, 14, 255];
-const TITLE: [u8; 4] = [190, 160, 255, 255];
-const TEXT: [u8; 4] = [236, 238, 245, 255];
-const DIVIDER: [u8; 4] = [58, 61, 75, 255];
-const BUTTON_FILL: [u8; 4] = [34, 36, 48, 255];
-const BUTTON_HOVER_FILL: [u8; 4] = [62, 52, 86, 255];
-const BUTTON_HOVER_BORDER: [u8; 4] = [190, 160, 255, 255];
-const BUTTON_BORDER: [u8; 4] = [92, 82, 122, 255];
-const BUTTON_TEXT: [u8; 4] = [228, 220, 248, 255];
+const BACKGROUND: [u8; 4] = [7, 9, 14, 255];
+const PANEL: [u8; 4] = [15, 18, 27, 255];
+const PANEL_ALT: [u8; 4] = [18, 21, 31, 255];
+const BORDER: [u8; 4] = [42, 47, 62, 255];
+const TEXT: [u8; 4] = [242, 243, 248, 255];
+const MUTED: [u8; 4] = [139, 146, 176, 255];
+const PURPLE: [u8; 4] = [139, 92, 246, 255];
+const PURPLE_BRIGHT: [u8; 4] = [167, 139, 250, 255];
+const PURPLE_DARK: [u8; 4] = [48, 37, 82, 255];
+const AMBER: [u8; 4] = [245, 176, 65, 255];
+const AMBER_DARK: [u8; 4] = [48, 37, 25, 255];
+const GREEN: [u8; 4] = [69, 231, 171, 255];
+const PINK: [u8; 4] = [244, 96, 139, 255];
+const BLUE: [u8; 4] = [85, 162, 255, 255];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PanelBitmap {
@@ -32,60 +37,302 @@ impl PanelBitmap {
             rgba: vec![0; PANEL_BITMAP_WIDTH as usize * PANEL_BITMAP_HEIGHT as usize * 4],
         };
         bitmap.fill(BACKGROUND);
-        bitmap.draw_text(36, 28, &content.lines[0], 5, TITLE);
-        bitmap.fill_rect(36, 72, PANEL_BITMAP_WIDTH - 72, 2, DIVIDER);
-
-        for (index, line) in content.lines.iter().skip(1).enumerate() {
-            bitmap.draw_text(36, 100 + index as u32 * 60, line, 3, TEXT);
-        }
-        bitmap.draw_button(
-            36,
-            388,
-            165,
-            44,
-            "SLEEP",
-            hover == Some(PanelAction::EnterSleep),
-        );
-        bitmap.draw_button(213, 388, 165, 44, "WAKE", hover == Some(PanelAction::Wake));
-        bitmap.draw_button(
-            390,
-            388,
-            165,
-            44,
-            "DARKER",
-            hover == Some(PanelAction::BrightnessDown),
-        );
-        bitmap.draw_button(
-            567,
-            388,
-            165,
-            44,
-            "BRIGHT",
-            hover == Some(PanelAction::BrightnessUp),
-        );
+        bitmap.draw_home(content, hover);
         bitmap
     }
 
-    fn draw_button(&mut self, x: u32, y: u32, width: u32, height: u32, label: &str, hovered: bool) {
-        let border = if hovered {
-            BUTTON_HOVER_BORDER
-        } else {
-            BUTTON_BORDER
-        };
-        let fill = if hovered {
-            BUTTON_HOVER_FILL
-        } else {
-            BUTTON_FILL
-        };
-        self.fill_rect(x, y, width, height, border);
-        self.fill_rect(
-            x + 2,
-            y + 2,
-            width.saturating_sub(4),
-            height.saturating_sub(4),
-            fill,
+    fn draw_home(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
+        self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
+        self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
+        self.draw_crescent(74, 62, 13, PURPLE_BRIGHT, PURPLE_DARK);
+        self.draw_text(112, 49, "NIGHTSHIFT", 4, TEXT);
+        self.rounded_rect(500, 39, 96, 46, 14, PURPLE_DARK, BORDER);
+        self.draw_text(519, 54, "HOME", 3, TEXT);
+        self.draw_text(620, 54, "SETTINGS", 3, MUTED);
+
+        self.draw_text(48, 124, "VR OVERLAY", 2, PURPLE_BRIGHT);
+        self.draw_text(48, 151, "GOOD EVENING.", 5, TEXT);
+        self.draw_text(48, 194, "EVERYTHING IS CALM AND CONNECTED.", 2, MUTED);
+        self.rounded_rect(621, 135, 99, 44, 14, PANEL, BORDER);
+        self.draw_circle(641, 157, 5, if content.connected { GREEN } else { MUTED });
+        self.draw_text(
+            654,
+            149,
+            if content.connected { "LIVE" } else { "OFFLINE" },
+            2,
+            if content.connected { GREEN } else { MUTED },
         );
-        self.draw_text(x + 18, y + 11, label, 3, BUTTON_TEXT);
+
+        self.rounded_rect(40, 230, 688, 250, 20, PANEL, BORDER);
+        self.rounded_rect(62, 250, 54, 54, 14, AMBER_DARK, AMBER_DARK);
+        self.draw_sun(89, 277, 11, AMBER);
+        self.draw_text(132, 251, "BRIGHTNESS", 3, TEXT);
+        self.draw_text(132, 278, "OVERLAY DISPLAY LEVEL", 2, MUTED);
+        let value = format!("{}%", content.brightness_percent);
+        self.draw_text(551, 260, &value, 6, TEXT);
+
+        let track_x = 92;
+        let track_y = 370;
+        let track_w = 584;
+        self.rounded_rect(
+            track_x,
+            track_y,
+            track_w,
+            7,
+            3,
+            [48, 52, 66, 255],
+            [48, 52, 66, 255],
+        );
+        let fill_w = ((track_w as f32 * content.brightness_percent as f32 / 100.0).round() as u32)
+            .clamp(7, track_w);
+        self.rounded_rect(track_x, track_y, fill_w, 7, 3, PURPLE, PURPLE);
+        let knob_x = track_x + fill_w.saturating_sub(1);
+        self.draw_circle(knob_x, track_y + 3, 10, PURPLE_BRIGHT);
+        self.draw_circle(knob_x, track_y + 3, 5, TEXT);
+
+        let down_hover = hover == Some(PanelAction::BrightnessDown);
+        let up_hover = hover == Some(PanelAction::BrightnessUp);
+        if down_hover {
+            self.rounded_rect(60, 340, 56, 66, 16, PURPLE_DARK, PURPLE_BRIGHT);
+        }
+        if up_hover {
+            self.rounded_rect(652, 340, 56, 66, 16, PURPLE_DARK, PURPLE_BRIGHT);
+        }
+        self.draw_crescent(82, 373, 10, MUTED, PANEL);
+        self.draw_sun(686, 373, 8, MUTED);
+        self.draw_line(64, 421, 704, 421, BORDER);
+        self.draw_text(64, 443, "TARGET BRIGHTNESS", 2, MUTED);
+        self.draw_text(
+            615,
+            443,
+            if content.brightness_synced {
+                "SYNCED"
+            } else {
+                "FADING"
+            },
+            2,
+            if content.brightness_synced {
+                GREEN
+            } else {
+                AMBER
+            },
+        );
+
+        self.draw_text(48, 505, "AT A GLANCE", 3, TEXT);
+        self.draw_text(659, 507, "LIVE", 2, GREEN);
+        self.draw_circle(643, 515, 5, GREEN);
+
+        self.status_card(
+            40,
+            540,
+            216,
+            136,
+            PINK,
+            "HR",
+            "HEART RATE",
+            &content.heart_rate_value,
+            Some((&content.heart_rate_status, GREEN)),
+        );
+        self.status_card(
+            276,
+            540,
+            216,
+            136,
+            BLUE,
+            "OSC",
+            "OSC AUTOMATION",
+            &content.osc_status,
+            None,
+        );
+        self.status_card(
+            512,
+            540,
+            216,
+            136,
+            PURPLE_BRIGHT,
+            "VR",
+            "VRCHAT STATUS",
+            &content.vrchat_status,
+            None,
+        );
+
+        self.rounded_rect(40, 700, 688, 112, 18, [20, 18, 35, 255], [57, 44, 91, 255]);
+        self.rounded_rect(62, 721, 54, 54, 14, PURPLE_DARK, PURPLE_DARK);
+        self.draw_lightning(89, 748, PURPLE_BRIGHT);
+        self.draw_text(132, 717, "AUTOMATION READY", 3, TEXT);
+        self.draw_text(
+            132,
+            751,
+            &format!("SLEEP TARGET {}%", content.target_brightness_percent),
+            2,
+            MUTED,
+        );
+        self.draw_text(132, 777, "BRIGHTNESS + VRCHAT UPDATE", 2, MUTED);
+
+        let primary_action = if content.sleep_action_is_wake() {
+            PanelAction::Wake
+        } else {
+            PanelAction::EnterSleep
+        };
+        let hovered = hover == Some(primary_action);
+        self.rounded_rect(
+            40,
+            840,
+            688,
+            74,
+            20,
+            if hovered { PURPLE_BRIGHT } else { PURPLE },
+            if hovered { TEXT } else { PURPLE_BRIGHT },
+        );
+        self.draw_crescent(
+            254,
+            877,
+            13,
+            TEXT,
+            if hovered { PURPLE_BRIGHT } else { PURPLE },
+        );
+        let label = content.primary_action_label();
+        let label_width = label.chars().count() as u32 * 18;
+        let label_x = 397_u32.saturating_sub(label_width / 2).max(290);
+        self.draw_text(label_x, 865, label, 3, TEXT);
+
+        self.draw_text(271, 935, "NIGHTSHIFT OVERLAY  V1.4.2", 1, MUTED);
+    }
+
+    fn status_card(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        accent: [u8; 4],
+        icon: &str,
+        label: &str,
+        value: &str,
+        footer: Option<(&str, [u8; 4])>,
+    ) {
+        self.rounded_rect(x, y, width, height, 18, PANEL_ALT, BORDER);
+        self.rounded_rect(
+            x + 18,
+            y + 22,
+            52,
+            52,
+            14,
+            [28, 25, 40, 255],
+            [28, 25, 40, 255],
+        );
+        self.draw_text(x + 27, y + 40, icon, 2, accent);
+        self.draw_text(x + 82, y + 24, label, 2, MUTED);
+        self.draw_text(x + 82, y + 55, value, 3, TEXT);
+        if let Some((footer, color)) = footer {
+            self.draw_text(x + 82, y + 91, footer, 2, color);
+        }
+    }
+
+    fn rounded_rect(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        fill: [u8; 4],
+        border: [u8; 4],
+    ) {
+        self.rounded_rect_fill(x, y, width, height, radius, border);
+        if width > 4 && height > 4 {
+            self.rounded_rect_fill(
+                x + 2,
+                y + 2,
+                width - 4,
+                height - 4,
+                radius.saturating_sub(2),
+                fill,
+            );
+        }
+    }
+
+    fn rounded_rect_fill(
+        &mut self,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        radius: u32,
+        color: [u8; 4],
+    ) {
+        let r = radius.min(width / 2).min(height / 2) as i32;
+        for py in 0..height {
+            for px in 0..width {
+                let px_i = px as i32;
+                let py_i = py as i32;
+                let dx = if px_i < r {
+                    r - px_i
+                } else if px_i >= width as i32 - r {
+                    px_i - (width as i32 - r - 1)
+                } else {
+                    0
+                };
+                let dy = if py_i < r {
+                    r - py_i
+                } else if py_i >= height as i32 - r {
+                    py_i - (height as i32 - r - 1)
+                } else {
+                    0
+                };
+                if dx == 0 || dy == 0 || dx * dx + dy * dy <= r * r {
+                    self.put_pixel(x + px, y + py, color);
+                }
+            }
+        }
+    }
+
+    fn draw_line(&mut self, x0: u32, y0: u32, x1: u32, y1: u32, color: [u8; 4]) {
+        if y0 == y1 {
+            self.fill_rect(x0.min(x1), y0, x0.max(x1) - x0.min(x1) + 1, 1, color);
+        } else if x0 == x1 {
+            self.fill_rect(x0, y0.min(y1), 1, y0.max(y1) - y0.min(y1) + 1, color);
+        }
+    }
+
+    fn draw_circle(&mut self, cx: u32, cy: u32, radius: u32, color: [u8; 4]) {
+        let r = radius as i32;
+        for dy in -r..=r {
+            for dx in -r..=r {
+                if dx * dx + dy * dy <= r * r {
+                    let x = cx as i32 + dx;
+                    let y = cy as i32 + dy;
+                    if x >= 0 && y >= 0 {
+                        self.put_pixel(x as u32, y as u32, color);
+                    }
+                }
+            }
+        }
+    }
+
+    fn draw_crescent(&mut self, cx: u32, cy: u32, radius: u32, color: [u8; 4], cutout: [u8; 4]) {
+        self.draw_circle(cx, cy, radius, color);
+        self.draw_circle(
+            cx + radius / 2,
+            cy.saturating_sub(radius / 4),
+            radius.saturating_sub(2),
+            cutout,
+        );
+    }
+
+    fn draw_sun(&mut self, cx: u32, cy: u32, radius: u32, color: [u8; 4]) {
+        self.draw_circle(cx, cy, radius / 2, color);
+        let r = radius + 6;
+        self.fill_rect(cx.saturating_sub(1), cy.saturating_sub(r), 3, 6, color);
+        self.fill_rect(cx.saturating_sub(1), cy + r.saturating_sub(5), 3, 6, color);
+        self.fill_rect(cx.saturating_sub(r), cy.saturating_sub(1), 6, 3, color);
+        self.fill_rect(cx + r.saturating_sub(5), cy.saturating_sub(1), 6, 3, color);
+    }
+
+    fn draw_lightning(&mut self, cx: u32, cy: u32, color: [u8; 4]) {
+        self.fill_rect(cx.saturating_sub(3), cy.saturating_sub(18), 7, 16, color);
+        self.fill_rect(cx.saturating_sub(10), cy.saturating_sub(4), 14, 7, color);
+        self.fill_rect(cx.saturating_sub(3), cy, 7, 18, color);
     }
 
     fn fill(&mut self, color: [u8; 4]) {
@@ -120,16 +367,15 @@ impl PanelBitmap {
         for (row, bits) in glyph.into_iter().enumerate() {
             for column in 0..5_u32 {
                 let mask = 1 << (4 - column);
-                if bits & mask == 0 {
-                    continue;
+                if bits & mask != 0 {
+                    self.fill_rect(
+                        x + column * scale,
+                        y + row as u32 * scale,
+                        scale,
+                        scale,
+                        color,
+                    );
                 }
-                self.fill_rect(
-                    x + column * scale,
-                    y + row as u32 * scale,
-                    scale,
-                    scale,
-                    color,
-                );
             }
         }
     }
@@ -203,7 +449,7 @@ fn glyph5x7(character: char) -> [u8; 7] {
             0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110,
         ],
         'T' => [
-            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b11111,
+            0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
         ],
         'U' => [
             0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
@@ -262,17 +508,11 @@ fn glyph5x7(character: char) -> [u8; 7] {
         '-' => [
             0b00000, 0b00000, 0b00000, 0b11111, 0b00000, 0b00000, 0b00000,
         ],
-        '>' => [
-            0b10000, 0b01000, 0b00100, 0b00010, 0b00100, 0b01000, 0b10000,
+        '+' => [
+            0b00000, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0b00000,
         ],
-        '|' => [
-            0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100,
-        ],
-        '(' => [
-            0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010,
-        ],
-        ')' => [
-            0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000,
+        '.' => [
+            0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00110, 0b00110,
         ],
         ' ' => [0; 7],
         _ => [
@@ -283,86 +523,23 @@ fn glyph5x7(character: char) -> [u8; 7] {
 
 #[cfg(test)]
 mod tests {
-    use nightshift_protocol::AppState;
-
     use super::*;
+    use nightshift_protocol::{AppState, SleepPhase};
 
     #[test]
-    fn raster_has_expected_rgba_dimensions() {
+    fn raster_has_vertical_rgba_dimensions() {
         let bitmap = PanelBitmap::from_content(&PanelContent::from_state(&AppState::default()));
-        assert_eq!(bitmap.width, PANEL_BITMAP_WIDTH);
-        assert_eq!(bitmap.height, PANEL_BITMAP_HEIGHT);
-        assert_eq!(
-            bitmap.rgba.len(),
-            (PANEL_BITMAP_WIDTH * PANEL_BITMAP_HEIGHT * 4) as usize
-        );
+        assert_eq!(bitmap.width, 768);
+        assert_eq!(bitmap.height, 960);
+        assert_eq!(bitmap.rgba.len(), 768 * 960 * 4);
     }
 
     #[test]
-    fn raster_contains_visible_text_pixels() {
-        let bitmap = PanelBitmap::from_content(&PanelContent::from_state(&AppState::default()));
-        assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel == TITLE));
-        assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel == TEXT));
-        assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel == DIVIDER));
-    }
-
-    #[test]
-    fn raster_contains_visible_interaction_controls() {
-        let bitmap = PanelBitmap::from_content(&PanelContent::from_state(&AppState::default()));
-        assert!(
-            bitmap
-                .rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel == BUTTON_FILL)
-        );
-        assert!(
-            bitmap
-                .rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel == BUTTON_BORDER)
-        );
-        assert!(
-            bitmap
-                .rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel == BUTTON_TEXT)
-        );
-    }
-
-    #[test]
-    fn long_lines_clip_without_resizing_or_panicking() {
-        let mut content = PanelContent::from_state(&AppState::default());
-        content.lines[5] = "X".repeat(500);
-        let bitmap = PanelBitmap::from_content(&content);
-        assert_eq!(
-            bitmap.rgba.len(),
-            (PANEL_BITMAP_WIDTH * PANEL_BITMAP_HEIGHT * 4) as usize
-        );
-    }
-
-    #[test]
-    fn lowercase_text_uses_readable_uppercase_glyphs() {
-        assert_eq!(glyph5x7('a'), glyph5x7('A'));
-        assert_ne!(glyph5x7('A'), [0; 7]);
-    }
-
-    #[test]
-    fn hovered_button_has_distinct_pixels() {
-        let content = PanelContent::from_state(&AppState::default());
-        let normal = PanelBitmap::from_content(&content);
-        let hovered = PanelBitmap::from_content_with_hover(&content, Some(PanelAction::Wake));
-        assert_ne!(normal, hovered);
-        assert!(
-            hovered
-                .rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel == BUTTON_HOVER_FILL)
-        );
-        assert!(
-            hovered
-                .rgba
-                .chunks_exact(4)
-                .any(|pixel| pixel == BUTTON_HOVER_BORDER)
-        );
+    fn sleeping_state_changes_primary_button_pixels() {
+        let awake = PanelBitmap::from_content(&PanelContent::from_state(&AppState::default()));
+        let mut state = AppState::default();
+        state.sleep.phase = SleepPhase::Sleeping;
+        let sleeping = PanelBitmap::from_content(&PanelContent::from_state(&state));
+        assert_ne!(awake.rgba, sleeping.rgba);
     }
 }

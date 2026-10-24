@@ -4,8 +4,8 @@ mod interaction;
 mod placement;
 
 use interaction::{
-    PanelAction, PanelRay, PanelUv, action_at_uv, begin_panel_grab, hit_test_panel,
-    hit_test_panel_with_distance, update_panel_grab,
+    PanelAction, PanelRay, PanelUv, action_at_uv, action_at_uv_for_sleep_state, begin_panel_grab,
+    hit_test_panel, hit_test_panel_with_distance, update_panel_grab,
 };
 use placement::PanelPose;
 
@@ -100,17 +100,26 @@ fn invalid_geometry_fails_closed() {
 }
 
 #[test]
-fn button_regions_map_to_expected_actions_and_gaps_are_dead() {
-    let cases = [
-        (PanelUv { u: 0.15, v: 0.91 }, PanelAction::EnterSleep),
-        (PanelUv { u: 0.38, v: 0.91 }, PanelAction::Wake),
-        (PanelUv { u: 0.62, v: 0.91 }, PanelAction::BrightnessDown),
-        (PanelUv { u: 0.85, v: 0.91 }, PanelAction::BrightnessUp),
-    ];
-    for (uv, action) in cases {
-        assert_eq!(action_at_uv(uv), Some(action));
-    }
-    assert_eq!(action_at_uv(PanelUv { u: 0.27, v: 0.91 }), None);
+fn dashboard_regions_map_to_brightness_and_stateful_primary_action() {
+    assert_eq!(
+        action_at_uv(PanelUv { u: 0.11, v: 0.39 }),
+        Some(PanelAction::BrightnessDown)
+    );
+    assert_eq!(
+        action_at_uv(PanelUv { u: 0.89, v: 0.39 }),
+        Some(PanelAction::BrightnessUp)
+    );
+
+    let primary = PanelUv { u: 0.5, v: 0.91 };
+    assert_eq!(
+        action_at_uv_for_sleep_state(primary, false),
+        Some(PanelAction::EnterSleep)
+    );
+    assert_eq!(
+        action_at_uv_for_sleep_state(primary, true),
+        Some(PanelAction::Wake)
+    );
+
     assert_eq!(action_at_uv(PanelUv { u: 0.5, v: 0.5 }), None);
 }
 

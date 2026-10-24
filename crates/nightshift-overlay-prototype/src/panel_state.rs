@@ -71,20 +71,23 @@ mod tests {
     }
 
     #[test]
-    fn invisible_state_change_does_not_request_redraw() {
+    fn connection_state_change_redraws_visible_status() {
         let mut tracker = PanelStateTracker::default();
-        assert!(tracker
-            .apply_event(&StateEvent::ConnectionChanged(ConnectionState::Degraded))
-            .is_none());
+        let changed =
+            tracker.apply_event(&StateEvent::ConnectionChanged(ConnectionState::Degraded));
+        assert!(changed.is_some());
+        assert!(!changed.unwrap().connected);
     }
 
     #[test]
     fn equivalent_visible_content_is_deduplicated() {
         let mut tracker = PanelStateTracker::default();
         let brightness = BrightnessState::default();
-        assert!(tracker
-            .apply_event(&StateEvent::BrightnessChanged(brightness))
-            .is_none());
+        assert!(
+            tracker
+                .apply_event(&StateEvent::BrightnessChanged(brightness))
+                .is_none()
+        );
     }
 
     #[test]

@@ -43,36 +43,54 @@ struct ButtonRegion {
     y_max: f32,
 }
 
-// Keep the interaction regions aligned with the bottom-row buttons rendered by raster.rs.
-// The panel is furniture, not a face-hugger: misses stay misses instead of snapping.
-const BUTTONS: [ButtonRegion; 4] = [
-    button(PanelAction::EnterSleep, 36.0, 201.0),
-    button(PanelAction::Wake, 213.0, 378.0),
-    button(PanelAction::BrightnessDown, 390.0, 555.0),
-    button(PanelAction::BrightnessUp, 567.0, 732.0),
-];
+// Keep interaction regions aligned with the vertical home dashboard in raster.rs.
+// Moon/sun adjust brightness; the single bottom action changes between sleep and wake.
+const BRIGHTNESS_DOWN: ButtonRegion =
+    region(PanelAction::BrightnessDown, 60.0, 116.0, 340.0, 406.0);
+const BRIGHTNESS_UP: ButtonRegion = region(PanelAction::BrightnessUp, 652.0, 708.0, 340.0, 406.0);
+const PRIMARY_ACTION: ButtonRegion = region(PanelAction::EnterSleep, 40.0, 728.0, 840.0, 914.0);
 
-const fn button(action: PanelAction, x_min: f32, x_max: f32) -> ButtonRegion {
+const fn region(
+    action: PanelAction,
+    x_min: f32,
+    x_max: f32,
+    y_min: f32,
+    y_max: f32,
+) -> ButtonRegion {
     ButtonRegion {
         action,
         x_min: x_min / 768.0,
         x_max: x_max / 768.0,
-        y_min: 388.0 / 448.0,
-        y_max: 432.0 / 448.0,
+        y_min: y_min / 960.0,
+        y_max: y_max / 960.0,
     }
 }
 
 pub fn action_at_uv(uv: PanelUv) -> Option<PanelAction> {
+    action_at_uv_for_sleep_state(uv, false)
+}
+
+pub fn action_at_uv_for_sleep_state(uv: PanelUv, wake_action: bool) -> Option<PanelAction> {
     if !uv.u.is_finite() || !uv.v.is_finite() {
         return None;
     }
-    BUTTONS.iter().find_map(|button| {
-        (uv.u >= button.x_min
-            && uv.u <= button.x_max
-            && uv.v >= button.y_min
-            && uv.v <= button.y_max)
-            .then_some(button.action)
-    })
+    for button in [BRIGHTNESS_DOWN, BRIGHTNESS_UP] {
+        if inside(uv, button) {
+            return Some(button.action);
+        }
+    }
+    if inside(uv, PRIMARY_ACTION) {
+        return Some(if wake_action {
+            PanelAction::Wake
+        } else {
+            PanelAction::EnterSleep
+        });
+    }
+    None
+}
+
+fn inside(uv: PanelUv, button: ButtonRegion) -> bool {
+    uv.u >= button.x_min && uv.u <= button.x_max && uv.v >= button.y_min && uv.v <= button.y_max
 }
 
 pub fn begin_panel_grab(controller_pose: PanelPose, panel_pose: PanelPose) -> Option<PanelGrab> {
