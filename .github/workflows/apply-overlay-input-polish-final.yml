@@ -80,16 +80,18 @@ jobs:
 
           path = Path('crates/nightshift-overlay-prototype/src/laser.rs')
           text = path.read_text()
-          old = '            let result = (|| -> Result<()> {\n'
-          new = '            let result = unsafe { (|| -> Result<()> {\n'
+          old = 'let result = (|| -> Result<()> {'
+          new = 'let result = unsafe { (|| -> Result<()> {'
           if text.count(old) != 1:
-              raise SystemExit('laser unsafe opening guard mismatch')
+              raise SystemExit(f'laser unsafe opening guard mismatch: {text.count(old)}')
           text = text.replace(old, new, 1)
-          old = '            })();\n            let release = self.swapchain.release_image().context("releasing laser image");\n'
-          new = '            })() };\n            let release = self.swapchain.release_image().context("releasing laser image");\n'
-          if text.count(old) != 1:
+          release_marker = 'let release = self.swapchain.release_image().context("releasing laser image");'
+          release_index = text.index(release_marker)
+          before = text[:release_index]
+          close_index = before.rfind('})();')
+          if close_index < 0:
               raise SystemExit('laser unsafe closing guard mismatch')
-          text = text.replace(old, new, 1)
+          text = text[:close_index] + '})() };' + text[close_index + len('})();'):]
           path.write_text(text)
           PY
       - name: Format only touched Rust files
