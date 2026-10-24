@@ -130,9 +130,31 @@ impl Default for VrchatState {
 #[serde(rename_all = "snake_case")]
 pub enum InviteProfile { #[default] Disabled, Friends, Favorites, Whitelist, Custom }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InviteActionKind { Accepted, Declined, Ignored, Asked }
+pub enum InviteActionKind { Accepted, Declined, #[default] Ignored, Asked }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InviteRuleSettings {
+    pub whitelist: Vec<String>,
+    pub accept_friends: bool,
+    pub accept_favorites: bool,
+    pub accept_whitelist: bool,
+    pub fallback: InviteActionKind,
+}
+
+impl Default for InviteRuleSettings {
+    fn default() -> Self {
+        Self {
+            whitelist: Vec::new(),
+            accept_friends: true,
+            accept_favorites: true,
+            accept_whitelist: true,
+            fallback: InviteActionKind::Ignored,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InviteAction { pub kind: InviteActionKind, pub display_name: Option<String> }
@@ -141,10 +163,20 @@ pub struct InviteAction { pub kind: InviteActionKind, pub display_name: Option<S
 pub struct InviteState {
     pub enabled: bool,
     pub profile: InviteProfile,
+    #[serde(default)]
+    pub rules: InviteRuleSettings,
+    #[serde(default)]
     pub last_action: Option<InviteAction>,
 }
 impl Default for InviteState {
-    fn default() -> Self { Self { enabled: false, profile: InviteProfile::Disabled, last_action: None } }
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            profile: InviteProfile::Disabled,
+            rules: InviteRuleSettings::default(),
+            last_action: None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +284,7 @@ pub enum UiCommand {
     SetVrchatWakeStatus(VrchatStatus),
     SetInviteAutomation(bool),
     SetInviteProfile(InviteProfile),
+    SetInviteRules(InviteRuleSettings),
     ShowOverlay,
     HideOverlay,
 }
