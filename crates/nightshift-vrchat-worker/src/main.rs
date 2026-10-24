@@ -528,6 +528,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut last_report: Option<WorkerReport> = None;
     let mut interval = tokio::time::interval(REFRESH_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.reset();
     let mut line = String::new();
     let mut state_synchronized = false;
 
