@@ -1,18 +1,24 @@
-use crate::{content::PanelContent, raster::PanelBitmap};
+use crate::{content::PanelContent, interaction::PanelAction, raster::PanelBitmap};
 
 #[derive(Clone, Debug, Default)]
 pub struct PanelBitmapCache {
     last_content: Option<PanelContent>,
+    last_hover: Option<PanelAction>,
 }
 
 impl PanelBitmapCache {
-    pub fn render_if_changed(&mut self, content: &PanelContent) -> Option<PanelBitmap> {
-        if self.last_content.as_ref() == Some(content) {
+    pub fn render_if_changed(
+        &mut self,
+        content: &PanelContent,
+        hover: Option<PanelAction>,
+    ) -> Option<PanelBitmap> {
+        if self.last_content.as_ref() == Some(content) && self.last_hover == hover {
             return None;
         }
 
-        let bitmap = PanelBitmap::from_content(content);
+        let bitmap = PanelBitmap::from_content_with_hover(content, hover);
         self.last_content = Some(content.clone());
+        self.last_hover = hover;
         Some(bitmap)
     }
 
@@ -32,8 +38,8 @@ mod tests {
     fn identical_content_does_not_raster_twice() {
         let content = PanelContent::from_state(&AppState::default());
         let mut cache = PanelBitmapCache::default();
-        assert!(cache.render_if_changed(&content).is_some());
-        assert!(cache.render_if_changed(&content).is_none());
+        assert!(cache.render_if_changed(&content, None).is_some());
+        assert!(cache.render_if_changed(&content, None).is_none());
     }
 
     #[test]
@@ -44,17 +50,34 @@ mod tests {
         let second = PanelContent::from_state(&state);
 
         let mut cache = PanelBitmapCache::default();
-        assert!(cache.render_if_changed(&first).is_some());
-        assert!(cache.render_if_changed(&second).is_some());
+        assert!(cache.render_if_changed(&first, None).is_some());
+        assert!(cache.render_if_changed(&second, None).is_some());
     }
 
     #[test]
     fn invalidation_forces_exact_content_to_render_again() {
         let content = PanelContent::from_state(&AppState::default());
         let mut cache = PanelBitmapCache::default();
-        assert!(cache.render_if_changed(&content).is_some());
-        assert!(cache.render_if_changed(&content).is_none());
+        assert!(cache.render_if_changed(&content, None).is_some());
+        assert!(cache.render_if_changed(&content, None).is_none());
         cache.invalidate();
-        assert!(cache.render_if_changed(&content).is_some());
+        assert!(cache.render_if_changed(&content, None).is_some());
+    }
+
+    #[test]
+    fn hover_change_produces_a_new_bitmap() {
+        let content = PanelContent::from_state(&AppState::default());
+        let mut cache = PanelBitmapCache::default();
+        assert!(cache.render_if_changed(&content, None).is_some());
+        assert!(
+            cache
+                .render_if_changed(&content, Some(PanelAction::Wake))
+                .is_some()
+        );
+        assert!(
+            cache
+                .render_if_changed(&content, Some(PanelAction::Wake))
+                .is_none()
+        );
     }
 }

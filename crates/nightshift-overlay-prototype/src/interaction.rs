@@ -15,10 +15,15 @@ pub struct PanelUv {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelHit {
+    pub uv: PanelUv,
+    pub distance_m: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanelGrab {
-    distance_m: f32,
-    local_anchor: [f32; 3],
-    orientation_xyzw: [f32; 4],
+    relative_position: [f32; 3],
+    relative_orientation_xyzw: [f32; 4],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,7 +66,6 @@ pub fn action_at_uv(uv: PanelUv) -> Option<PanelAction> {
     if !uv.u.is_finite() || !uv.v.is_finite() {
         return None;
     }
-
     BUTTONS.iter().find_map(|button| {
         (uv.u >= button.x_min
             && uv.u <= button.x_max
@@ -71,46 +75,53 @@ pub fn action_at_uv(uv: PanelUv) -> Option<PanelAction> {
     })
 }
 
-pub fn begin_panel_grab(
-    ray: PanelRay,
-    panel_pose: PanelPose,
-    panel_width_m: f32,
-    panel_height_m: f32,
-) -> Option<PanelGrab> {
-    let uv = hit_test_panel(ray, panel_pose, panel_width_m, panel_height_m)?;
-    let orientation_xyzw = normalize_quaternion_xyzw(panel_pose.orientation_xyzw)?;
-    let direction = normalize_direction(ray.direction)?;
-    let local_anchor = [
-        (uv.u - 0.5) * panel_width_m,
-        (0.5 - uv.v) * panel_height_m,
-        0.0,
-    ];
-    let world_anchor = add(panel_pose.position, rotate(local_anchor, orientation_xyzw));
-    let distance_m = dot(subtract(world_anchor, ray.origin), direction);
-    if !distance_m.is_finite() || distance_m <= EPSILON {
+pub fn begin_panel_grab(controller_pose: PanelPose, panel_pose: PanelPose) -> Option<PanelGrab> {
+    let controller_orientation = normalize_quaternion_xyzw(controller_pose.orientation_xyzw)?;
+    let panel_orientation = normalize_quaternion_xyzw(panel_pose.orientation_xyzw)?;
+    if !controller_pose
+        .position
+        .iter()
+        .all(|value| value.is_finite())
+        || !panel_pose.position.iter().all(|value| value.is_finite())
+    {
         return None;
     }
+    let inverse_controller = conjugate(controller_orientation);
     Some(PanelGrab {
-        distance_m,
-        local_anchor,
-        orientation_xyzw,
+        relative_position: rotate(
+            subtract(panel_pose.position, controller_pose.position),
+            inverse_controller,
+        ),
+        relative_orientation_xyzw: normalize_quaternion_xyzw(quaternion_multiply(
+            inverse_controller,
+            panel_orientation,
+        ))?,
     })
 }
 
-pub fn update_panel_grab(grab: PanelGrab, ray: PanelRay) -> Option<PanelPose> {
-    if !ray.origin.iter().all(|value| value.is_finite()) {
+pub fn update_panel_grab(grab: PanelGrab, controller_pose: PanelPose) -> Option<PanelPose> {
+    let controller_orientation = normalize_quaternion_xyzw(controller_pose.orientation_xyzw)?;
+    if !controller_pose
+        .position
+        .iter()
+        .all(|value| value.is_finite())
+    {
         return None;
     }
-    let direction = normalize_direction(ray.direction)?;
-    let target_anchor = add(ray.origin, scale(direction, grab.distance_m));
-    let anchor_offset = rotate(grab.local_anchor, grab.orientation_xyzw);
-    let position = subtract(target_anchor, anchor_offset);
+    let orientation_xyzw = normalize_quaternion_xyzw(quaternion_multiply(
+        controller_orientation,
+        grab.relative_orientation_xyzw,
+    ))?;
+    let position = add(
+        controller_pose.position,
+        rotate(grab.relative_position, controller_orientation),
+    );
     position
         .iter()
         .all(|value| value.is_finite())
         .then_some(PanelPose {
             position,
-            orientation_xyzw: grab.orientation_xyzw,
+            orientation_xyzw,
         })
 }
 
@@ -120,6 +131,15 @@ pub fn hit_test_panel(
     panel_width_m: f32,
     panel_height_m: f32,
 ) -> Option<PanelUv> {
+    hit_test_panel_with_distance(ray, panel_pose, panel_width_m, panel_height_m).map(|hit| hit.uv)
+}
+
+pub fn hit_test_panel_with_distance(
+    ray: PanelRay,
+    panel_pose: PanelPose,
+    panel_width_m: f32,
+    panel_height_m: f32,
+) -> Option<PanelHit> {
     if !ray.origin.iter().all(|value| value.is_finite())
         || !ray.direction.iter().all(|value| value.is_finite())
         || !panel_pose.position.iter().all(|value| value.is_finite())
@@ -132,12 +152,7 @@ pub fn hit_test_panel(
     }
 
     let orientation = normalize_quaternion_xyzw(panel_pose.orientation_xyzw)?;
-    let inverse = [
-        -orientation[0],
-        -orientation[1],
-        -orientation[2],
-        orientation[3],
-    ];
+    let inverse = conjugate(orientation);
     let local_origin = rotate(subtract(ray.origin, panel_pose.position), inverse);
     let local_direction = rotate(ray.direction, inverse);
 
@@ -158,9 +173,18 @@ pub fn hit_test_panel(
         return None;
     }
 
-    Some(PanelUv {
-        u: x / panel_width_m + 0.5,
-        v: 0.5 - y / panel_height_m,
+    let world_direction = normalize_direction(ray.direction)?;
+    let world_hit = add(
+        ray.origin,
+        scale(world_direction, distance * vector_length(ray.direction)?),
+    );
+    let world_distance = vector_length(subtract(world_hit, ray.origin))?;
+    Some(PanelHit {
+        uv: PanelUv {
+            u: x / panel_width_m + 0.5,
+            v: 0.5 - y / panel_height_m,
+        },
+        distance_m: world_distance,
     })
 }
 
@@ -176,19 +200,37 @@ fn scale(vector: [f32; 3], factor: f32) -> [f32; 3] {
     [vector[0] * factor, vector[1] * factor, vector[2] * factor]
 }
 
-fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
-    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+fn conjugate(quaternion_xyzw: [f32; 4]) -> [f32; 4] {
+    [
+        -quaternion_xyzw[0],
+        -quaternion_xyzw[1],
+        -quaternion_xyzw[2],
+        quaternion_xyzw[3],
+    ]
 }
 
-fn normalize_direction(direction: [f32; 3]) -> Option<[f32; 3]> {
-    if !direction.iter().all(|value| value.is_finite()) {
-        return None;
-    }
-    let length_sq = dot(direction, direction);
+fn quaternion_multiply(left: [f32; 4], right: [f32; 4]) -> [f32; 4] {
+    let [ax, ay, az, aw] = left;
+    let [bx, by, bz, bw] = right;
+    [
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    ]
+}
+
+fn vector_length(vector: [f32; 3]) -> Option<f32> {
+    let length_sq = vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2];
     if !length_sq.is_finite() || length_sq <= EPSILON * EPSILON {
         return None;
     }
-    Some(scale(direction, length_sq.sqrt().recip()))
+    Some(length_sq.sqrt())
+}
+
+fn normalize_direction(direction: [f32; 3]) -> Option<[f32; 3]> {
+    let length = vector_length(direction)?;
+    Some(scale(direction, length.recip()))
 }
 
 fn rotate(vector: [f32; 3], quaternion_xyzw: [f32; 4]) -> [f32; 3] {
@@ -204,7 +246,6 @@ fn rotate(vector: [f32; 3], quaternion_xyzw: [f32; 4]) -> [f32; 3] {
         q_vector[2] * twice_cross[0] - q_vector[0] * twice_cross[2],
         q_vector[0] * twice_cross[1] - q_vector[1] * twice_cross[0],
     ];
-
     [
         vector[0] + w * twice_cross[0] + cross_q_twice_cross[0],
         vector[1] + w * twice_cross[1] + cross_q_twice_cross[1],
