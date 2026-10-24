@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 3
+          fetch-depth: 4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -29,8 +29,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^)" = "c1994d36a337d9a699fbb0eec62655697a29800e"
-          test "$(git diff --name-only HEAD^^ HEAD | sort)" = $'.github/workflows/pointer-polish-once.yml\n.github/workflows/pointer-polish-retry.yml'
+          test "$(git rev-parse HEAD^^^)" = "c1994d36a337d9a699fbb0eec62655697a29800e"
+          test "$(git diff --name-only HEAD^^^ HEAD | sort)" = $'.github/workflows/pointer-polish-once.yml\n.github/workflows/pointer-polish-retry.yml'
 
       - name: Apply corrected pointer polish
         shell: bash
@@ -57,14 +57,14 @@ jobs:
 
       - name: Format touched Rust
         run: |
-          rustfmt crates/nightshift-protocol/src/lib.rs
-          rustfmt crates/nightshift-protocol/tests/compat.rs
-          rustfmt crates/nightshift-daemon/src/config.rs
-          rustfmt crates/nightshift-daemon/src/main.rs
-          rustfmt crates/nightshift-ui/src/main.rs
-          rustfmt crates/nightshift-overlay-prototype/src/surface.rs
-          rustfmt crates/nightshift-overlay-prototype/src/main.rs
-          rustfmt crates/nightshift-overlay-prototype/src/laser.rs
+          rustfmt --edition 2024 crates/nightshift-protocol/src/lib.rs
+          rustfmt --edition 2024 crates/nightshift-protocol/tests/compat.rs
+          rustfmt --edition 2024 crates/nightshift-daemon/src/config.rs
+          rustfmt --edition 2024 crates/nightshift-daemon/src/main.rs
+          rustfmt --edition 2024 crates/nightshift-ui/src/main.rs
+          rustfmt --edition 2024 crates/nightshift-overlay-prototype/src/surface.rs
+          rustfmt --edition 2024 crates/nightshift-overlay-prototype/src/main.rs
+          rustfmt --edition 2024 crates/nightshift-overlay-prototype/src/laser.rs
 
       - name: Verify focused crates
         run: |
