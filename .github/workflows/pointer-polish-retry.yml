@@ -16,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 4
+          fetch-depth: 5
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -29,8 +29,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git rev-parse HEAD^^^)" = "c1994d36a337d9a699fbb0eec62655697a29800e"
-          test "$(git diff --name-only HEAD^^^ HEAD | sort)" = $'.github/workflows/pointer-polish-once.yml\n.github/workflows/pointer-polish-retry.yml'
+          test "$(git rev-parse HEAD^^^^)" = "c1994d36a337d9a699fbb0eec62655697a29800e"
+          test "$(git diff --name-only HEAD^^^^ HEAD | sort)" = $'.github/workflows/pointer-polish-once.yml\n.github/workflows/pointer-polish-retry.yml'
 
       - name: Apply corrected pointer polish
         shell: bash
@@ -82,8 +82,6 @@ jobs:
           python3 - <<'PY'
           import subprocess
           allowed = {
-              '.github/workflows/pointer-polish-once.yml',
-              '.github/workflows/pointer-polish-retry.yml',
               'crates/nightshift-protocol/src/lib.rs',
               'crates/nightshift-protocol/tests/compat.rs',
               'crates/nightshift-daemon/src/config.rs',
@@ -98,7 +96,6 @@ jobs:
           if extra:
               raise SystemExit(f'unexpected changed paths: {sorted(extra)}')
           PY
-          git rm .github/workflows/pointer-polish-once.yml .github/workflows/pointer-polish-retry.yml
           git config user.name "Nightshift Integration Bot"
           git config user.email "actions@users.noreply.github.com"
           git add crates/nightshift-protocol/src/lib.rs crates/nightshift-protocol/tests/compat.rs \
