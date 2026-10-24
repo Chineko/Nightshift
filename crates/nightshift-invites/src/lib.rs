@@ -55,10 +55,17 @@ impl InviteRules {
                 {
                     InviteActionKind::Accepted
                 } else {
-                    self.custom_fallback
+                    safe_custom_fallback(self.custom_fallback)
                 }
             }
         }
+    }
+}
+
+fn safe_custom_fallback(value: InviteActionKind) -> InviteActionKind {
+    match value {
+        InviteActionKind::Declined => InviteActionKind::Declined,
+        _ => InviteActionKind::Ignored,
     }
 }
 
@@ -165,5 +172,21 @@ mod tests {
         invite.is_friend = true;
 
         assert_eq!(rules.decide(&invite), InviteActionKind::Accepted);
+    }
+
+    #[test]
+    fn unsafe_custom_fallbacks_fail_closed() {
+        for fallback in [InviteActionKind::Accepted, InviteActionKind::Asked] {
+            let rules = InviteRules {
+                enabled: true,
+                profile: InviteProfile::Custom,
+                custom_accept_friends: false,
+                custom_accept_favorites: false,
+                custom_accept_whitelist: false,
+                custom_fallback: fallback,
+                ..Default::default()
+            };
+            assert_eq!(rules.decide(&context()), InviteActionKind::Ignored);
+        }
     }
 }

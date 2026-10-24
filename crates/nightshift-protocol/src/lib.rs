@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -134,6 +134,20 @@ pub enum InviteProfile { #[default] Disabled, Friends, Favorites, Whitelist, Cus
 #[serde(rename_all = "snake_case")]
 pub enum InviteActionKind { Accepted, Declined, #[default] Ignored, Asked }
 
+fn safe_invite_fallback(value: InviteActionKind) -> InviteActionKind {
+    match value {
+        InviteActionKind::Declined => InviteActionKind::Declined,
+        _ => InviteActionKind::Ignored,
+    }
+}
+
+fn deserialize_safe_invite_fallback<'de, D>(deserializer: D) -> Result<InviteActionKind, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    InviteActionKind::deserialize(deserializer).map(safe_invite_fallback)
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct InviteRuleSettings {
@@ -141,6 +155,7 @@ pub struct InviteRuleSettings {
     pub accept_friends: bool,
     pub accept_favorites: bool,
     pub accept_whitelist: bool,
+    #[serde(default, deserialize_with = "deserialize_safe_invite_fallback")]
     pub fallback: InviteActionKind,
 }
 

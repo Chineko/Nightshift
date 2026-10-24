@@ -1,6 +1,6 @@
 use nightshift_protocol::{
-    AppState, InviteActionKind, InviteState, OscState, OverlaySpawnMode, OverlayState, SettingsState,
-    SleepState, SleepingPose, VrchatStatus,
+    AppState, InviteActionKind, InviteRuleSettings, InviteState, OscState, OverlaySpawnMode,
+    OverlayState, SettingsState, SleepState, SleepingPose, VrchatStatus,
 };
 
 #[test]
@@ -98,6 +98,20 @@ fn old_invite_state_defaults_rule_settings() {
     assert!(state.rules.accept_favorites);
     assert!(state.rules.accept_whitelist);
     assert_eq!(state.rules.fallback, InviteActionKind::Ignored);
+}
+
+#[test]
+fn unsafe_invite_fallbacks_fail_closed_during_deserialization() {
+    for fallback in ["accepted", "asked"] {
+        let json = format!(r#"{{"fallback":"{fallback}"}}"#);
+        let rules: InviteRuleSettings =
+            serde_json::from_str(&json).expect("invite rules must decode safely");
+        assert_eq!(rules.fallback, InviteActionKind::Ignored);
+    }
+
+    let rules: InviteRuleSettings =
+        serde_json::from_str(r#"{"fallback":"declined"}"#).expect("decline fallback must decode");
+    assert_eq!(rules.fallback, InviteActionKind::Declined);
 }
 
 #[test]
