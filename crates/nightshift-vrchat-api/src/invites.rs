@@ -1,11 +1,14 @@
-use std::{error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt, time::Instant};
 
 use anyhow::{Context, Result, bail};
 use reqwest::{StatusCode, header::COOKIE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{BASE_URL, SessionCookies, VrchatApiClient};
+use crate::{
+    BASE_URL, FAVORITES_CACHE_TTL, FavoriteCache, SessionCookies, VrchatApiClient,
+    validate_vrchat_user_id,
+};
 
 const PIPELINE_URL: &str = "wss://pipeline.vrchat.cloud/";
 const PAGE_SIZE: usize = 100;
@@ -157,6 +160,7 @@ impl VrchatApiClient {
         cookies: &SessionCookies,
         user_id: &str,
     ) -> Result<(bool, bool)> {
+        validate_vrchat_user_id(user_id)?;
         if self.invite_sender_is_favorite(cookies, user_id).await? {
             return Ok((true, true));
         }
@@ -164,11 +168,54 @@ impl VrchatApiClient {
     }
 
     /// Check only whether the invite sender is a favorite friend.
+    ///
+    /// Favorite membership is cached briefly per authenticated VRChat session so a burst of invite
+    /// notifications does not repeatedly page through the complete favorites collection.
     pub async fn invite_sender_is_favorite(
         &self,
         cookies: &SessionCookies,
         user_id: &str,
     ) -> Result<bool> {
+        let user_id = validate_vrchat_user_id(user_id)?;
+        if let Some(is_favorite) = self.cached_favorite_contains(cookies, user_id) {
+            return Ok(is_favorite);
+        }
+
+        let user_ids = self.fetch_favorite_friend_ids(cookies).await?;
+        let is_favorite = user_ids.contains(user_id);
+        let mut cache = self
+            .favorite_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *cache = Some(FavoriteCache {
+            session_auth: cookies.auth.clone(),
+            loaded_at: Instant::now(),
+            user_ids,
+        });
+        Ok(is_favorite)
+    }
+
+    fn cached_favorite_contains(
+        &self,
+        cookies: &SessionCookies,
+        user_id: &str,
+    ) -> Option<bool> {
+        let cache = self
+            .favorite_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let cache = cache.as_ref()?;
+        if cache.session_auth != cookies.auth || cache.loaded_at.elapsed() > FAVORITES_CACHE_TTL {
+            return None;
+        }
+        Some(cache.user_ids.contains(user_id))
+    }
+
+    async fn fetch_favorite_friend_ids(
+        &self,
+        cookies: &SessionCookies,
+    ) -> Result<HashSet<String>> {
+        let mut user_ids = HashSet::new();
         let mut offset = 0;
         for _ in 0..MAX_FAVORITE_PAGES {
             let response = self
@@ -194,15 +241,14 @@ impl VrchatApiClient {
                 .json()
                 .await
                 .context("decoding VRChat favorite friends")?;
+            let page_len = page.len();
+            user_ids.extend(page.into_iter().map(|favorite| favorite.favorite_id));
 
-            if page.iter().any(|favorite| favorite.favorite_id == user_id) {
-                return Ok(true);
-            }
-            if page.len() < PAGE_SIZE {
-                return Ok(false);
+            if page_len < PAGE_SIZE {
+                return Ok(user_ids);
             }
             offset = offset
-                .checked_add(page.len())
+                .checked_add(page_len)
                 .context("VRChat favorite-friends pagination offset overflow")?;
         }
 
@@ -215,6 +261,7 @@ impl VrchatApiClient {
         cookies: &SessionCookies,
         user_id: &str,
     ) -> Result<bool> {
+        let user_id = validate_vrchat_user_id(user_id)?;
         let response = self
             .http
             .get(format!("{BASE_URL}/user/{user_id}/friendStatus"))
@@ -245,6 +292,7 @@ impl VrchatApiClient {
         instance_id: &str,
         message_slot: Option<u8>,
     ) -> Result<()> {
+        let user_id = validate_vrchat_user_id(user_id)?;
         let response = self
             .http
             .post(format!("{BASE_URL}/invite/{user_id}"))
@@ -417,6 +465,36 @@ mod tests {
             serde_json::json!({"type":"friend","n":100,"offset":0})
         );
         assert_eq!(MAX_FAVORITE_PAGES, 100);
+    }
+
+    #[test]
+    fn favorite_cache_is_session_scoped_and_short_lived() {
+        let client = VrchatApiClient::new().unwrap();
+        let cookies = SessionCookies {
+            auth: "session-a".into(),
+            two_factor_auth: None,
+        };
+        let other_cookies = SessionCookies {
+            auth: "session-b".into(),
+            two_factor_auth: None,
+        };
+        let user_id = "usr_01234567-89ab-cdef-0123-456789abcdef";
+        let mut ids = HashSet::new();
+        ids.insert(user_id.to_string());
+        *client
+            .favorite_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(FavoriteCache {
+            session_auth: cookies.auth.clone(),
+            loaded_at: Instant::now(),
+            user_ids: ids,
+        });
+
+        assert_eq!(client.cached_favorite_contains(&cookies, user_id), Some(true));
+        assert_eq!(
+            client.cached_favorite_contains(&other_cookies, user_id),
+            None
+        );
     }
 
     #[test]
