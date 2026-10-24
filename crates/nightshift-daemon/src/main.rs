@@ -13,7 +13,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use config::PersistedConfig;
-use nightshift_hr::{CalmPeriodDetector, DetectionState};
+use nightshift_hr::{CalmPeriodConfig, CalmPeriodDetector, DetectionState};
 use nightshift_protocol::{
     AppState, Capability, ClientMessage, HrStatus, InviteAction, InviteActionKind, PROTOCOL_VERSION,
     ServerMessage, SleepPhase, SleepingPose, StateEvent, UiCommand, VrchatStatus, WorkerReport,
@@ -26,6 +26,15 @@ use tokio::{
 use tracing::{info, warn};
 
 const CONFIG_WRITE_DEBOUNCE: Duration = Duration::from_millis(250);
+
+fn detector_config_from_state(state: &AppState) -> CalmPeriodConfig {
+    CalmPeriodConfig {
+        heart_rate_threshold_bpm: state.heart_rate.threshold_bpm,
+        calm_period_ms: state.heart_rate.calm_period_seconds.saturating_mul(1_000),
+        manual_wake_cooldown_ms: state.heart_rate.cooldown_seconds.saturating_mul(1_000),
+        ..CalmPeriodConfig::default()
+    }
+}
 
 #[derive(Clone)]
 struct StateStore {
@@ -52,6 +61,7 @@ impl StateStore {
         let config_writer_shutdown = Arc::new(AtomicBool::new(false));
         let writer_save_lock = config_save_lock.clone();
         let writer_shutdown = config_writer_shutdown.clone();
+        let hr_detector = CalmPeriodDetector::new(detector_config_from_state(&initial_state));
 
         tokio::spawn(async move {
             while config_rx.changed().await.is_ok() {
@@ -78,7 +88,7 @@ impl StateStore {
             config_updates,
             config_save_lock,
             config_writer_shutdown,
-            hr_detector: Arc::new(Mutex::new(CalmPeriodDetector::default())),
+            hr_detector: Arc::new(Mutex::new(hr_detector)),
             started: Instant::now(),
         }
     }
@@ -365,6 +375,10 @@ impl StateStore {
             UiCommand::SetSleepBrightness(_)
                 | UiCommand::SetFadeDuration(_)
                 | UiCommand::SetHrMonitoring(_)
+                | UiCommand::SetHrDeviceFilter(_)
+                | UiCommand::SetHrThreshold(_)
+                | UiCommand::SetHrCalmPeriod(_)
+                | UiCommand::SetHrCooldown(_)
                 | UiCommand::SetSleepDetection(_)
                 | UiCommand::SetOscAutomation(_)
                 | UiCommand::SetGogoAutomation(_)
@@ -383,6 +397,7 @@ impl StateStore {
         let before = state.clone();
         let mut transition = None;
         let mut manual_wake = false;
+        let mut hr_detector_config = None;
 
         match command {
             UiCommand::EnterSleep => {
@@ -434,6 +449,25 @@ impl StateStore {
                 state.settings.fade_duration_seconds = seconds.clamp(0.0, 120.0);
             }
             UiCommand::SetHrMonitoring(enabled) => state.heart_rate.enabled = enabled,
+            UiCommand::SetHrDeviceFilter(filter) => {
+                state.heart_rate.device_filter = filter
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned);
+            }
+            UiCommand::SetHrThreshold(bpm) => {
+                state.heart_rate.threshold_bpm = bpm.clamp(20, 240);
+                hr_detector_config = Some(detector_config_from_state(&state));
+            }
+            UiCommand::SetHrCalmPeriod(seconds) => {
+                state.heart_rate.calm_period_seconds = seconds.clamp(10, 3_600);
+                hr_detector_config = Some(detector_config_from_state(&state));
+            }
+            UiCommand::SetHrCooldown(seconds) => {
+                state.heart_rate.cooldown_seconds = seconds.min(24 * 60 * 60);
+                hr_detector_config = Some(detector_config_from_state(&state));
+            }
             UiCommand::SetSleepDetection(enabled) => state.sleep.detection_enabled = enabled,
             UiCommand::SetOscAutomation(enabled) => state.osc.enabled = enabled,
             UiCommand::SetGogoAutomation(enabled) => state.settings.gogo_automation_enabled = enabled,
@@ -457,6 +491,10 @@ impl StateStore {
                 .send_replace(PersistedConfig::from_state(&state));
         }
         drop(state);
+
+        if let Some(config) = hr_detector_config {
+            self.hr_detector.lock().await.set_config(config);
+        }
 
         if manual_wake {
             self.hr_detector
@@ -866,6 +904,45 @@ mod tests {
         let (snapshot, _) = store.snapshot_and_subscribe().await;
         assert_eq!(snapshot.sleep.phase, SleepPhase::EnteringSleep);
         assert!(snapshot.brightness.transitioning);
+    }
+
+    #[tokio::test]
+    async fn hr_settings_are_clamped_and_reconfigure_detector() {
+        let store = StateStore::new(AppState::default());
+
+        store.apply(UiCommand::SetHrDeviceFilter(Some("  Polar H10  ".into()))).await;
+        store.apply(UiCommand::SetHrThreshold(999)).await;
+        store.apply(UiCommand::SetHrCalmPeriod(1)).await;
+        store.apply(UiCommand::SetHrCooldown(u64::MAX)).await;
+
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.heart_rate.device_filter.as_deref(), Some("Polar H10"));
+        assert_eq!(snapshot.heart_rate.threshold_bpm, 240);
+        assert_eq!(snapshot.heart_rate.calm_period_seconds, 10);
+        assert_eq!(snapshot.heart_rate.cooldown_seconds, 24 * 60 * 60);
+
+        let config = store.hr_detector.lock().await.config();
+        assert_eq!(config.heart_rate_threshold_bpm, 240);
+        assert_eq!(config.calm_period_ms, 10_000);
+        assert_eq!(config.manual_wake_cooldown_ms, 24 * 60 * 60 * 1_000);
+
+        store.apply(UiCommand::SetHrDeviceFilter(Some("   ".into()))).await;
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.heart_rate.device_filter, None);
+    }
+
+    #[tokio::test]
+    async fn persisted_hr_tuning_initializes_detector() {
+        let mut state = AppState::default();
+        state.heart_rate.threshold_bpm = 72;
+        state.heart_rate.calm_period_seconds = 45;
+        state.heart_rate.cooldown_seconds = 300;
+        let store = StateStore::new(state);
+
+        let config = store.hr_detector.lock().await.config();
+        assert_eq!(config.heart_rate_threshold_bpm, 72);
+        assert_eq!(config.calm_period_ms, 45_000);
+        assert_eq!(config.manual_wake_cooldown_ms, 300_000);
     }
 
     #[tokio::test]
