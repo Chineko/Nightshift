@@ -34,12 +34,23 @@ The same visibility, distance, and spawn-mode controls are available in the desk
 - `overlay-show` captures a headset-centered VIEW pose at the configured distance and submits the panel in LOCAL/world space.
 - Moving your head after showing the panel does not make it follow your head.
 - `overlay-hide` removes the quad layer from subsequent rendered frames.
-- `restore-last-position` reuses the most recent valid pose remembered by the running overlay process.
+- `restore-last-position` first reuses the most recent valid pose remembered by the running overlay process, then falls back to the valid pose persisted by the daemon.
 - If there is no remembered pose, restore mode falls back to spawning in front of the headset.
-- Invalid HMD tracking does not create a malformed panel.
+- Valid newly captured poses are reported to the daemon only when the remembered pose changes; the daemon normalizes and persists them.
+- Invalid or non-finite pose reports are ignored and never replace the last valid persisted pose.
+- Visibility is deliberately not persisted: restarting the overlay worker does not make a hidden panel reappear by itself.
 - A daemon IPC disconnect fails the positioned panel closed to hidden.
 
-The remembered panel pose is currently process-local. Restarting the overlay worker clears it; persistent transforms and direct grabbing/repositioning are future work.
+### Restart/restore hardware check
+
+1. Set mode to `in-front`, show the panel, and confirm it appears at the configured distance.
+2. Move your head and confirm the panel stays world-locked.
+3. Hide the panel, stop only the overlay worker, and start the overlay worker again while leaving the daemon running.
+4. Set mode to `restore-last-position` and show the panel. Confirm it returns to the same remembered world pose rather than spawning at the current headset position.
+5. Hide the panel again, restart the daemon and overlay worker, select `restore-last-position`, and show the panel. Confirm the daemon-restored persisted pose is still used.
+6. During either restart, confirm the panel remains hidden until an explicit show command is issued.
+
+This persistence stores only the last validated world pose. Direct grabbing/repositioning is still future work; once such movement exists, the same change-deduplicated report path can persist the new parking spot.
 
 ## Live panel content
 
@@ -76,4 +87,4 @@ CI runs:
 cargo test -p nightshift-overlay
 ```
 
-This covers placement geometry, finite-value validation, show/hide/restore state behavior, panel content generation, bitmap rasterization and deduplication, upload-format handling, and the quad-rendering API boundary. CI installs the OpenXR loader development package so these tests are linked and executed rather than only compile-checked.
+This covers placement geometry, finite-value validation, show/hide/restore state behavior, persisted-pose restore precedence, change-deduplicated pose reporting, panel content generation, bitmap rasterization and deduplication, upload-format handling, and the quad-rendering API boundary. CI installs the OpenXR loader development package so these tests are linked and executed rather than only compile-checked.
