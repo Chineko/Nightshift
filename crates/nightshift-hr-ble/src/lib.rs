@@ -106,20 +106,29 @@ async fn scan_heart_rate_peripherals(adapter: &Adapter) -> Result<Vec<Peripheral
     Ok(heart_rate_peripherals)
 }
 
+fn sort_and_dedup_devices(devices: &mut Vec<BleDeviceInfo>) {
+    devices.sort_by(|left, right| {
+        left.name
+            .is_none()
+            .cmp(&right.name.is_none())
+            .then_with(|| {
+                left.name
+                    .as_deref()
+                    .unwrap_or("")
+                    .cmp(right.name.as_deref().unwrap_or(""))
+            })
+            .then_with(|| left.address.cmp(&right.address))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    devices.dedup_by(|left, right| left.id == right.id);
+}
+
 pub async fn discover_devices(adapter: &Adapter) -> Result<Vec<BleDeviceInfo>> {
     let mut devices = Vec::new();
     for peripheral in scan_heart_rate_peripherals(adapter).await? {
         devices.push(device_info(&peripheral).await?);
     }
-    devices.sort_by(|left, right| {
-        left.name
-            .as_deref()
-            .unwrap_or("")
-            .cmp(right.name.as_deref().unwrap_or(""))
-            .then_with(|| left.address.cmp(&right.address))
-            .then_with(|| left.id.cmp(&right.id))
-    });
-    devices.dedup_by(|left, right| left.id == right.id);
+    sort_and_dedup_devices(&mut devices);
     Ok(devices)
 }
 
@@ -258,5 +267,38 @@ mod tests {
     #[test]
     fn empty_device_filter_matches_any_device() {
         assert!(example_device().matches_filter("  "));
+    }
+
+    #[test]
+    fn device_lists_put_named_devices_first_and_deduplicate_ids() {
+        let mut devices = vec![
+            BleDeviceInfo {
+                id: "unnamed".into(),
+                address: "00:00:00:00:00:03".into(),
+                name: None,
+            },
+            BleDeviceInfo {
+                id: "polar".into(),
+                address: "00:00:00:00:00:02".into(),
+                name: Some("Polar H10".into()),
+            },
+            BleDeviceInfo {
+                id: "polar".into(),
+                address: "00:00:00:00:00:02".into(),
+                name: Some("Polar H10".into()),
+            },
+            BleDeviceInfo {
+                id: "garmin".into(),
+                address: "00:00:00:00:00:01".into(),
+                name: Some("Garmin HRM".into()),
+            },
+        ];
+
+        sort_and_dedup_devices(&mut devices);
+
+        assert_eq!(devices.len(), 3);
+        assert_eq!(devices[0].name.as_deref(), Some("Garmin HRM"));
+        assert_eq!(devices[1].name.as_deref(), Some("Polar H10"));
+        assert_eq!(devices[2].name, None);
     }
 }
