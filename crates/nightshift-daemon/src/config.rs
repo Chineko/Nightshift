@@ -132,6 +132,36 @@ mod tests {
     use super::*;
 
     #[test]
+    fn overlay_settings_round_trip_through_persisted_config() {
+        let mut state = AppState::default();
+        state.overlay.spawn_distance_m = 2.25;
+        state.overlay.spawn_mode = OverlaySpawnMode::RestoreLastPosition;
+
+        let config = PersistedConfig::from_state(&state);
+        let mut restored = AppState::default();
+        config.apply_to_state(&mut restored);
+
+        assert_eq!(restored.overlay.spawn_distance_m, 2.25);
+        assert_eq!(
+            restored.overlay.spawn_mode,
+            OverlaySpawnMode::RestoreLastPosition
+        );
+    }
+
+    #[test]
+    fn overlay_spawn_distance_is_sanitized_when_loaded() {
+        let mut config = PersistedConfig::default();
+        config.overlay_spawn_distance_m = 99.0;
+        let mut state = AppState::default();
+        config.apply_to_state(&mut state);
+        assert_eq!(state.overlay.spawn_distance_m, 5.0);
+
+        config.overlay_spawn_distance_m = 0.0;
+        config.apply_to_state(&mut state);
+        assert_eq!(state.overlay.spawn_distance_m, 0.25);
+    }
+
+    #[test]
     fn hr_settings_round_trip_through_persisted_config() {
         let mut state = AppState::default();
         state.heart_rate.enabled = true;
