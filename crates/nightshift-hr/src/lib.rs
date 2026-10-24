@@ -49,6 +49,29 @@ impl CalmPeriodDetector {
         }
     }
 
+    pub fn config(&self) -> CalmPeriodConfig {
+        self.config
+    }
+
+    /// Replace the detector tuning without carrying timing state from the old
+    /// configuration into the new one.
+    ///
+    /// The manual-wake timestamp is intentionally preserved: editing a heart-rate
+    /// setting must not bypass the wake cooldown safety window. Sample freshness,
+    /// calm-window progress, and retrigger suppression are reset because their
+    /// meaning depends on the previous configuration.
+    pub fn set_config(&mut self, config: CalmPeriodConfig) -> bool {
+        if self.config == config {
+            return false;
+        }
+
+        self.config = config;
+        self.threshold_last_exceeded_ms = None;
+        self.heart_rate_last_received_ms = None;
+        self.suppress_until_ms = 0;
+        true
+    }
+
     pub fn note_sleep_disabled(&mut self, now_ms: u64) {
         self.sleep_last_disabled_ms = Some(now_ms);
     }
@@ -212,5 +235,56 @@ mod tests {
             tracker.observe(130_000, 55, false),
             DetectionState::RetriggerSuppressed { .. }
         ));
+    }
+
+    #[test]
+    fn changing_config_resets_calm_progress_and_retrigger_suppression() {
+        let mut tracker = detector();
+        tracker.observe(0, 55, false);
+        for now in (10_000..=120_000).step_by(10_000) {
+            tracker.observe(now, 55, false);
+        }
+        assert!(matches!(
+            tracker.observe(130_000, 55, false),
+            DetectionState::RetriggerSuppressed { .. }
+        ));
+
+        let mut config = tracker.config();
+        config.heart_rate_threshold_bpm = 65;
+        assert!(tracker.set_config(config));
+        assert_eq!(tracker.observe(131_000, 55, false), DetectionState::StaleReset);
+        assert!(matches!(
+            tracker.observe(132_000, 55, false),
+            DetectionState::Calming { .. }
+        ));
+    }
+
+    #[test]
+    fn changing_config_preserves_manual_wake_cooldown() {
+        let mut tracker = detector();
+        tracker.note_sleep_disabled(0);
+
+        let mut config = tracker.config();
+        config.heart_rate_threshold_bpm = 65;
+        assert!(tracker.set_config(config));
+
+        tracker.observe(0, 55, false);
+        for now in (10_000..=120_000).step_by(10_000) {
+            let state = tracker.observe(now, 55, false);
+            if now == 120_000 {
+                assert!(matches!(state, DetectionState::ManualWakeCooldown { .. }));
+            }
+        }
+    }
+
+    #[test]
+    fn setting_identical_config_is_a_noop() {
+        let mut tracker = detector();
+        tracker.observe(0, 55, false);
+        assert!(!tracker.set_config(CalmPeriodConfig::default()));
+        assert_eq!(
+            tracker.observe(1_000, 55, false),
+            DetectionState::Calming { remaining_ms: 119_000 }
+        );
     }
 }
