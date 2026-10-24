@@ -24,10 +24,12 @@ fn usage() -> &'static str {
        brightness <2-100 percent>\n\
        sleep-brightness <2-100 percent>\n\
        fade <seconds>\n\
+       overlay-show\n\
+       overlay-hide\n\
        overlay-distance <0.25-5.0 meters>\n\
        overlay-mode <in-front|restore-last-position>\n\n\
-       Overlay distance/mode are reserved defaults for the future positioned panel;\n\
-       they do not reposition the current full-screen OpenXR dimmer."
+       Overlay show/hide/distance/mode control the positioned panel.\n\
+       Brightness/fade control the full-screen OpenXR dimmer separately."
 }
 
 fn parse_percent(value: Option<String>, command: &str) -> Result<f32> {
@@ -165,7 +167,7 @@ fn print_status(state: &AppState) {
     println!("  sleep target: {:.0}%", state.brightness.sleep_target * 100.0);
     println!("  fade        : {:.2}s", state.settings.fade_duration_seconds);
     println!(
-        "  dimmer      : {}",
+        "  overlay     : {}",
         if state.overlay.runtime_connected {
             "connected"
         } else {
@@ -173,16 +175,14 @@ fn print_status(state: &AppState) {
         }
     );
     if let Some(version) = state.overlay.runtime_client_version.as_deref() {
-        println!("  dimmer ver  : {version}");
+        println!("  overlay ver : {version}");
     }
     println!(
-        "  panel dist  : {:.2}m (reserved)",
-        state.overlay.spawn_distance_m
+        "  panel       : {}",
+        if state.overlay.visible { "shown" } else { "hidden" }
     );
-    println!(
-        "  panel mode  : {} (reserved)",
-        overlay_mode_name(state.overlay.spawn_mode)
-    );
+    println!("  panel dist  : {:.2}m", state.overlay.spawn_distance_m);
+    println!("  panel mode  : {}", overlay_mode_name(state.overlay.spawn_mode));
     println!(
         "  vrchat      : {}",
         if state.vrchat.connected { "connected" } else { "disconnected" }
@@ -224,6 +224,8 @@ async fn main() -> Result<()> {
             "sleep-brightness",
         )?)),
         "fade" => Some(UiCommand::SetFadeDuration(parse_seconds(args.next())?)),
+        "overlay-show" => Some(UiCommand::ShowOverlay),
+        "overlay-hide" => Some(UiCommand::HideOverlay),
         "overlay-distance" => Some(UiCommand::SetOverlaySpawnDistance(parse_overlay_distance(
             args.next(),
         )?)),
