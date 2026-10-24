@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use nightshift_protocol::{
-    AppState, InviteProfile, InviteRuleSettings, OverlaySpawnMode, VrchatStatus,
+    AppState, InviteProfile, InviteRuleSettings, OverlayPose, OverlaySpawnMode, VrchatStatus,
 };
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
@@ -32,12 +32,40 @@ pub struct PersistedConfig {
     pub invite_rules: InviteRuleSettings,
     pub overlay_spawn_distance_m: f32,
     pub overlay_spawn_mode: OverlaySpawnMode,
+    pub overlay_remembered_pose: Option<OverlayPose>,
 }
 
 impl Default for PersistedConfig {
     fn default() -> Self {
         Self::from_state(&AppState::default())
     }
+}
+
+pub fn sanitize_overlay_pose(pose: OverlayPose) -> Option<OverlayPose> {
+    if !pose.position.iter().all(|component| component.is_finite())
+        || !pose.orientation_xyzw.iter().all(|component| component.is_finite())
+    {
+        return None;
+    }
+
+    let norm_sq = pose
+        .orientation_xyzw
+        .iter()
+        .map(|component| component * component)
+        .sum::<f32>();
+    if !norm_sq.is_finite() || norm_sq <= f32::EPSILON {
+        return None;
+    }
+    let inverse_norm = norm_sq.sqrt().recip();
+    let orientation_xyzw = pose.orientation_xyzw.map(|component| component * inverse_norm);
+    if !orientation_xyzw.iter().all(|component| component.is_finite()) {
+        return None;
+    }
+
+    Some(OverlayPose {
+        position: pose.position,
+        orientation_xyzw,
+    })
 }
 
 impl PersistedConfig {
@@ -61,6 +89,7 @@ impl PersistedConfig {
             invite_rules: state.invites.rules.clone(),
             overlay_spawn_distance_m: state.overlay.spawn_distance_m,
             overlay_spawn_mode: state.overlay.spawn_mode,
+            overlay_remembered_pose: state.overlay.remembered_pose.and_then(sanitize_overlay_pose),
         }
     }
 
@@ -88,6 +117,7 @@ impl PersistedConfig {
         state.invites.rules = self.invite_rules.clone();
         state.overlay.spawn_distance_m = self.overlay_spawn_distance_m.clamp(0.25, 5.0);
         state.overlay.spawn_mode = self.overlay_spawn_mode;
+        state.overlay.remembered_pose = self.overlay_remembered_pose.and_then(sanitize_overlay_pose);
     }
 
     pub async fn load() -> Result<Self> {
@@ -199,6 +229,10 @@ mod tests {
         let mut state = AppState::default();
         state.overlay.spawn_distance_m = 2.25;
         state.overlay.spawn_mode = OverlaySpawnMode::RestoreLastPosition;
+        state.overlay.remembered_pose = Some(OverlayPose {
+            position: [1.0, 2.0, -3.0],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        });
 
         let config = PersistedConfig::from_state(&state);
         let mut restored = AppState::default();
@@ -209,6 +243,7 @@ mod tests {
             restored.overlay.spawn_mode,
             OverlaySpawnMode::RestoreLastPosition
         );
+        assert_eq!(restored.overlay.remembered_pose, state.overlay.remembered_pose);
     }
 
     #[test]
@@ -222,6 +257,29 @@ mod tests {
         config.overlay_spawn_distance_m = 0.0;
         config.apply_to_state(&mut state);
         assert_eq!(state.overlay.spawn_distance_m, 0.25);
+    }
+
+    #[test]
+    fn overlay_pose_is_normalized_and_invalid_values_are_rejected() {
+        let pose = OverlayPose {
+            position: [1.0, 2.0, 3.0],
+            orientation_xyzw: [0.0, 0.0, 0.0, 2.0],
+        };
+        assert_eq!(
+            sanitize_overlay_pose(pose).unwrap().orientation_xyzw,
+            [0.0, 0.0, 0.0, 1.0]
+        );
+
+        assert!(sanitize_overlay_pose(OverlayPose {
+            position: [f32::NAN, 0.0, 0.0],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        })
+        .is_none());
+        assert!(sanitize_overlay_pose(OverlayPose {
+            position: [0.0; 3],
+            orientation_xyzw: [0.0; 4],
+        })
+        .is_none());
     }
 
     #[test]
