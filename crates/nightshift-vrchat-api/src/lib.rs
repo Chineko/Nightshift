@@ -182,9 +182,10 @@ impl VrchatApiClient {
     }
 
     pub async fn begin_login(&self, username: &str, password: &str) -> Result<LoginResult> {
-        // VRChat's established client behavior percent-encodes both Basic-auth fields first.
-        let username = urlencoding::encode(username).into_owned();
-        let password = urlencoding::encode(password).into_owned();
+        // Match VRCX/OyasumiVR exactly: VRChat expects each Basic-auth field to use
+        // JavaScript encodeURIComponent semantics before the `username:password` pair is encoded.
+        let username = encode_uri_component(username);
+        let password = encode_uri_component(password);
         let response = self
             .http
             .get(format!("{BASE_URL}/auth/user"))
@@ -237,7 +238,7 @@ impl VrchatApiClient {
 
     pub async fn verify_two_factor(
         &self,
-        pending: PendingTwoFactor,
+        pending: &PendingTwoFactor,
         code: &str,
     ) -> Result<AuthenticatedSession> {
         let response = self
@@ -270,10 +271,10 @@ impl VrchatApiClient {
         }
 
         let cookies = SessionCookies {
-            auth: captured.auth.unwrap_or(pending.cookies.auth),
+            auth: captured.auth.unwrap_or_else(|| pending.cookies.auth.clone()),
             two_factor_auth: captured
                 .two_factor_auth
-                .or(pending.cookies.two_factor_auth),
+                .or_else(|| pending.cookies.two_factor_auth.clone()),
         };
         if cookies.two_factor_auth.is_none() {
             bail!("VRChat verified two-factor authentication without providing a session cookie");
@@ -341,6 +342,24 @@ impl Default for VrchatApiClient {
     fn default() -> Self {
         Self::new().expect("building the default VRChat HTTP client should succeed")
     }
+}
+
+fn encode_uri_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric()
+            || matches!(byte, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')')
+        {
+            encoded.push(byte as char);
+        } else {
+            encoded.push('%');
+            encoded.push(HEX[(byte >> 4) as usize] as char);
+            encoded.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    encoded
 }
 
 fn validate_vrchat_user_id(user_id: &str) -> Result<&str> {
@@ -463,6 +482,19 @@ mod tests {
         assert!(!debug.contains("auth-super-secret"));
         assert!(!debug.contains("2fa-super-secret"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn login_components_match_encode_uri_component_semantics() {
+        assert_eq!(
+            encode_uri_component("AZaz09-_.!~*'()"),
+            "AZaz09-_.!~*'()"
+        );
+        assert_eq!(
+            encode_uri_component("space + slash/@"),
+            "space%20%2B%20slash%2F%40"
+        );
+        assert_eq!(encode_uri_component("päss"), "p%C3%A4ss");
     }
 
     #[test]
