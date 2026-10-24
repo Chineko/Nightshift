@@ -78,15 +78,51 @@ impl Default for BrightnessState {
 #[serde(rename_all = "snake_case")]
 pub enum HrStatus { Normal, Resting, SleepCandidate, #[default] Unknown }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HrProviderStatus { Disabled, Searching, Connected, Error, #[default] Unknown }
+
+fn default_hr_threshold_bpm() -> u16 { 60 }
+fn default_hr_calm_period_seconds() -> u64 { 120 }
+fn default_hr_cooldown_seconds() -> u64 { 15 * 60 }
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HeartRateState {
     pub enabled: bool,
     pub connected: bool,
     pub bpm: Option<u16>,
     pub status: HrStatus,
+    #[serde(default)]
+    pub device_filter: Option<String>,
+    #[serde(default)]
+    pub connected_device: Option<String>,
+    #[serde(default)]
+    pub provider_status: HrProviderStatus,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default = "default_hr_threshold_bpm")]
+    pub threshold_bpm: u16,
+    #[serde(default = "default_hr_calm_period_seconds")]
+    pub calm_period_seconds: u64,
+    #[serde(default = "default_hr_cooldown_seconds")]
+    pub cooldown_seconds: u64,
 }
 impl Default for HeartRateState {
-    fn default() -> Self { Self { enabled: false, connected: false, bpm: None, status: HrStatus::Unknown } }
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            connected: false,
+            bpm: None,
+            status: HrStatus::Unknown,
+            device_filter: None,
+            connected_device: None,
+            provider_status: HrProviderStatus::Disabled,
+            last_error: None,
+            threshold_bpm: default_hr_threshold_bpm(),
+            calm_period_seconds: default_hr_calm_period_seconds(),
+            cooldown_seconds: default_hr_cooldown_seconds(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
