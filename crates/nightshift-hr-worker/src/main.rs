@@ -20,7 +20,7 @@ struct ProviderTask(Option<JoinHandle<()>>);
 
 impl ProviderTask {
     fn is_running(&self) -> bool {
-        self.0.is_some()
+        self.0.as_ref().is_some_and(|task| !task.is_finished())
     }
 
     fn start(&mut self, task: JoinHandle<()>) {
@@ -133,6 +133,7 @@ fn set_provider_enabled(
             provider.stop();
             info!("BLE heart-rate provider stopped");
         }
+        (false, false) => provider.stop(),
         _ => {}
     }
 }
@@ -331,6 +332,15 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(80)).await;
 
         assert!(!completed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn finished_provider_task_is_not_reported_as_running() {
+        let task = tokio::spawn(async {});
+        let provider = ProviderTask(Some(task));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert!(!provider.is_running());
     }
 
     #[tokio::test]
