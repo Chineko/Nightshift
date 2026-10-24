@@ -1,0 +1,64 @@
+name: Apply overlay input retry
+
+on:
+  push:
+    branches:
+      - prototype/integrated-mvp
+
+permissions:
+  contents: write
+
+jobs:
+  apply-overlay-input:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libopenxr-dev pkg-config
+      - name: Extract guarded source transforms
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          helper = Path('.github/workflows/apply-overlay-input-once.yml').read_text().splitlines()
+
+          def extract(start_marker, end_marker):
+              start = next(i for i, line in enumerate(helper) if start_marker in line) + 1
+              end = next(i for i in range(start, len(helper)) if helper[i].strip() == end_marker)
+              lines = helper[start:end]
+              return '\n'.join(line[10:] if line.startswith('          ') else line for line in lines) + '\n'
+
+          controller = extract("cat > crates/nightshift-overlay-prototype/src/controller_input.rs <<'RUST'", 'RUST')
+          Path('crates/nightshift-overlay-prototype/src/controller_input.rs').write_text(controller)
+
+          script = extract("python3 - <<'PY'", 'PY')
+          lines = script.splitlines()
+          replacement = '''main = replace_once(main, "                    let _ = updates.send(RuntimeUpdate::Surface(hidden_surface_target()));", "                    while commands.try_recv().is_ok() {}\\n                    let _ = updates.send(RuntimeUpdate::Surface(hidden_surface_target()));", "disconnect drain")'''
+          matches = [i for i, line in enumerate(lines) if '"disconnect drain")' in line]
+          if len(matches) != 1:
+              raise SystemExit(f'disconnect transform: expected one line, got {len(matches)}')
+          lines[matches[0]] = replacement
+          Path('/tmp/apply_overlay_input.py').write_text('\n'.join(lines) + '\n')
+          PY
+          python3 /tmp/apply_overlay_input.py
+      - name: Test overlay input slice
+        run: |
+          cargo test -p nightshift-overlay-prototype --locked
+          cargo clippy -p nightshift-overlay-prototype --all-targets --locked -- -D warnings
+      - name: Commit tested overlay input
+        shell: bash
+        run: |
+          git rm .github/workflows/apply-overlay-input-once.yml .github/workflows/apply-overlay-input-retry.yml
+          git diff --check
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/nightshift-overlay-prototype
+          git commit -m "Wire controller input to overlay controls"
+          git push origin HEAD:prototype/integrated-mvp
