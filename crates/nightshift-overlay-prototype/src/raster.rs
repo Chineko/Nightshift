@@ -6,12 +6,13 @@ use super::{
 pub const PANEL_BITMAP_WIDTH: u32 = 768;
 pub const PANEL_BITMAP_HEIGHT: u32 = 960;
 
-const BACKGROUND: [u8; 4] = [7, 9, 14, 255];
-const PANEL: [u8; 4] = [15, 18, 27, 255];
-const PANEL_ALT: [u8; 4] = [18, 21, 31, 255];
-const BORDER: [u8; 4] = [42, 47, 62, 255];
-const TEXT: [u8; 4] = [242, 243, 248, 255];
-const MUTED: [u8; 4] = [139, 146, 176, 255];
+const BACKGROUND: [u8; 4] = [8, 9, 15, 255];
+const PANEL: [u8; 4] = [14, 16, 25, 255];
+const PANEL_ALT: [u8; 4] = [18, 20, 31, 255];
+const BORDER: [u8; 4] = [38, 42, 58, 255];
+const TEXT: [u8; 4] = [244, 244, 249, 255];
+const MUTED: [u8; 4] = [139, 142, 166, 255];
+const SHADOW: [u8; 4] = [4, 5, 9, 255];
 const PURPLE: [u8; 4] = [139, 92, 246, 255];
 const PURPLE_BRIGHT: [u8; 4] = [167, 139, 250, 255];
 const PURPLE_DARK: [u8; 4] = [48, 37, 82, 255];
@@ -69,6 +70,7 @@ impl PanelBitmap {
             if content.connected { GREEN } else { MUTED },
         );
 
+        self.rounded_rect(43, 235, 688, 250, 20, SHADOW, SHADOW);
         self.rounded_rect(40, 230, 688, 250, 20, PANEL, BORDER);
         self.rounded_rect(62, 250, 54, 54, 14, AMBER_DARK, AMBER_DARK);
         self.draw_sun(89, 277, 11, AMBER);
@@ -162,6 +164,7 @@ impl PanelBitmap {
             None,
         );
 
+        self.rounded_rect(43, 705, 688, 112, 18, SHADOW, SHADOW);
         self.rounded_rect(40, 700, 688, 112, 18, [20, 18, 35, 255], [57, 44, 91, 255]);
         self.rounded_rect(62, 721, 54, 54, 14, PURPLE_DARK, PURPLE_DARK);
         self.draw_lightning(89, 748, PURPLE_BRIGHT);
@@ -218,7 +221,7 @@ impl PanelBitmap {
 
         self.draw_text(40, 124, "PREFERENCES", 2, PURPLE_BRIGHT);
         self.draw_text(40, 151, "SETTINGS", 5, TEXT);
-        self.draw_text(40, 194, "QUICK CONTROLS FOR WHILE YOU ARE IN VR.", 2, MUTED);
+        self.draw_text(40, 194, "FINE-TUNE NIGHTSHIFT WITHOUT LEAVING VR.", 2, MUTED);
 
         self.quick_toggle_card(
             40,
@@ -261,6 +264,7 @@ impl PanelBitmap {
             hover == Some(PanelAction::CycleVrchatStatus),
         );
 
+        self.rounded_rect(43, 717, 420, 128, 18, SHADOW, SHADOW);
         self.rounded_rect(40, 712, 420, 128, 18, [20, 18, 35, 255], [57, 44, 91, 255]);
         self.rounded_rect(60, 736, 52, 52, 14, PURPLE_DARK, PURPLE_DARK);
         self.draw_lightning(86, 762, PURPLE_BRIGHT);
@@ -268,6 +272,7 @@ impl PanelBitmap {
         self.draw_text(128, 765, "ADVANCED TUNING LIVES IN THE", 2, MUTED);
         self.draw_text(128, 790, "DESKTOP CONTROL CENTER.", 2, MUTED);
 
+        self.rounded_rect(483, 235, 248, 610, 18, SHADOW, SHADOW);
         self.rounded_rect(480, 230, 248, 610, 18, PANEL, BORDER);
         self.rounded_rect(500, 250, 48, 48, 13, PURPLE_DARK, PURPLE_DARK);
         self.draw_text(511, 267, "PPL", 2, PURPLE_BRIGHT);
@@ -318,7 +323,8 @@ impl PanelBitmap {
                     if row_hover { PURPLE_DARK } else { BORDER },
                 );
                 let avatar = social_initial(entry);
-                self.draw_circle(526, y + 30, 17, PURPLE_DARK);
+                self.draw_circle(526, y + 30, 19, BORDER);
+                self.draw_circle(526, y + 30, 16, PURPLE_DARK);
                 self.draw_text(520, y + 22, &avatar.to_string(), 2, PURPLE_BRIGHT);
                 let label = compact_social_label(entry, 12);
                 self.draw_text(552, y + 21, &label, 2, TEXT);
@@ -346,7 +352,9 @@ impl PanelBitmap {
         enabled: bool,
         hovered: bool,
     ) {
+        self.rounded_rect(x + 3, y + 5, 420, 100, 18, SHADOW, SHADOW);
         self.rounded_rect(x, y, 420, 100, 18, if hovered { [19, 22, 33, 255] } else { PANEL_ALT }, if hovered { PURPLE_DARK } else { BORDER });
+        self.rounded_rect(x + 4, y + 16, 4, 68, 2, accent, accent);
         self.rounded_rect(x + 18, y + 24, 52, 52, 14, [28, 25, 40, 255], [28, 25, 40, 255]);
         self.draw_text(x + 29, y + 42, icon, 2, accent);
         self.draw_text(x + 84, y + 23, title, 3, TEXT);
@@ -367,7 +375,9 @@ impl PanelBitmap {
         value: &str,
         hovered: bool,
     ) {
+        self.rounded_rect(x + 3, y + 5, 420, 100, 18, SHADOW, SHADOW);
         self.rounded_rect(x, y, 420, 100, 18, if hovered { [19, 22, 33, 255] } else { PANEL_ALT }, if hovered { PURPLE_DARK } else { BORDER });
+        self.rounded_rect(x + 4, y + 16, 4, 68, 2, accent, accent);
         self.rounded_rect(x + 18, y + 24, 52, 52, 14, [28, 25, 40, 255], [28, 25, 40, 255]);
         self.draw_text(x + 29, y + 42, icon, 2, accent);
         self.draw_text(x + 84, y + 23, title, 3, TEXT);
@@ -389,7 +399,9 @@ impl PanelBitmap {
         value: &str,
         footer: Option<(&str, [u8; 4])>,
     ) {
+        self.rounded_rect(x + 3, y + 5, width, height, 18, SHADOW, SHADOW);
         self.rounded_rect(x, y, width, height, 18, PANEL_ALT, BORDER);
+        self.rounded_rect(x + 18, y + 4, width - 36, 3, 1, accent, accent);
         self.rounded_rect(
             x + 18,
             y + 22,
