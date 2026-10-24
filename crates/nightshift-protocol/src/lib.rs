@@ -247,11 +247,19 @@ impl Default for InviteState {
 #[serde(rename_all = "snake_case")]
 pub enum OverlaySpawnMode { #[default] InFront, RestoreLastPosition }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct OverlayPose {
+    pub position: [f32; 3],
+    pub orientation_xyzw: [f32; 4],
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OverlayState {
     pub visible: bool,
     pub spawn_distance_m: f32,
     pub spawn_mode: OverlaySpawnMode,
+    #[serde(default)]
+    pub remembered_pose: Option<OverlayPose>,
     #[serde(default)]
     pub runtime_connected: bool,
     #[serde(default)]
@@ -263,6 +271,7 @@ impl Default for OverlayState {
             visible: false,
             spawn_distance_m: 1.0,
             spawn_mode: OverlaySpawnMode::InFront,
+            remembered_pose: None,
             runtime_connected: false,
             runtime_client_version: None,
         }
@@ -310,6 +319,7 @@ pub enum WorkerReport {
         gogo_detected: bool,
     },
     SleepingPose { pose: SleepingPose },
+    OverlayRuntimePose { pose: OverlayPose },
     HeartRateRuntime { connected: bool, bpm: Option<u16> },
     HeartRateProviderRuntime {
         status: HrProviderStatus,
