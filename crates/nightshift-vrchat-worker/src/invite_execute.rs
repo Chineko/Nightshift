@@ -50,11 +50,10 @@ pub async fn execute_invite_plan(
             api.hide_notification(cookies, &notification_id).await?;
             Ok(InviteExecutionOutcome::AcceptedRequest)
         }
-        InviteExecutionPlan::Decline {
-            notification_id,
-            response_slot,
-        } => {
-            api.decline_invite_or_request(cookies, &notification_id, Some(response_slot))
+        InviteExecutionPlan::Decline { notification_id } => {
+            // No custom decline message exists yet, so there is no valid response-message slot to
+            // send. Omitting responseSlot matches VRChat/Oyasumi behavior for a message-less reply.
+            api.decline_invite_or_request(cookies, &notification_id, None)
                 .await?;
             // Likewise, only remove the source notification after VRChat accepted the response.
             api.hide_notification(cookies, &notification_id).await?;
