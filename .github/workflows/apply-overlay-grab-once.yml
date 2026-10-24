@@ -1,0 +1,469 @@
+name: Apply overlay grab once
+
+on:
+  push:
+    branches:
+      - prototype/integrated-mvp
+
+permissions:
+  contents: write
+
+jobs:
+  apply-overlay-grab:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libopenxr-dev pkg-config
+      - name: Apply guarded grab transforms
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, got {count}")
+              return text.replace(old, new, 1)
+
+          # Controller samples need hold/release state, not only click edges.
+          path = Path('crates/nightshift-overlay-prototype/src/controller_input.rs')
+          text = path.read_text()
+          text = replace_once(
+              text,
+              '    pub ray: Option<PanelRay>,\n    pub just_pressed: bool,\n',
+              '    pub ray: Option<PanelRay>,\n    pub select_down: bool,\n    pub just_pressed: bool,\n    pub just_released: bool,\n',
+              'pointer sample fields',
+          )
+          text = replace_once(
+              text,
+              '    let just_pressed = select_state.is_active\n        && select_state.changed_since_last_sync\n        && select_state.current_state;\n',
+              '    let select_down = select_state.is_active && select_state.current_state;\n    let just_pressed = select_state.changed_since_last_sync && select_state.current_state;\n    let just_released = select_state.changed_since_last_sync && !select_state.current_state;\n',
+              'select state edges',
+          )
+          text = replace_once(
+              text,
+              '        hand,\n        ray,\n        just_pressed,\n',
+              '        hand,\n        ray,\n        select_down,\n        just_pressed,\n        just_released,\n',
+              'pointer sample construction',
+          )
+          path.write_text(text)
+
+          # Pure grab geometry: keep orientation fixed, translate so the original grab point
+          # stays on the controller ray at the original depth.
+          path = Path('crates/nightshift-overlay-prototype/src/interaction.rs')
+          text = path.read_text()
+          insert_after = '''pub struct PanelUv {
+              pub u: f32,
+              pub v: f32,
+          }
+          '''.replace('          ', '')
+          addition = '''
+
+          #[derive(Clone, Copy, Debug, PartialEq)]
+          pub struct PanelGrab {
+              distance_m: f32,
+              local_anchor: [f32; 3],
+              orientation_xyzw: [f32; 4],
+          }
+          '''.replace('          ', '')
+          text = replace_once(text, insert_after, insert_after + addition, 'PanelGrab type')
+          marker = '''pub fn hit_test_panel(
+          '''.replace('          ', '')
+          grab_functions = '''pub fn begin_panel_grab(
+              ray: PanelRay,
+              panel_pose: PanelPose,
+              panel_width_m: f32,
+              panel_height_m: f32,
+          ) -> Option<PanelGrab> {
+              let uv = hit_test_panel(ray, panel_pose, panel_width_m, panel_height_m)?;
+              let orientation_xyzw = normalize_quaternion_xyzw(panel_pose.orientation_xyzw)?;
+              let direction = normalize_direction(ray.direction)?;
+              let local_anchor = [
+                  (uv.u - 0.5) * panel_width_m,
+                  (0.5 - uv.v) * panel_height_m,
+                  0.0,
+              ];
+              let world_anchor = add(panel_pose.position, rotate(local_anchor, orientation_xyzw));
+              let distance_m = dot(subtract(world_anchor, ray.origin), direction);
+              if !distance_m.is_finite() || distance_m <= EPSILON {
+                  return None;
+              }
+              Some(PanelGrab {
+                  distance_m,
+                  local_anchor,
+                  orientation_xyzw,
+              })
+          }
+
+          pub fn update_panel_grab(grab: PanelGrab, ray: PanelRay) -> Option<PanelPose> {
+              if !ray.origin.iter().all(|value| value.is_finite()) {
+                  return None;
+              }
+              let direction = normalize_direction(ray.direction)?;
+              let target_anchor = add(ray.origin, scale(direction, grab.distance_m));
+              let anchor_offset = rotate(grab.local_anchor, grab.orientation_xyzw);
+              let position = subtract(target_anchor, anchor_offset);
+              position.iter().all(|value| value.is_finite()).then_some(PanelPose {
+                  position,
+                  orientation_xyzw: grab.orientation_xyzw,
+              })
+          }
+
+          '''.replace('          ', '')
+          text = replace_once(text, marker, grab_functions + marker, 'grab helpers')
+          tail_marker = '''fn subtract(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+              [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+          }
+          '''.replace('          ', '')
+          tail_replacement = '''fn add(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+              [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+          }
+
+          fn subtract(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+              [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+          }
+
+          fn scale(vector: [f32; 3], factor: f32) -> [f32; 3] {
+              [vector[0] * factor, vector[1] * factor, vector[2] * factor]
+          }
+
+          fn dot(left: [f32; 3], right: [f32; 3]) -> f32 {
+              left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+          }
+
+          fn normalize_direction(direction: [f32; 3]) -> Option<[f32; 3]> {
+              if !direction.iter().all(|value| value.is_finite()) {
+                  return None;
+              }
+              let length_sq = dot(direction, direction);
+              if !length_sq.is_finite() || length_sq <= EPSILON * EPSILON {
+                  return None;
+              }
+              Some(scale(direction, length_sq.sqrt().recip()))
+          }
+          '''.replace('          ', '')
+          text = replace_once(text, tail_marker, tail_replacement, 'vector helpers')
+          path.write_text(text)
+
+          # Surface movement is live-only; remember_pose remains the persistence commit point.
+          path = Path('crates/nightshift-overlay-prototype/src/surface.rs')
+          text = path.read_text()
+          marker = '''    pub fn remember_pose(&mut self, pose: PanelPose) -> bool {
+          '''.replace('          ', '')
+          addition = '''    pub fn move_active_pose(&mut self, pose: PanelPose) -> bool {
+              if !self.visible {
+                  return false;
+              }
+              let Some(pose) = sanitize_pose(pose) else {
+                  return false;
+              };
+              self.active_pose = Some(pose);
+              true
+          }
+
+          '''.replace('          ', '')
+          text = replace_once(text, marker, addition + marker, 'live movement method')
+          path.write_text(text)
+
+          # Main-loop grab lifecycle: buttons win; empty panel starts grab; release persists once.
+          path = Path('crates/nightshift-overlay-prototype/src/main.rs')
+          text = path.read_text()
+          text = replace_once(
+              text,
+              'use controller_input::ControllerInput;\nuse interaction::{PanelAction, action_at_uv, hit_test_panel};\n',
+              'use controller_input::{ControllerHand, ControllerInput};\nuse interaction::{\n    PanelAction, PanelGrab, action_at_uv, begin_panel_grab, hit_test_panel, update_panel_grab,\n};\n',
+              'grab imports',
+          )
+          marker = '''#[allow(clippy::too_many_lines)]
+          fn run_overlay(
+          '''.replace('          ', '')
+          addition = '''#[derive(Clone, Copy, Debug, PartialEq)]
+          struct ActiveGrab {
+              hand: ControllerHand,
+              grab: PanelGrab,
+          }
+
+          '''.replace('          ', '')
+          text = replace_once(text, marker, addition + marker, 'active grab type')
+          text = replace_once(
+              text,
+              '        let mut input_error_reported = false;\n',
+              '        let mut input_error_reported = false;\n        let mut active_grab: Option<ActiveGrab> = None;\n',
+              'grab state init',
+          )
+          text = replace_once(
+              text,
+              '            let panel_pose = surface_controller.sync(\n',
+              '            if !surface_target.visible {\n                active_grab = None;\n            }\n            let mut panel_pose = surface_controller.sync(\n',
+              'mutable panel pose',
+          )
+          old_input = '''            if let Some(controller_input) = controller_input.as_ref() {
+              match controller_input.samples(
+                  &session,
+                  frame_state.predicted_display_time,
+                  &local_space,
+              ) {
+                  Ok(samples) => {
+                      input_error_reported = false;
+                      if surface_target.visible {
+                          if let Some(panel_pose) = panel_pose {
+                              for sample in samples {
+                                  let Some(ray) = sample.ray else {
+                                      continue;
+                                  };
+                                  let Some(uv) = hit_test_panel(
+                                      ray,
+                                      panel_pose,
+                                      PANEL_WIDTH_M,
+                                      PANEL_HEIGHT_M,
+                                  ) else {
+                                      continue;
+                                  };
+                                  if sample.just_pressed {
+                                      if let Some(action) = action_at_uv(uv) {
+                                          if hydra_mode {
+                                              println!("[Hydra/Input] hand={:?} action={action:?} uv=({:.3},{:.3})", sample.hand, uv.u, uv.v);
+                                          }
+                                          let _ = commands.send(panel_command(action, current_brightness));
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  Err(error) if !input_error_reported => {
+                      eprintln!("Nightshift panel input sample failed: {error:#}");
+                      input_error_reported = true;
+                  }
+                  Err(_) => {}
+              }
+          }
+          '''.replace('          ', '')
+          new_input = '''            if let Some(controller_input) = controller_input.as_ref() {
+              match controller_input.samples(
+                  &session,
+                  frame_state.predicted_display_time,
+                  &local_space,
+              ) {
+                  Ok(samples) => {
+                      input_error_reported = false;
+                      if surface_target.visible {
+                          if let Some(current_panel_pose) = panel_pose {
+                              for sample in samples {
+                                  if let Some(active) = active_grab {
+                                      if active.hand != sample.hand {
+                                          continue;
+                                      }
+
+                                      if sample.just_released || !sample.select_down {
+                                          if let Some(committed_pose) = surface_controller.active_pose() {
+                                              let _ = surface_controller.remember_pose(committed_pose);
+                                              panel_pose = Some(committed_pose);
+                                              if hydra_mode {
+                                                  println!("[Hydra/Input] hand={:?} grab=released position=({:.3},{:.3},{:.3})", sample.hand, committed_pose.position[0], committed_pose.position[1], committed_pose.position[2]);
+                                              }
+                                          }
+                                          active_grab = None;
+                                          continue;
+                                      }
+
+                                      if let Some(ray) = sample.ray {
+                                          if let Some(moved_pose) = update_panel_grab(active.grab, ray) {
+                                              if surface_controller.move_active_pose(moved_pose) {
+                                                  panel_pose = Some(moved_pose);
+                                              }
+                                          }
+                                      }
+                                      continue;
+                                  }
+
+                                  let Some(ray) = sample.ray else {
+                                      continue;
+                                  };
+                                  let Some(uv) = hit_test_panel(
+                                      ray,
+                                      current_panel_pose,
+                                      PANEL_WIDTH_M,
+                                      PANEL_HEIGHT_M,
+                                  ) else {
+                                      continue;
+                                  };
+                                  if sample.just_pressed {
+                                      if let Some(action) = action_at_uv(uv) {
+                                          if hydra_mode {
+                                              println!("[Hydra/Input] hand={:?} action={action:?} uv=({:.3},{:.3})", sample.hand, uv.u, uv.v);
+                                          }
+                                          let _ = commands.send(panel_command(action, current_brightness));
+                                      } else if let Some(grab) = begin_panel_grab(
+                                          ray,
+                                          current_panel_pose,
+                                          PANEL_WIDTH_M,
+                                          PANEL_HEIGHT_M,
+                                      ) {
+                                          active_grab = Some(ActiveGrab { hand: sample.hand, grab });
+                                          if hydra_mode {
+                                              println!("[Hydra/Input] hand={:?} grab=started uv=({:.3},{:.3})", sample.hand, uv.u, uv.v);
+                                          }
+                                      }
+                                  }
+                              }
+                          }
+                      }
+                  }
+                  Err(error) if !input_error_reported => {
+                      eprintln!("Nightshift panel input sample failed: {error:#}");
+                      input_error_reported = true;
+                  }
+                  Err(_) => {}
+              }
+          }
+          '''.replace('          ', '')
+          text = replace_once(text, old_input, new_input, 'controller interaction loop')
+          path.write_text(text)
+
+          # Regression tests for anchor preservation and live-vs-persisted movement.
+          path = Path('crates/nightshift-overlay-prototype/tests/interaction.rs')
+          text = path.read_text()
+          text = replace_once(
+              text,
+              'use interaction::{PanelAction, PanelRay, PanelUv, action_at_uv, hit_test_panel};\n',
+              'use interaction::{\n    PanelAction, PanelRay, PanelUv, action_at_uv, begin_panel_grab, hit_test_panel,\n    update_panel_grab,\n};\n',
+              'interaction test imports',
+          )
+          text += '''
+
+          #[test]
+          fn grab_moves_panel_with_controller_translation_without_rotating_it() {
+              let initial = identity_panel();
+              let grab = begin_panel_grab(
+                  PanelRay {
+                      origin: [0.0, 0.0, 0.0],
+                      direction: [0.0, 0.0, -1.0],
+                  },
+                  initial,
+                  WIDTH,
+                  HEIGHT,
+              )
+              .expect("center press should begin grab");
+
+              let moved = update_panel_grab(
+                  grab,
+                  PanelRay {
+                      origin: [0.25, 0.10, 0.0],
+                      direction: [0.0, 0.0, -1.0],
+                  },
+              )
+              .expect("valid tracked ray should move panel");
+
+              assert!((moved.position[0] - 0.25).abs() < 1.0e-5);
+              assert!((moved.position[1] - 0.10).abs() < 1.0e-5);
+              assert!((moved.position[2] + 1.0).abs() < 1.0e-5);
+              assert_eq!(moved.orientation_xyzw, initial.orientation_xyzw);
+          }
+
+          #[test]
+          fn off_center_grab_preserves_the_grabbed_point() {
+              let initial = identity_panel();
+              let start_ray = PanelRay {
+                  origin: [0.2, 0.0, 0.0],
+                  direction: [0.0, 0.0, -1.0],
+              };
+              let grab = begin_panel_grab(start_ray, initial, WIDTH, HEIGHT)
+                  .expect("off-center panel point should be grabbable");
+              let moved = update_panel_grab(
+                  grab,
+                  PanelRay {
+                      origin: [0.35, 0.0, 0.0],
+                      direction: [0.0, 0.0, -1.0],
+                  },
+              )
+              .expect("translated controller should move panel");
+
+              assert!((moved.position[0] - 0.15).abs() < 1.0e-5);
+              assert!((moved.position[2] + 1.0).abs() < 1.0e-5);
+          }
+
+          #[test]
+          fn grab_update_rejects_invalid_tracking() {
+              let grab = begin_panel_grab(
+                  PanelRay {
+                      origin: [0.0, 0.0, 0.0],
+                      direction: [0.0, 0.0, -1.0],
+                  },
+                  identity_panel(),
+                  WIDTH,
+                  HEIGHT,
+              )
+              .unwrap();
+              assert!(
+                  update_panel_grab(
+                      grab,
+                      PanelRay {
+                          origin: [f32::NAN, 0.0, 0.0],
+                          direction: [0.0, 0.0, -1.0],
+                      },
+                  )
+                  .is_none()
+              );
+          }
+          '''.replace('          ', '')
+          path.write_text(text)
+
+          path = Path('crates/nightshift-overlay-prototype/src/surface.rs')
+          text = path.read_text()
+          marker = '''    #[test]
+              fn invalid_persisted_pose_falls_back_to_in_front() {
+          '''.replace('          ', '')
+          test = '''    #[test]
+              fn live_move_does_not_replace_saved_pose_until_commit() {
+                  let mut controller = SurfaceController::default();
+                  let original = pose(1.0);
+                  assert!(controller.remember_pose(original));
+                  let _ = controller.sync(
+                      target(OverlaySpawnMode::RestoreLastPosition, None),
+                      [0.0, 0.0, 0.0],
+                      [0.0, 0.0, 0.0, 1.0],
+                  );
+                  let moved = pose(2.0);
+                  assert!(controller.move_active_pose(moved));
+                  assert_eq!(controller.active_pose(), Some(moved));
+                  assert_eq!(controller.saved_pose(), Some(original));
+                  assert!(controller.remember_pose(moved));
+                  assert_eq!(controller.saved_pose(), Some(moved));
+              }
+
+          '''.replace('          ', '')
+          text = replace_once(text, marker, test + marker, 'surface movement test')
+          path.write_text(text)
+          PY
+      - name: Format changed Rust files
+        run: |
+          rustfmt --edition 2024 \
+            crates/nightshift-overlay-prototype/src/controller_input.rs \
+            crates/nightshift-overlay-prototype/src/interaction.rs \
+            crates/nightshift-overlay-prototype/src/surface.rs \
+            crates/nightshift-overlay-prototype/src/main.rs \
+            crates/nightshift-overlay-prototype/tests/interaction.rs
+      - name: Test grab and move slice
+        run: |
+          cargo test -p nightshift-overlay --locked
+          cargo clippy -p nightshift-overlay --all-targets --locked
+          git diff --check
+      - name: Commit tested grab and move
+        shell: bash
+        run: |
+          git rm .github/workflows/apply-overlay-grab-once.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add crates/nightshift-overlay-prototype
+          git diff --cached --check
+          git commit -m "Add controller grab and move for overlay panel"
+          git push origin HEAD:prototype/integrated-mvp
