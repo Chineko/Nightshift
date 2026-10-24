@@ -72,8 +72,8 @@ jobs:
       - name: Check overlay
         run: cargo check -p nightshift-overlay
 
-      - name: Check desktop UI
-        run: cargo check -p nightshift-ui
+      - name: Test desktop UI
+        run: cargo test -p nightshift-ui
 
       - name: Check CLI
         run: cargo check -p nightshiftctl
