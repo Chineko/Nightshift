@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::{collections::HashSet, sync::{Arc, Mutex}};
 
 use anyhow::{Context, Result, anyhow};
 use nightshift_invites::{InviteContext, InviteRules};
@@ -14,8 +14,6 @@ use crate::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InviteHandlingOutcome {
     Execution(InviteExecutionOutcome),
-    /// These profiles require persisted user-supplied rule data that is not part of protocol v1 yet.
-    ConfigurationUnavailable(InviteProfile),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -26,23 +24,23 @@ pub struct InviteHandlingResult {
     pub outcome: InviteHandlingOutcome,
 }
 
-pub fn invite_rules_from_state(state: &InviteState) -> Result<InviteRules, InviteProfile> {
-    if !state.enabled || state.profile == InviteProfile::Disabled {
-        return Ok(InviteRules {
-            enabled: false,
-            profile: state.profile,
-            ..Default::default()
-        });
+pub fn invite_rules_from_state(state: &InviteState) -> InviteRules {
+    InviteRules {
+        enabled: state.enabled,
+        profile: state.profile,
+        whitelist: state.rules.whitelist.iter().cloned().collect::<HashSet<_>>(),
+        custom_accept_friends: state.rules.accept_friends,
+        custom_accept_favorites: state.rules.accept_favorites,
+        custom_accept_whitelist: state.rules.accept_whitelist,
+        custom_fallback: state.rules.fallback,
     }
+}
 
-    match state.profile {
-        InviteProfile::Friends | InviteProfile::Favorites => Ok(InviteRules {
-            enabled: true,
-            profile: state.profile,
-            ..Default::default()
-        }),
-        InviteProfile::Disabled => unreachable!("disabled profile handled above"),
-        InviteProfile::Whitelist | InviteProfile::Custom => Err(state.profile),
+fn relationship_context_needed(rules: &InviteRules) -> bool {
+    match rules.profile {
+        InviteProfile::Disabled | InviteProfile::Whitelist => false,
+        InviteProfile::Friends | InviteProfile::Favorites => true,
+        InviteProfile::Custom => rules.custom_accept_friends || rules.custom_accept_favorites,
     }
 }
 
@@ -60,31 +58,26 @@ pub async fn handle_invite_notification(
         outcome,
     };
 
-    let rules = match invite_rules_from_state(&invite_state) {
-        Ok(rules) => rules,
-        Err(profile) => {
-            return Ok(base(InviteHandlingOutcome::ConfigurationUnavailable(profile)));
-        }
-    };
-
-    if !rules.enabled {
+    let rules = invite_rules_from_state(&invite_state);
+    if !rules.enabled || rules.profile == InviteProfile::Disabled {
         return Ok(base(InviteHandlingOutcome::Execution(
             InviteExecutionOutcome::None,
         )));
     }
 
-    let (is_friend, is_favorite) = api
-        .invite_sender_relationship(&cookies, &notification.sender_user_id)
-        .await
-        .context("resolving VRChat invite sender relationship")?;
+    let (is_friend, is_favorite) = if relationship_context_needed(&rules) {
+        api.invite_sender_relationship(&cookies, &notification.sender_user_id)
+            .await
+            .context("resolving VRChat invite sender relationship")?
+    } else {
+        (false, false)
+    };
 
     let decision = rules.decide(&InviteContext {
         user_id: notification.sender_user_id.clone(),
         is_friend,
         is_favorite,
-        // User-defined whitelist data is intentionally unavailable until the invite settings
-        // backend/UI adds it. Do not infer whitelist membership from other relationship facts.
-        is_whitelisted: false,
+        is_whitelisted: rules.whitelist.contains(&notification.sender_user_id),
     });
 
     let current_instance = if decision == nightshift_protocol::InviteActionKind::Accepted
@@ -115,10 +108,11 @@ pub async fn handle_invite_notification(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nightshift_protocol::{InviteActionKind, InviteRuleSettings};
 
     #[test]
     fn disabled_policy_stays_disabled() {
-        let rules = invite_rules_from_state(&InviteState::default()).unwrap();
+        let rules = invite_rules_from_state(&InviteState::default());
         assert!(!rules.enabled);
         assert_eq!(rules.profile, InviteProfile::Disabled);
     }
@@ -129,23 +123,65 @@ mod tests {
             let state = InviteState {
                 enabled: true,
                 profile,
-                last_action: None,
+                ..Default::default()
             };
-            let rules = invite_rules_from_state(&state).unwrap();
+            let rules = invite_rules_from_state(&state);
             assert!(rules.enabled);
             assert_eq!(rules.profile, profile);
         }
     }
 
     #[test]
-    fn whitelist_and_custom_wait_for_real_persisted_configuration() {
-        for profile in [InviteProfile::Whitelist, InviteProfile::Custom] {
-            let state = InviteState {
-                enabled: true,
-                profile,
-                last_action: None,
-            };
-            assert_eq!(invite_rules_from_state(&state), Err(profile));
-        }
+    fn whitelist_uses_persisted_user_ids_without_relationship_lookup() {
+        let state = InviteState {
+            enabled: true,
+            profile: InviteProfile::Whitelist,
+            rules: InviteRuleSettings {
+                whitelist: vec!["usr_allowed".into()],
+                ..Default::default()
+            },
+            last_action: None,
+        };
+        let rules = invite_rules_from_state(&state);
+        assert!(rules.whitelist.contains("usr_allowed"));
+        assert!(!relationship_context_needed(&rules));
+    }
+
+    #[test]
+    fn custom_settings_map_to_pure_rules() {
+        let state = InviteState {
+            enabled: true,
+            profile: InviteProfile::Custom,
+            rules: InviteRuleSettings {
+                whitelist: vec!["usr_allowed".into()],
+                accept_friends: false,
+                accept_favorites: true,
+                accept_whitelist: false,
+                fallback: InviteActionKind::Declined,
+            },
+            last_action: None,
+        };
+        let rules = invite_rules_from_state(&state);
+        assert!(!rules.custom_accept_friends);
+        assert!(rules.custom_accept_favorites);
+        assert!(!rules.custom_accept_whitelist);
+        assert_eq!(rules.custom_fallback, InviteActionKind::Declined);
+        assert!(relationship_context_needed(&rules));
+    }
+
+    #[test]
+    fn custom_whitelist_only_does_not_require_social_lookup() {
+        let state = InviteState {
+            enabled: true,
+            profile: InviteProfile::Custom,
+            rules: InviteRuleSettings {
+                accept_friends: false,
+                accept_favorites: false,
+                accept_whitelist: true,
+                ..Default::default()
+            },
+            last_action: None,
+        };
+        assert!(!relationship_context_needed(&invite_rules_from_state(&state)));
     }
 }
