@@ -12,12 +12,12 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use config::PersistedConfig;
+use config::{PersistedConfig, sanitize_overlay_pose};
 use nightshift_hr::{CalmPeriodConfig, CalmPeriodDetector, DetectionState};
 use nightshift_protocol::{
     AppState, Capability, ClientMessage, HrDeviceInfo, HrProviderStatus, HrStatus, InviteAction,
-    InviteActionKind, OverlaySpawnMode, PROTOCOL_VERSION, ServerMessage, SleepPhase, SleepingPose,
-    StateEvent, UiCommand, VrchatStatus, WorkerReport,
+    InviteActionKind, OverlayPose, OverlaySpawnMode, PROTOCOL_VERSION, ServerMessage, SleepPhase,
+    SleepingPose, StateEvent, UiCommand, VrchatStatus, WorkerReport,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
@@ -184,6 +184,26 @@ impl StateStore {
         if *state != before {
             self.emit_changes(&before, &state);
         }
+    }
+
+    async fn set_overlay_remembered_pose(&self, pose: OverlayPose) {
+        let Some(pose) = sanitize_overlay_pose(pose) else {
+            warn!("ignoring invalid overlay remembered-pose report");
+            return;
+        };
+
+        let mut state = self.state.lock().await;
+        if self.config_writer_shutdown.load(Ordering::Acquire) {
+            return;
+        }
+        if state.overlay.remembered_pose == Some(pose) {
+            return;
+        }
+        let before = state.clone();
+        state.overlay.remembered_pose = Some(pose);
+        self.emit_changes(&before, &state);
+        self.config_updates
+            .send_replace(PersistedConfig::from_state(&state));
     }
 
     async fn set_sleeping_pose(&self, pose: SleepingPose) {
@@ -395,6 +415,15 @@ impl StateStore {
                 ) =>
             {
                 self.set_sleeping_pose(pose).await;
+                true
+            }
+            WorkerReport::OverlayRuntimePose { pose }
+                if matches!(
+                    client,
+                    "nightshift-overlay" | "nightshift-overlay-prototype"
+                ) =>
+            {
+                self.set_overlay_remembered_pose(pose).await;
                 true
             }
             WorkerReport::HeartRateRuntime { connected, bpm } if client == "nightshift-hr" => {
@@ -1142,6 +1171,57 @@ mod tests {
         store.apply(UiCommand::SetOverlaySpawnDistance(0.0)).await;
         let (snapshot, _) = store.snapshot_and_subscribe().await;
         assert_eq!(snapshot.overlay.spawn_distance_m, 0.25);
+    }
+
+    #[tokio::test]
+    async fn overlay_runtime_pose_reports_are_scoped_normalized_and_stored() {
+        let store = StateStore::new(AppState::default());
+        let report = WorkerReport::OverlayRuntimePose {
+            pose: OverlayPose {
+                position: [1.0, 2.0, 3.0],
+                orientation_xyzw: [0.0, 0.0, 0.0, 2.0],
+            },
+        };
+
+        assert!(
+            !store
+                .apply_worker_report("nightshift-osc", report.clone())
+                .await
+        );
+        assert!(
+            store
+                .apply_worker_report("nightshift-overlay", report)
+                .await
+        );
+
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(
+            snapshot.overlay.remembered_pose,
+            Some(OverlayPose {
+                position: [1.0, 2.0, 3.0],
+                orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_overlay_runtime_pose_report_is_ignored() {
+        let store = StateStore::new(AppState::default());
+        assert!(
+            store
+                .apply_worker_report(
+                    "nightshift-overlay",
+                    WorkerReport::OverlayRuntimePose {
+                        pose: OverlayPose {
+                            position: [f32::NAN, 0.0, 0.0],
+                            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+                        },
+                    },
+                )
+                .await
+        );
+        let (snapshot, _) = store.snapshot_and_subscribe().await;
+        assert_eq!(snapshot.overlay.remembered_pose, None);
     }
 
     #[tokio::test]
