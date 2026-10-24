@@ -69,8 +69,8 @@ jobs:
       - name: Test daemon state machine
         run: cargo test -p nightshift-daemon
 
-      - name: Check overlay
-        run: cargo check -p nightshift-overlay
+      - name: Test overlay
+        run: cargo test -p nightshift-overlay
 
       - name: Test desktop UI
         run: cargo test -p nightshift-ui
