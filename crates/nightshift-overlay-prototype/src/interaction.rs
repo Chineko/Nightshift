@@ -1,4 +1,7 @@
-use crate::placement::{PanelPose, normalize_quaternion_xyzw};
+use crate::{
+    panel_layout::{PANEL_HEIGHT, PANEL_WIDTH, PanelLayout},
+    placement::{PanelPose, normalize_quaternion_xyzw},
+};
 
 const EPSILON: f32 = 1.0e-5;
 
@@ -50,53 +53,6 @@ pub enum PanelAction {
     RemoveSocial(u8),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ButtonRegion {
-    action: PanelAction,
-    x_min: f32,
-    x_max: f32,
-    y_min: f32,
-    y_max: f32,
-}
-
-// Keep interaction regions aligned with the vertical dashboards in raster.rs.
-// The panel is furniture, not a face-hugger: misses stay misses instead of snapping.
-const NAV_HOME: ButtonRegion = region(PanelAction::NavigateHome, 500.0, 594.0, 38.0, 86.0);
-const NAV_SETTINGS: ButtonRegion = region(PanelAction::NavigateSettings, 602.0, 720.0, 38.0, 86.0);
-const BRIGHTNESS_DOWN: ButtonRegion =
-    region(PanelAction::BrightnessDown, 60.0, 116.0, 340.0, 406.0);
-const BRIGHTNESS_UP: ButtonRegion = region(PanelAction::BrightnessUp, 652.0, 708.0, 340.0, 406.0);
-const PRIMARY_ACTION: ButtonRegion = region(PanelAction::EnterSleep, 40.0, 728.0, 840.0, 914.0);
-const SETTINGS_HR: ButtonRegion = region(PanelAction::ToggleHeartRate, 356.0, 446.0, 238.0, 320.0);
-const SETTINGS_OSC: ButtonRegion = region(PanelAction::ToggleOsc, 356.0, 446.0, 354.0, 436.0);
-const SETTINGS_INVITES: ButtonRegion = region(PanelAction::CycleInviteProfile, 300.0, 446.0, 470.0, 552.0);
-const SETTINGS_VRCHAT: ButtonRegion = region(PanelAction::CycleVrchatStatus, 300.0, 446.0, 586.0, 668.0);
-const SOCIAL_WHITELIST: ButtonRegion = region(PanelAction::SelectWhitelist, 500.0, 602.0, 302.0, 348.0);
-const SOCIAL_BLACKLIST: ButtonRegion = region(PanelAction::SelectBlacklist, 606.0, 708.0, 302.0, 348.0);
-const SOCIAL_REMOVE: [ButtonRegion; 5] = [
-    region(PanelAction::RemoveSocial(0), 676.0, 716.0, 366.0, 420.0),
-    region(PanelAction::RemoveSocial(1), 676.0, 716.0, 438.0, 492.0),
-    region(PanelAction::RemoveSocial(2), 676.0, 716.0, 510.0, 564.0),
-    region(PanelAction::RemoveSocial(3), 676.0, 716.0, 582.0, 636.0),
-    region(PanelAction::RemoveSocial(4), 676.0, 716.0, 654.0, 708.0),
-];
-
-const fn region(
-    action: PanelAction,
-    x_min: f32,
-    x_max: f32,
-    y_min: f32,
-    y_max: f32,
-) -> ButtonRegion {
-    ButtonRegion {
-        action,
-        x_min: x_min / 768.0,
-        x_max: x_max / 768.0,
-        y_min: y_min / 960.0,
-        y_max: y_max / 960.0,
-    }
-}
-
 pub fn action_at_uv(uv: PanelUv) -> Option<PanelAction> {
     action_at_uv_for_page(uv, PanelPage::Home, false)
 }
@@ -113,47 +69,11 @@ pub fn action_at_uv_for_page(
     if !uv.u.is_finite() || !uv.v.is_finite() {
         return None;
     }
-    for button in [NAV_HOME, NAV_SETTINGS] {
-        if inside(uv, button) {
-            return Some(button.action);
-        }
-    }
-    match page {
-        PanelPage::Home => {
-            for button in [BRIGHTNESS_DOWN, BRIGHTNESS_UP] {
-                if inside(uv, button) {
-                    return Some(button.action);
-                }
-            }
-            if inside(uv, PRIMARY_ACTION) {
-                return Some(if wake_action { PanelAction::Wake } else { PanelAction::EnterSleep });
-            }
-        }
-        PanelPage::Settings => {
-            for button in [
-                SETTINGS_HR,
-                SETTINGS_OSC,
-                SETTINGS_INVITES,
-                SETTINGS_VRCHAT,
-                SOCIAL_WHITELIST,
-                SOCIAL_BLACKLIST,
-            ] {
-                if inside(uv, button) {
-                    return Some(button.action);
-                }
-            }
-            for button in SOCIAL_REMOVE {
-                if inside(uv, button) {
-                    return Some(button.action);
-                }
-            }
-        }
-    }
-    None
-}
 
-fn inside(uv: PanelUv, button: ButtonRegion) -> bool {
-    uv.u >= button.x_min && uv.u <= button.x_max && uv.v >= button.y_min && uv.v <= button.y_max
+    // Drawing and hit-testing now consult the same floor plan. The clipboard goblins
+    // have lost their duplicate copy and are taking this surprisingly well.
+    PanelLayout::for_page(page, wake_action)
+        .action_at_pixels(uv.u * PANEL_WIDTH, uv.v * PANEL_HEIGHT)
 }
 
 pub fn begin_panel_grab(controller_pose: PanelPose, panel_pose: PanelPose) -> Option<PanelGrab> {
