@@ -1,6 +1,10 @@
+#[path = "raster/font.rs"]
 mod font;
+#[path = "raster/home.rs"]
 mod home;
+#[path = "raster/primitives.rs"]
 mod primitives;
+#[path = "raster/settings.rs"]
 mod settings;
 
 use super::{
