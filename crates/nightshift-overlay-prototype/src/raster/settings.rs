@@ -1,17 +1,23 @@
 use super::*;
-use crate::home_layout::{PanelNavLayout, SettingsToggleLayout, SocialTabsLayout};
+use crate::home_layout::{
+    PanelNavLayout, SettingsToggleLayout, SettingsValueLayout, SocialRemoveLayout, SocialTabsLayout,
+};
 
 impl PanelBitmap {
     pub(super) fn draw_settings(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
         let nav_layout = PanelNavLayout::compute();
         let social_tabs = SocialTabsLayout::compute();
         let toggles = SettingsToggleLayout::compute();
+        let values = SettingsValueLayout::compute();
+        let social_remove = SocialRemoveLayout::compute();
         let nav_home = pixel_rect(nav_layout.home);
         let nav_settings = pixel_rect(nav_layout.settings);
         let whitelist = pixel_rect(social_tabs.whitelist);
         let blacklist = pixel_rect(social_tabs.blacklist);
         let heart_rate_toggle = pixel_rect(toggles.heart_rate);
         let osc_toggle = pixel_rect(toggles.osc);
+        let invite_rules = pixel_rect(values.invite_rules);
+        let vrchat_status = pixel_rect(values.vrchat_status);
 
         self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
         self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
@@ -77,6 +83,7 @@ impl PanelBitmap {
             PURPLE_BRIGHT,
             "INVITE RULES",
             "WHO CAN SEND REQUESTS DURING SLEEP",
+            invite_rules,
             content.invite_profile_label(),
             hover == Some(PanelAction::CycleInviteProfile),
         );
@@ -87,6 +94,7 @@ impl PanelBitmap {
             [94, 220, 210, 255],
             "VRCHAT STATUS",
             "STATUS USED BY SLEEP AUTOMATION",
+            vrchat_status,
             content.sleep_vrchat_status_label(),
             hover == Some(PanelAction::CycleVrchatStatus),
         );
@@ -157,7 +165,8 @@ impl PanelBitmap {
             self.draw_text(514, 416, "ADD THEM ON DESKTOP", 2, MUTED);
         } else {
             for (index, entry) in entries.iter().take(5).enumerate() {
-                let y = 360 + index as u32 * 72;
+                let remove = pixel_rect(social_remove.buttons[index]);
+                let y = remove.1 - 8;
                 let action = PanelAction::RemoveSocial(index as u8);
                 let row_hover = hover == Some(action);
                 self.rounded_rect(
@@ -180,15 +189,15 @@ impl PanelBitmap {
                 let label = compact_social_label(entry, 12);
                 self.draw_text(552, y + 21, &label, 2, TEXT);
                 self.rounded_rect(
-                    676,
-                    y + 8,
-                    32,
-                    44,
+                    remove.0,
+                    remove.1,
+                    remove.2,
+                    remove.3,
                     10,
                     if row_hover { PURPLE_DARK } else { PANEL },
                     BORDER,
                 );
-                self.draw_text(686, y + 20, "X", 2, MUTED);
+                self.draw_text(remove.0 + 10, remove.1 + 12, "X", 2, MUTED);
             }
             if entries.len() > 5 {
                 self.draw_text(
@@ -274,6 +283,7 @@ impl PanelBitmap {
         accent: [u8; 4],
         title: &str,
         description: &str,
+        slot: (u32, u32, u32, u32),
         value: &str,
         hovered: bool,
     ) {
@@ -305,16 +315,19 @@ impl PanelBitmap {
         self.draw_text(x + 84, y + 23, title, 3, TEXT);
         self.draw_text(x + 84, y + 56, description, 1, MUTED);
         let width = (value.chars().count() as u32 * 12 + 28).clamp(82, 136);
+        let pill_right = slot.0 + slot.2 - 8;
+        let pill_x = pill_right.saturating_sub(width);
+        let pill_y = slot.1 + 21;
         self.rounded_rect(
-            x + 398 - width,
-            y + 29,
+            pill_x,
+            pill_y,
             width,
             42,
             12,
             PANEL,
             if hovered { PURPLE } else { BORDER },
         );
-        self.draw_text(x + 410 - width, y + 43, value, 2, TEXT);
+        self.draw_text(pill_x + 12, pill_y + 14, value, 2, TEXT);
     }
 
     pub(super) fn status_card(
