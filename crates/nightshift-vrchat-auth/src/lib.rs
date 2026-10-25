@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, bail};
 pub use nightshift_vrchat_api::FriendProfile;
@@ -78,6 +78,15 @@ impl VrchatAuthService {
         self.api.friends(&cookies).await
     }
 
+    pub async fn cached_friends(&self) -> Result<Option<(Vec<FriendProfile>, Duration)>> {
+        let cookies = self.stored_cookies().await?;
+        let Some(profiles) = self.api.cached_friends(&cookies) else {
+            return Ok(None);
+        };
+        let age = self.api.friend_cache_age(&cookies).unwrap_or_default();
+        Ok(Some((profiles, age)))
+    }
+
     pub async fn friend_image_bytes(&self, url: &str) -> Result<Arc<[u8]>> {
         self.api.friend_image_bytes(url).await
     }
@@ -149,7 +158,7 @@ mod tests {
         });
 
         assert_eq!(stored.auth_cookie, "auth-cookie");
-        assert_eq!(stored.two_factor_cookie.as_deref(), Some("2fa-cookie"));
+        assert_eq!(stored.two_factor_auth.as_deref(), Some("2fa-cookie"));
         assert_eq!(stored.user_id.as_deref(), Some("usr_test"));
     }
 
