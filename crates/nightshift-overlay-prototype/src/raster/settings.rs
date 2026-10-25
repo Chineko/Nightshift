@@ -1,14 +1,17 @@
 use super::*;
-use crate::home_layout::{PanelNavLayout, SocialTabsLayout};
+use crate::home_layout::{PanelNavLayout, SettingsToggleLayout, SocialTabsLayout};
 
 impl PanelBitmap {
     pub(super) fn draw_settings(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
         let nav_layout = PanelNavLayout::compute();
         let social_tabs = SocialTabsLayout::compute();
+        let toggles = SettingsToggleLayout::compute();
         let nav_home = pixel_rect(nav_layout.home);
         let nav_settings = pixel_rect(nav_layout.settings);
         let whitelist = pixel_rect(social_tabs.whitelist);
         let blacklist = pixel_rect(social_tabs.blacklist);
+        let heart_rate_toggle = pixel_rect(toggles.heart_rate);
+        let osc_toggle = pixel_rect(toggles.osc);
 
         self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
         self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
@@ -52,6 +55,7 @@ impl PanelBitmap {
             PINK,
             "HR MONITORING",
             "LIVE HEART RATE FROM YOUR DEVICE",
+            heart_rate_toggle,
             content.heart_rate_enabled,
             hover == Some(PanelAction::ToggleHeartRate),
         );
@@ -62,6 +66,7 @@ impl PanelBitmap {
             BLUE,
             "OSC AUTOMATION",
             "SLEEP MODE TRIGGERS OSC PARAMETERS",
+            osc_toggle,
             content.osc_enabled,
             hover == Some(PanelAction::ToggleOsc),
         );
@@ -209,6 +214,7 @@ impl PanelBitmap {
         accent: [u8; 4],
         title: &str,
         description: &str,
+        toggle: (u32, u32, u32, u32),
         enabled: bool,
         hovered: bool,
     ) {
@@ -239,23 +245,22 @@ impl PanelBitmap {
         self.draw_text(x + 29, y + 42, icon, 2, accent);
         self.draw_text(x + 84, y + 23, title, 3, TEXT);
         self.draw_text(x + 84, y + 56, description, 1, MUTED);
-        let toggle_x = x + 330;
         self.rounded_rect(
-            toggle_x,
-            y + 31,
-            62,
-            36,
+            toggle.0,
+            toggle.1,
+            toggle.2,
+            toggle.3,
             18,
             if enabled { PURPLE } else { [48, 52, 66, 255] },
             if hovered { PURPLE_BRIGHT } else { BORDER },
         );
         self.draw_circle(
             if enabled {
-                toggle_x + 44
+                toggle.0 + 44
             } else {
-                toggle_x + 18
+                toggle.0 + 18
             },
-            y + 49,
+            toggle.1 + 18,
             12,
             TEXT,
         );
