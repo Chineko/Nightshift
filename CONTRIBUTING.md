@@ -61,6 +61,25 @@ The goal is not to avoid checking CI; the goal is to make every check answer a r
 
 This rule exists because the Taffy renovation lost time when repeated CI polling replaced actual engineering decisions.
 
+## Anti-spiral and promotion safety rules
+
+When work starts to stall, protect the branch and change the strategy instead of repeating the same action.
+
+- **Canonical moved:** fetch `prototype/integrated-mvp` immediately before promotion. If its SHA changed, stop the promotion attempt and compare ancestry before doing anything else. Never retry an old lease blindly and never overwrite newer canonical work.
+- **Stale branch:** if canonical advanced while a feature branch was in CI, check whether the feature branch is already an ancestor of canonical before rebasing, recreating, cherry-picking, or promoting it.
+- **Whole-file edits:** after any whole-file replacement, immediately compare the branch against its known-good base. A small intended edit with a surprisingly large diff is a stop condition, not something to leave for CI to discover.
+- **Tool-failure cutoff:** if the same connector, log fetch, or retrieval strategy fails or returns useless output twice, switch strategies. Do not keep asking the same opaque source for the same missing evidence.
+- **Static before CI:** when one failure exposes a structural class of problem—module graph, imports, feature flags, generated files, duplicated geometry, test harness wiring—inspect all occurrences before rerunning CI.
+- **No speculative patching:** if the exact error is unknown and static analysis does not prove the cause, do not push a "maybe this fixes it" patch just to see what CI says. Obtain evidence or inspect the dependency/control flow until the patch follows logically.
+- **Scope freeze:** once a slice enters CI, do not add unrelated improvements to that branch. Fix only failures caused by that slice; new ideas belong in the next branch.
+- **Promotion gate:** promotion requires all of the following: a clean scoped diff, understood module/dependency impact, completed green CI, and a freshly verified canonical SHA.
+- **Ancestor check:** before moving a ref, compare feature and canonical ancestry. If the feature is already contained in canonical, do nothing. Git archaeology is cheaper than moving a branch backward.
+- **Decision-bearing tool calls:** status information should lead to an action. If a tool call produced no new decision-relevant information, do not immediately repeat it.
+
+When progress stalls, **inspect the model of the system before inspecting the same symptom again.**
+
+For the Taffy renovation specifically, every migrated component must end with **fewer geometry ledgers than it started with**. If Taffy geometry is added while an independent rendering or hit-test coordinate table remains authoritative, the migration is incomplete. Hydra may enjoy multiple basements; maintenance will not.
+
 ## UI renovation rule
 
 For the overlay rebuild/replacement work:
