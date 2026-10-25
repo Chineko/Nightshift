@@ -1,14 +1,37 @@
 use super::*;
+use crate::panel_layout::PanelLayout;
 
 impl PanelBitmap {
     pub(super) fn draw_settings(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
+        let layout = PanelLayout::for_page(PanelPage::Settings, false);
+        let nav_home = pixel_rect(layout.rect(PanelAction::NavigateHome).unwrap());
+        let nav_settings = pixel_rect(layout.rect(PanelAction::NavigateSettings).unwrap());
+        let whitelist = pixel_rect(layout.rect(PanelAction::SelectWhitelist).unwrap());
+        let blacklist = pixel_rect(layout.rect(PanelAction::SelectBlacklist).unwrap());
+
         self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
         self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
         self.draw_crescent(74, 62, 13, PURPLE_BRIGHT, PURPLE_DARK);
         self.draw_text(112, 49, "NIGHTSHIFT", 4, TEXT);
-        self.rounded_rect(500, 39, 96, 46, 14, PANEL_ALT, BORDER);
+        self.rounded_rect(
+            nav_home.0,
+            nav_home.1 + 1,
+            nav_home.2 + 2,
+            nav_home.3.saturating_sub(2),
+            14,
+            PANEL_ALT,
+            BORDER,
+        );
         self.draw_text(519, 54, "HOME", 3, MUTED);
-        self.rounded_rect(602, 39, 118, 46, 14, PURPLE_DARK, PURPLE);
+        self.rounded_rect(
+            nav_settings.0,
+            nav_settings.1 + 1,
+            nav_settings.2,
+            nav_settings.3.saturating_sub(2),
+            14,
+            PURPLE_DARK,
+            PURPLE,
+        );
         self.draw_text(616, 54, "SETTINGS", 3, TEXT);
 
         self.draw_text(40, 124, "PREFERENCES", 2, PURPLE_BRIGHT);
@@ -82,10 +105,10 @@ impl PanelBitmap {
         let whitelist_hover = hover == Some(PanelAction::SelectWhitelist);
         let blacklist_hover = hover == Some(PanelAction::SelectBlacklist);
         self.rounded_rect(
-            500,
-            302,
-            102,
-            46,
+            whitelist.0,
+            whitelist.1,
+            whitelist.2,
+            whitelist.3,
             12,
             if whitelist_selected || whitelist_hover {
                 PURPLE_DARK
@@ -95,17 +118,17 @@ impl PanelBitmap {
             if whitelist_selected { PURPLE } else { BORDER },
         );
         self.draw_text(
-            512,
-            318,
+            whitelist.0 + 12,
+            whitelist.1 + 16,
             "WHITELIST",
             2,
             if whitelist_selected { TEXT } else { MUTED },
         );
         self.rounded_rect(
-            606,
-            302,
-            102,
-            46,
+            blacklist.0,
+            blacklist.1,
+            blacklist.2,
+            blacklist.3,
             12,
             if blacklist_selected || blacklist_hover {
                 PURPLE_DARK
@@ -115,8 +138,8 @@ impl PanelBitmap {
             if blacklist_selected { PURPLE } else { BORDER },
         );
         self.draw_text(
-            617,
-            318,
+            blacklist.0 + 11,
+            blacklist.1 + 16,
             "BLACKLIST",
             2,
             if blacklist_selected { TEXT } else { MUTED },
@@ -150,16 +173,18 @@ impl PanelBitmap {
                 self.draw_text(520, y + 22, &avatar.to_string(), 2, PURPLE_BRIGHT);
                 let label = compact_social_label(entry, 12);
                 self.draw_text(552, y + 21, &label, 2, TEXT);
+
+                let remove = pixel_rect(layout.rect(action).unwrap());
                 self.rounded_rect(
-                    676,
-                    y + 8,
+                    remove.0,
+                    remove.1 + 2,
                     32,
-                    44,
+                    remove.3.saturating_sub(10),
                     10,
                     if row_hover { PURPLE_DARK } else { PANEL },
                     BORDER,
                 );
-                self.draw_text(686, y + 20, "X", 2, MUTED);
+                self.draw_text(remove.0 + 10, remove.1 + 14, "X", 2, MUTED);
             }
             if entries.len() > 5 {
                 self.draw_text(
@@ -319,6 +344,15 @@ impl PanelBitmap {
             self.draw_text(x + 82, y + 91, footer, 2, color);
         }
     }
+}
+
+fn pixel_rect(rect: crate::layout::LayoutRect) -> (u32, u32, u32, u32) {
+    (
+        rect.x.round() as u32,
+        rect.y.round() as u32,
+        rect.width.round() as u32,
+        rect.height.round() as u32,
+    )
 }
 
 fn social_initial(value: &str) -> char {
