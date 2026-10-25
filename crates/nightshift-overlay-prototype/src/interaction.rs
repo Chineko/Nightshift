@@ -1,6 +1,7 @@
 use crate::{
     home_layout::{
-        HomeBrightnessLayout, HomePrimaryLayout, PanelNavLayout, SocialTabsLayout, contains,
+        HomeBrightnessLayout, HomePrimaryLayout, PanelNavLayout, SettingsToggleLayout,
+        SocialTabsLayout, contains,
     },
     placement::{PanelPose, normalize_quaternion_xyzw},
 };
@@ -67,9 +68,8 @@ struct ButtonRegion {
 }
 
 // Legacy regions stay in place until each room gets its own basement inspection.
-// Brightness, primary action, global navigation, and social tabs now get their geometry from Taffy.
-const SETTINGS_HR: ButtonRegion = region(PanelAction::ToggleHeartRate, 356.0, 446.0, 238.0, 320.0);
-const SETTINGS_OSC: ButtonRegion = region(PanelAction::ToggleOsc, 356.0, 446.0, 354.0, 436.0);
+// Brightness, primary action, global navigation, social tabs, and quick toggles now get
+// their geometry from Taffy.
 const SETTINGS_INVITES: ButtonRegion = region(PanelAction::CycleInviteProfile, 300.0, 446.0, 470.0, 552.0);
 const SETTINGS_VRCHAT: ButtonRegion = region(PanelAction::CycleVrchatStatus, 300.0, 446.0, 586.0, 668.0);
 const SOCIAL_REMOVE: [ButtonRegion; 5] = [
@@ -149,7 +149,16 @@ pub fn action_at_uv_for_page(
             if contains(social_tabs.blacklist, x, y) {
                 return Some(PanelAction::SelectBlacklist);
             }
-            for button in [SETTINGS_HR, SETTINGS_OSC, SETTINGS_INVITES, SETTINGS_VRCHAT] {
+
+            let toggles = SettingsToggleLayout::compute();
+            if contains(toggles.heart_rate_hit(), x, y) {
+                return Some(PanelAction::ToggleHeartRate);
+            }
+            if contains(toggles.osc_hit(), x, y) {
+                return Some(PanelAction::ToggleOsc);
+            }
+
+            for button in [SETTINGS_INVITES, SETTINGS_VRCHAT] {
                 if inside(uv, button) {
                     return Some(button.action);
                 }
