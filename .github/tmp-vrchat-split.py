@@ -42,6 +42,11 @@ for name in ['RuntimeRefresh', 'StatusTaskResult']:
 runtime_body = re.sub(r'(?m)^fn ', 'pub(crate) fn ', runtime_body)
 runtime_body = re.sub(r'(?m)^async fn ', 'pub(crate) async fn ', runtime_body)
 runtime_body = re.sub(r'(?m)^    fn ', '    pub(crate) fn ', runtime_body)
+runtime_body = runtime_body.replace(
+    'impl Drop for AbortTask {\n    pub(crate) fn drop(&mut self) {',
+    'impl Drop for AbortTask {\n    fn drop(&mut self) {',
+    1,
+)
 pipeline_body = re.sub(r'(?m)^fn ', 'pub(crate) fn ', pipeline_body)
 pipeline_body = re.sub(r'(?m)^async fn ', 'pub(crate) async fn ', pipeline_body)
 connection_body = re.sub(r'(?m)^fn ', 'pub(crate) fn ', connection_body)
