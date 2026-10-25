@@ -84,7 +84,6 @@ impl VrchatAuthService {
 
     pub async fn clear_session(&self) -> Result<()> {
         self.api.invalidate_friend_cache();
-        self.api.invalidate_friend_image_cache();
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.clear())
             .await
@@ -108,7 +107,6 @@ impl VrchatAuthService {
 
     async fn persist(&self, session: AuthenticatedSession) -> Result<()> {
         self.api.invalidate_friend_cache();
-        self.api.invalidate_friend_image_cache();
         let stored = stored_session(session);
         let store = self.store.clone();
         tokio::task::spawn_blocking(move || store.save(&stored))
