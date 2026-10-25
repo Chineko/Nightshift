@@ -1,7 +1,10 @@
 use anyhow::Result;
 use nightshift_vrchat_api::{InviteRefused, SessionCookies, VrchatApiClient};
 
-use crate::invite_plan::InviteExecutionPlan;
+use crate::{
+    invite_plan::InviteExecutionPlan,
+    request_coordinator::{RequestClass, shared_vrchat_requests},
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InviteExecutionOutcome {
@@ -33,10 +36,14 @@ pub async fn execute_invite_plan(
             sender_user_id,
             instance_id,
         } => {
-            if let Err(error) = api
-                .invite_user(cookies, &sender_user_id, &instance_id, None)
-                .await
-            {
+            let invite_result = {
+                let _permit = shared_vrchat_requests()
+                    .acquire(RequestClass::InviteWrite)
+                    .await;
+                api.invite_user(cookies, &sender_user_id, &instance_id, None)
+                    .await
+            };
+            if let Err(error) = invite_result {
                 if let Some(refused) = error.downcast_ref::<InviteRefused>() {
                     return Ok(InviteExecutionOutcome::InviteRefused {
                         message: refused.message.clone(),
@@ -47,16 +54,31 @@ pub async fn execute_invite_plan(
 
             // Do not hide first: if VRChat refuses or the invite request fails, the user must
             // retain the original request in VRChat.
-            api.hide_notification(cookies, &notification_id).await?;
+            {
+                let _permit = shared_vrchat_requests()
+                    .acquire(RequestClass::InviteWrite)
+                    .await;
+                api.hide_notification(cookies, &notification_id).await?;
+            }
             Ok(InviteExecutionOutcome::AcceptedRequest)
         }
         InviteExecutionPlan::Decline { notification_id } => {
             // No custom decline message exists yet, so there is no valid response-message slot to
             // send. Omitting responseSlot matches VRChat/Oyasumi behavior for a message-less reply.
-            api.decline_invite_or_request(cookies, &notification_id, None)
-                .await?;
+            {
+                let _permit = shared_vrchat_requests()
+                    .acquire(RequestClass::InviteWrite)
+                    .await;
+                api.decline_invite_or_request(cookies, &notification_id, None)
+                    .await?;
+            }
             // Likewise, only remove the source notification after VRChat accepted the response.
-            api.hide_notification(cookies, &notification_id).await?;
+            {
+                let _permit = shared_vrchat_requests()
+                    .acquire(RequestClass::InviteWrite)
+                    .await;
+                api.hide_notification(cookies, &notification_id).await?;
+            }
             Ok(InviteExecutionOutcome::Declined)
         }
     }
