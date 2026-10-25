@@ -32,6 +32,28 @@ impl Default for AppState {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeHealthState {
+    pub overlay_connected: bool,
+    pub osc_connected: bool,
+    pub heart_rate_connected: bool,
+    pub vrchat_connected: bool,
+    pub heart_rate_provider_status: HrProviderStatus,
+}
+
+impl AppState {
+    pub fn runtime_health(&self) -> RuntimeHealthState {
+        // One health view, zero extra ledgers. The goblins may observe state; they may not fork it.
+        RuntimeHealthState {
+            overlay_connected: self.overlay.runtime_connected,
+            osc_connected: self.osc.connected,
+            heart_rate_connected: self.heart_rate.connected,
+            vrchat_connected: self.vrchat.connected,
+            heart_rate_provider_status: self.heart_rate.provider_status,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionState { Connecting, #[default] Connected, Degraded, Disconnected }
 
