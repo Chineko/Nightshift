@@ -44,6 +44,23 @@ Do not fix only the first compiler error and then wait for CI to reveal the next
 
 This rule exists because the first Taffy basement migration lost time by treating repeated unresolved-module errors as isolated CI failures instead of auditing the integration-test module graph once.
 
+## CI decision-point rule
+
+Do not repeatedly poll an in-progress CI run just to report that it is still running.
+
+Treat CI as a decision gate:
+
+1. Check the run when a concrete decision depends on it: for example before promotion, after a suspected failure should have completed, or when the user explicitly asks for status.
+2. If the run is complete and green, act immediately on the next approved step.
+3. If the run is complete and red, inspect the failing job once, identify the failure class, and fix that class rather than repeatedly re-checking status.
+4. If the run is still in progress, do useful static work that does not depend on its result: inspect the diff, audit module dependencies, map the next bounded slice, or verify collateral.
+5. Do not perform back-to-back status checks with no new decision or evidence between them.
+6. Never expand or promote a slice while its required CI gate is still running.
+
+The goal is not to avoid checking CI; the goal is to make every check answer a real question. **One check per decision point, not a metronome.**
+
+This rule exists because the Taffy renovation lost time when repeated CI polling replaced actual engineering decisions.
+
 ## UI renovation rule
 
 For the overlay rebuild/replacement work:
