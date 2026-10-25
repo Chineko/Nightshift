@@ -1,6 +1,11 @@
-use crate::placement::{PanelPose, normalize_quaternion_xyzw};
+use crate::{
+    home_layout::{HomeBrightnessLayout, contains},
+    placement::{PanelPose, normalize_quaternion_xyzw},
+};
 
 const EPSILON: f32 = 1.0e-5;
+const PANEL_WIDTH_PX: f32 = 768.0;
+const PANEL_HEIGHT_PX: f32 = 960.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanelRay {
@@ -59,13 +64,10 @@ struct ButtonRegion {
     y_max: f32,
 }
 
-// Keep interaction regions aligned with the vertical dashboards in raster.rs.
-// The panel is furniture, not a face-hugger: misses stay misses instead of snapping.
+// Legacy regions stay in place until each room gets its own basement inspection.
+// Brightness is the first control whose geometry is owned entirely by Taffy.
 const NAV_HOME: ButtonRegion = region(PanelAction::NavigateHome, 500.0, 594.0, 38.0, 86.0);
 const NAV_SETTINGS: ButtonRegion = region(PanelAction::NavigateSettings, 602.0, 720.0, 38.0, 86.0);
-const BRIGHTNESS_DOWN: ButtonRegion =
-    region(PanelAction::BrightnessDown, 60.0, 116.0, 340.0, 406.0);
-const BRIGHTNESS_UP: ButtonRegion = region(PanelAction::BrightnessUp, 652.0, 708.0, 340.0, 406.0);
 const PRIMARY_ACTION: ButtonRegion = region(PanelAction::EnterSleep, 40.0, 728.0, 840.0, 914.0);
 const SETTINGS_HR: ButtonRegion = region(PanelAction::ToggleHeartRate, 356.0, 446.0, 238.0, 320.0);
 const SETTINGS_OSC: ButtonRegion = region(PanelAction::ToggleOsc, 356.0, 446.0, 354.0, 436.0);
@@ -90,10 +92,10 @@ const fn region(
 ) -> ButtonRegion {
     ButtonRegion {
         action,
-        x_min: x_min / 768.0,
-        x_max: x_max / 768.0,
-        y_min: y_min / 960.0,
-        y_max: y_max / 960.0,
+        x_min: x_min / PANEL_WIDTH_PX,
+        x_max: x_max / PANEL_WIDTH_PX,
+        y_min: y_min / PANEL_HEIGHT_PX,
+        y_max: y_max / PANEL_HEIGHT_PX,
     }
 }
 
@@ -120,13 +122,21 @@ pub fn action_at_uv_for_page(
     }
     match page {
         PanelPage::Home => {
-            for button in [BRIGHTNESS_DOWN, BRIGHTNESS_UP] {
-                if inside(uv, button) {
-                    return Some(button.action);
-                }
+            let brightness = HomeBrightnessLayout::compute();
+            let x = uv.u * PANEL_WIDTH_PX;
+            let y = uv.v * PANEL_HEIGHT_PX;
+            if contains(brightness.down, x, y) {
+                return Some(PanelAction::BrightnessDown);
+            }
+            if contains(brightness.up, x, y) {
+                return Some(PanelAction::BrightnessUp);
             }
             if inside(uv, PRIMARY_ACTION) {
-                return Some(if wake_action { PanelAction::Wake } else { PanelAction::EnterSleep });
+                return Some(if wake_action {
+                    PanelAction::Wake
+                } else {
+                    PanelAction::EnterSleep
+                });
             }
         }
         PanelPage::Settings => {
