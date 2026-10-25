@@ -3,6 +3,7 @@ mod images;
 
 use std::{
     collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -14,6 +15,7 @@ use super::{BASE_URL, SessionCookies, VrchatApiClient, api_status_error};
 
 pub const FRIEND_METADATA_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const FRIEND_PAGE_SIZE: usize = 100;
+static FRIEND_CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FriendProfile {
@@ -87,8 +89,11 @@ impl VrchatApiClient {
             return Ok(cache.profiles.clone());
         }
 
+        let generation = FRIEND_CACHE_GENERATION.load(Ordering::Acquire);
         let profiles = self.fetch_all_friends(cookies).await?;
-        if let Ok(mut cache) = self.friend_cache.lock() {
+        if FRIEND_CACHE_GENERATION.load(Ordering::Acquire) == generation
+            && let Ok(mut cache) = self.friend_cache.lock()
+        {
             *cache = Some(FriendCache {
                 session_auth: cookies.auth.clone(),
                 loaded_at: Instant::now(),
@@ -114,6 +119,8 @@ impl VrchatApiClient {
     }
 
     pub fn invalidate_friend_cache(&self) {
+        // Any refresh that started before this point is now stale and may not repopulate the cache.
+        FRIEND_CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
         if let Ok(mut cache) = self.friend_cache.lock() {
             *cache = None;
         }
@@ -261,6 +268,15 @@ mod tests {
             auth: "session-b".into(),
             two_factor_auth: None,
         }));
+    }
+
+    #[test]
+    fn invalidation_advances_cache_generation() {
+        let client = VrchatApiClient::new().unwrap();
+        let before = FRIEND_CACHE_GENERATION.load(Ordering::Acquire);
+        client.invalidate_friend_cache();
+        let after = FRIEND_CACHE_GENERATION.load(Ordering::Acquire);
+        assert!(after > before);
     }
 
     #[test]
