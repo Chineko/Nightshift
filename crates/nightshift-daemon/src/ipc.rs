@@ -421,8 +421,9 @@ pub(crate) async fn handle_client(stream: UnixStream, store: StateStore) -> Resu
                                 ClientStep::Continue
                             }
                             Ok(ClientMessage::Report { report }) => {
-                                record_worker_event(&store, &report);
-                                if !store.apply_worker_report(&client, report).await {
+                                if store.apply_worker_report(&client, report.clone()).await {
+                                    record_worker_event(&store, &report);
+                                } else {
                                     send_message(
                                         &mut write_half,
                                         &ServerMessage::Error {
