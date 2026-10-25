@@ -15,6 +15,11 @@ const NAV_HOME_WIDTH: f32 = 94.0;
 const NAV_SETTINGS_WIDTH: f32 = 118.0;
 const NAV_HEIGHT: f32 = 48.0;
 const NAV_GAP: f32 = 8.0;
+const SOCIAL_TABS_X: f32 = 500.0;
+const SOCIAL_TABS_Y: f32 = 302.0;
+const SOCIAL_TAB_WIDTH: f32 = 102.0;
+const SOCIAL_TAB_HEIGHT: f32 = 46.0;
+const SOCIAL_TAB_GAP: f32 = 4.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomeBrightnessLayout {
@@ -31,6 +36,12 @@ pub struct HomePrimaryLayout {
 pub struct PanelNavLayout {
     pub home: LayoutRect,
     pub settings: LayoutRect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SocialTabsLayout {
+    pub whitelist: LayoutRect,
+    pub blacklist: LayoutRect,
 }
 
 impl HomeBrightnessLayout {
@@ -131,6 +142,46 @@ impl PanelNavLayout {
     }
 }
 
+impl SocialTabsLayout {
+    pub fn compute() -> Self {
+        let mut layout = LayoutEngine::new();
+        let whitelist = layout
+            .leaf(SOCIAL_TAB_WIDTH, SOCIAL_TAB_HEIGHT)
+            .expect("static whitelist tab layout should be valid");
+        let blacklist = layout
+            .leaf(SOCIAL_TAB_WIDTH, SOCIAL_TAB_HEIGHT)
+            .expect("static blacklist tab layout should be valid");
+        let root = layout
+            .row(&[whitelist, blacklist], SOCIAL_TAB_GAP)
+            .expect("static social tab row should be valid");
+
+        layout
+            .compute(
+                root,
+                SOCIAL_TAB_WIDTH * 2.0 + SOCIAL_TAB_GAP,
+                SOCIAL_TAB_HEIGHT,
+            )
+            .expect("static social tab layout should compute");
+
+        Self {
+            whitelist: offset(
+                layout
+                    .rect(whitelist)
+                    .expect("whitelist tab rectangle should exist"),
+                SOCIAL_TABS_X,
+                SOCIAL_TABS_Y,
+            ),
+            blacklist: offset(
+                layout
+                    .rect(blacklist)
+                    .expect("blacklist tab rectangle should exist"),
+                SOCIAL_TABS_X,
+                SOCIAL_TABS_Y,
+            ),
+        }
+    }
+}
+
 pub fn contains(rect: LayoutRect, x: f32, y: f32) -> bool {
     x >= rect.x
         && x <= rect.x + rect.width
@@ -210,10 +261,35 @@ mod tests {
     }
 
     #[test]
+    fn social_tabs_keep_the_existing_interaction_contract() {
+        let tabs = SocialTabsLayout::compute();
+
+        assert_eq!(
+            tabs.whitelist,
+            LayoutRect {
+                x: 500.0,
+                y: 302.0,
+                width: 102.0,
+                height: 46.0,
+            }
+        );
+        assert_eq!(
+            tabs.blacklist,
+            LayoutRect {
+                x: 606.0,
+                y: 302.0,
+                width: 102.0,
+                height: 46.0,
+            }
+        );
+    }
+
+    #[test]
     fn hit_testing_uses_the_computed_rectangles() {
         let brightness = HomeBrightnessLayout::compute();
         let primary = HomePrimaryLayout::compute();
         let navigation = PanelNavLayout::compute();
+        let tabs = SocialTabsLayout::compute();
 
         assert!(contains(brightness.down, 60.0, 340.0));
         assert!(contains(brightness.up, 708.0, 406.0));
@@ -224,5 +300,8 @@ mod tests {
         assert!(contains(navigation.home, 500.0, 38.0));
         assert!(contains(navigation.settings, 720.0, 86.0));
         assert!(!contains(navigation.home, 595.0, 86.0));
+        assert!(contains(tabs.whitelist, 500.0, 302.0));
+        assert!(contains(tabs.blacklist, 708.0, 348.0));
+        assert!(!contains(tabs.whitelist, 603.0, 348.0));
     }
 }
