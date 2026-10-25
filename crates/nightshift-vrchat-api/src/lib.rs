@@ -8,6 +8,7 @@ pub use invites::{
 
 use std::{
     collections::HashSet,
+    error::Error,
     fmt,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -25,6 +26,39 @@ const BASE_URL: &str = "https://api.vrchat.cloud/api/1";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const FAVORITES_CACHE_TTL: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum VrchatApiError {
+    SessionExpired { operation: &'static str },
+    RateLimited { operation: &'static str },
+}
+
+impl fmt::Display for VrchatApiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SessionExpired { operation } => {
+                write!(formatter, "VRChat session expired while {operation}")
+            }
+            Self::RateLimited { operation } => {
+                write!(formatter, "VRChat rate-limited {operation}")
+            }
+        }
+    }
+}
+
+impl Error for VrchatApiError {}
+
+pub(crate) fn api_status_error(
+    status: StatusCode,
+    operation: &'static str,
+) -> Option<VrchatApiError> {
+    // 401: the session goblin lost the key. 429: stop rattling VRChat's door for a bit.
+    match status {
+        StatusCode::UNAUTHORIZED => Some(VrchatApiError::SessionExpired { operation }),
+        StatusCode::TOO_MANY_REQUESTS => Some(VrchatApiError::RateLimited { operation }),
+        _ => None,
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct SessionCookies {
@@ -296,8 +330,8 @@ impl VrchatApiClient {
             .await
             .context("requesting VRChat current user")?;
 
-        if response.status() == StatusCode::UNAUTHORIZED {
-            bail!("VRChat session is not authenticated");
+        if let Some(error) = api_status_error(response.status(), "validating the current user") {
+            return Err(error.into());
         }
         let response = response
             .error_for_status()
@@ -561,5 +595,22 @@ mod tests {
         assert!(
             validate_vrchat_user_id("usr_01234567-89ab-cdef-0123-456789abcde/").is_err()
         );
+    }
+
+    #[test]
+    fn classifies_session_and_rate_limit_statuses() {
+        assert_eq!(
+            api_status_error(StatusCode::UNAUTHORIZED, "refreshing friends"),
+            Some(VrchatApiError::SessionExpired {
+                operation: "refreshing friends"
+            })
+        );
+        assert_eq!(
+            api_status_error(StatusCode::TOO_MANY_REQUESTS, "refreshing friends"),
+            Some(VrchatApiError::RateLimited {
+                operation: "refreshing friends"
+            })
+        );
+        assert_eq!(api_status_error(StatusCode::BAD_GATEWAY, "refreshing friends"), None);
     }
 }
