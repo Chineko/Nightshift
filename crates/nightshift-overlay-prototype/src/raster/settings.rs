@@ -1,15 +1,36 @@
 use super::*;
+use crate::home_layout::PanelNavLayout;
 
 impl PanelBitmap {
     pub(super) fn draw_settings(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
+        let nav_layout = PanelNavLayout::compute();
+        let nav_home = pixel_rect(nav_layout.home);
+        let nav_settings = pixel_rect(nav_layout.settings);
+
         self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
         self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
         self.draw_crescent(74, 62, 13, PURPLE_BRIGHT, PURPLE_DARK);
         self.draw_text(112, 49, "NIGHTSHIFT", 4, TEXT);
-        self.rounded_rect(500, 39, 96, 46, 14, PANEL_ALT, BORDER);
-        self.draw_text(519, 54, "HOME", 3, MUTED);
-        self.rounded_rect(602, 39, 118, 46, 14, PURPLE_DARK, PURPLE);
-        self.draw_text(616, 54, "SETTINGS", 3, TEXT);
+        self.rounded_rect(
+            nav_home.0,
+            nav_home.1 + 1,
+            nav_home.2 + 2,
+            nav_home.3 - 2,
+            14,
+            PANEL_ALT,
+            BORDER,
+        );
+        self.draw_text(nav_home.0 + 19, nav_home.1 + 16, "HOME", 3, MUTED);
+        self.rounded_rect(
+            nav_settings.0,
+            nav_settings.1 + 1,
+            nav_settings.2,
+            nav_settings.3 - 2,
+            14,
+            PURPLE_DARK,
+            PURPLE,
+        );
+        self.draw_text(nav_settings.0 + 14, nav_settings.1 + 16, "SETTINGS", 3, TEXT);
 
         self.draw_text(40, 124, "PREFERENCES", 2, PURPLE_BRIGHT);
         self.draw_text(40, 151, "SETTINGS", 5, TEXT);
@@ -319,6 +340,15 @@ impl PanelBitmap {
             self.draw_text(x + 82, y + 91, footer, 2, color);
         }
     }
+}
+
+fn pixel_rect(rect: crate::layout::LayoutRect) -> (u32, u32, u32, u32) {
+    (
+        rect.x.round() as u32,
+        rect.y.round() as u32,
+        rect.width.round() as u32,
+        rect.height.round() as u32,
+    )
 }
 
 fn social_initial(value: &str) -> char {
