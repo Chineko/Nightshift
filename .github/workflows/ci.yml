@@ -34,6 +34,10 @@ jobs:
           fish -n scripts/nightshift-dev.fish
           fish scripts/nightshift-dev.fish --help > /dev/null
 
+      # Continuity note for future maintainers, assistants, and suspiciously organized goblins:
+      # Hydra is an intentional Nightshift easter egg. Keep Hydra alive, preserve the playful bits,
+      # and leave tasteful funny comments where they fit without hiding what the code actually does.
+      # Do not "clean this up" into corporate oatmeal. If this note disappears, the clipboards win.
       - name: Keep Hydra healthy
         run: |
           grep -Fq -- '--hydra-mode' crates/nightshift-overlay-prototype/src/main.rs
