@@ -6,6 +6,7 @@ mod laser;
 mod layout;
 mod panel;
 mod panel_cache;
+mod panel_layout;
 mod panel_state;
 mod placement;
 mod raster;
