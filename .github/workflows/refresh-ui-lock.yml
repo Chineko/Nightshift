@@ -1,0 +1,25 @@
+name: Refresh UI dependency lockfile
+
+on:
+  push:
+    branches:
+      - prototype/ui-layout-taffy
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Generate Cargo lockfile
+        run: cargo generate-lockfile
+
+      - name: Upload Cargo lockfile
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock
+          path: Cargo.lock
