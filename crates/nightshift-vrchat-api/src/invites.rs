@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::{
     BASE_URL, FAVORITES_CACHE_TTL, FavoriteCache, SessionCookies, VrchatApiClient,
-    validate_vrchat_user_id,
+    api_status_error, validate_vrchat_user_id,
 };
 
 const PIPELINE_URL: &str = "wss://pipeline.vrchat.cloud/";
@@ -231,8 +231,8 @@ impl VrchatApiClient {
                 .await
                 .context("listing VRChat favorite friends")?;
 
-            if response.status() == StatusCode::UNAUTHORIZED {
-                bail!("VRChat session expired while listing favorite friends");
+            if let Some(error) = api_status_error(response.status(), "listing favorite friends") {
+                return Err(error.into());
             }
             let response = response
                 .error_for_status()
@@ -270,8 +270,8 @@ impl VrchatApiClient {
             .await
             .context("checking VRChat invite sender friend status")?;
 
-        if response.status() == StatusCode::UNAUTHORIZED {
-            bail!("VRChat session expired while checking friend status");
+        if let Some(error) = api_status_error(response.status(), "checking friend status") {
+            return Err(error.into());
         }
         let response = response
             .error_for_status()
@@ -305,10 +305,11 @@ impl VrchatApiClient {
             .await
             .context("sending VRChat invite")?;
 
-        if response.status() == StatusCode::UNAUTHORIZED {
-            bail!("VRChat session expired while sending invite");
+        if let Some(error) = api_status_error(response.status(), "sending invite") {
+            return Err(error.into());
         }
         if response.status() == StatusCode::FORBIDDEN {
+            // 403 is VRChat saying "nope" to this invite, not a dead session. Keep the evidence.
             let body = response.text().await.unwrap_or_default();
             let message = serde_json::from_str::<ApiErrorEnvelope>(&body)
                 .ok()
@@ -338,8 +339,8 @@ impl VrchatApiClient {
             .await
             .context("declining VRChat invite notification")?;
 
-        if response.status() == StatusCode::UNAUTHORIZED {
-            bail!("VRChat session expired while declining invite notification");
+        if let Some(error) = api_status_error(response.status(), "declining invite notification") {
+            return Err(error.into());
         }
         response
             .error_for_status()
@@ -363,8 +364,8 @@ impl VrchatApiClient {
             .await
             .context("hiding VRChat notification")?;
 
-        if response.status() == StatusCode::UNAUTHORIZED {
-            bail!("VRChat session expired while hiding notification");
+        if let Some(error) = api_status_error(response.status(), "hiding notification") {
+            return Err(error.into());
         }
         response
             .error_for_status()
