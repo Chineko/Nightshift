@@ -9,6 +9,12 @@ const PRIMARY_X: f32 = 40.0;
 const PRIMARY_Y: f32 = 840.0;
 const PRIMARY_WIDTH: f32 = 688.0;
 const PRIMARY_HEIGHT: f32 = 74.0;
+const NAV_X: f32 = 500.0;
+const NAV_Y: f32 = 38.0;
+const NAV_HOME_WIDTH: f32 = 94.0;
+const NAV_SETTINGS_WIDTH: f32 = 118.0;
+const NAV_HEIGHT: f32 = 48.0;
+const NAV_GAP: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomeBrightnessLayout {
@@ -19,6 +25,12 @@ pub struct HomeBrightnessLayout {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomePrimaryLayout {
     pub action: LayoutRect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PanelNavLayout {
+    pub home: LayoutRect,
+    pub settings: LayoutRect,
 }
 
 impl HomeBrightnessLayout {
@@ -81,6 +93,44 @@ impl HomePrimaryLayout {
     }
 }
 
+impl PanelNavLayout {
+    pub fn compute() -> Self {
+        let mut layout = LayoutEngine::new();
+        let home = layout
+            .leaf(NAV_HOME_WIDTH, NAV_HEIGHT)
+            .expect("static Home navigation layout should be valid");
+        let settings = layout
+            .leaf(NAV_SETTINGS_WIDTH, NAV_HEIGHT)
+            .expect("static Settings navigation layout should be valid");
+        let root = layout
+            .row(&[home, settings], NAV_GAP)
+            .expect("static navigation row should be valid");
+
+        layout
+            .compute(
+                root,
+                NAV_HOME_WIDTH + NAV_SETTINGS_WIDTH + NAV_GAP,
+                NAV_HEIGHT,
+            )
+            .expect("static navigation layout should compute");
+
+        Self {
+            home: offset(
+                layout.rect(home).expect("Home navigation rectangle should exist"),
+                NAV_X,
+                NAV_Y,
+            ),
+            settings: offset(
+                layout
+                    .rect(settings)
+                    .expect("Settings navigation rectangle should exist"),
+                NAV_X,
+                NAV_Y,
+            ),
+        }
+    }
+}
+
 pub fn contains(rect: LayoutRect, x: f32, y: f32) -> bool {
     x >= rect.x
         && x <= rect.x + rect.width
@@ -136,9 +186,34 @@ mod tests {
     }
 
     #[test]
+    fn navigation_keeps_the_existing_interaction_contract() {
+        let navigation = PanelNavLayout::compute();
+
+        assert_eq!(
+            navigation.home,
+            LayoutRect {
+                x: 500.0,
+                y: 38.0,
+                width: 94.0,
+                height: 48.0,
+            }
+        );
+        assert_eq!(
+            navigation.settings,
+            LayoutRect {
+                x: 602.0,
+                y: 38.0,
+                width: 118.0,
+                height: 48.0,
+            }
+        );
+    }
+
+    #[test]
     fn hit_testing_uses_the_computed_rectangles() {
         let brightness = HomeBrightnessLayout::compute();
         let primary = HomePrimaryLayout::compute();
+        let navigation = PanelNavLayout::compute();
 
         assert!(contains(brightness.down, 60.0, 340.0));
         assert!(contains(brightness.up, 708.0, 406.0));
@@ -146,5 +221,8 @@ mod tests {
         assert!(contains(primary.action, 40.0, 840.0));
         assert!(contains(primary.action, 728.0, 914.0));
         assert!(!contains(primary.action, 729.0, 914.0));
+        assert!(contains(navigation.home, 500.0, 38.0));
+        assert!(contains(navigation.settings, 720.0, 86.0));
+        assert!(!contains(navigation.home, 595.0, 86.0));
     }
 }
