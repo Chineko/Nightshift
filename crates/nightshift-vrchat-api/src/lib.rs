@@ -1,5 +1,7 @@
+mod friends;
 mod invites;
 
+pub use friends::{FRIEND_METADATA_CACHE_TTL, FriendProfile};
 pub use invites::{
     InviteRefused, NotificationKind, VrchatNotification, parse_pipeline_notification, pipeline_url,
 };
@@ -162,6 +164,7 @@ struct FavoriteCache {
 pub struct VrchatApiClient {
     http: HttpClient,
     favorite_cache: Arc<Mutex<Option<FavoriteCache>>>,
+    friend_cache: Arc<Mutex<Option<friends::FriendCache>>>,
 }
 
 impl VrchatApiClient {
@@ -178,6 +181,7 @@ impl VrchatApiClient {
         Ok(Self {
             http,
             favorite_cache: Arc::new(Mutex::new(None)),
+            friend_cache: Arc::new(Mutex::new(None)),
         })
     }
 
