@@ -1,7 +1,7 @@
 use crate::{
     home_layout::{
         HomeBrightnessLayout, HomePrimaryLayout, PanelNavLayout, SettingsToggleLayout,
-        SocialTabsLayout, contains,
+        SettingsValueLayout, SocialRemoveLayout, SocialTabsLayout, contains,
     },
     placement::{PanelPose, normalize_quaternion_xyzw},
 };
@@ -56,44 +56,6 @@ pub enum PanelAction {
     SelectWhitelist,
     SelectBlacklist,
     RemoveSocial(u8),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ButtonRegion {
-    action: PanelAction,
-    x_min: f32,
-    x_max: f32,
-    y_min: f32,
-    y_max: f32,
-}
-
-// Legacy regions stay in place until each room gets its own basement inspection.
-// Brightness, primary action, global navigation, social tabs, and quick toggles now get
-// their geometry from Taffy.
-const SETTINGS_INVITES: ButtonRegion = region(PanelAction::CycleInviteProfile, 300.0, 446.0, 470.0, 552.0);
-const SETTINGS_VRCHAT: ButtonRegion = region(PanelAction::CycleVrchatStatus, 300.0, 446.0, 586.0, 668.0);
-const SOCIAL_REMOVE: [ButtonRegion; 5] = [
-    region(PanelAction::RemoveSocial(0), 676.0, 716.0, 366.0, 420.0),
-    region(PanelAction::RemoveSocial(1), 676.0, 716.0, 438.0, 492.0),
-    region(PanelAction::RemoveSocial(2), 676.0, 716.0, 510.0, 564.0),
-    region(PanelAction::RemoveSocial(3), 676.0, 716.0, 582.0, 636.0),
-    region(PanelAction::RemoveSocial(4), 676.0, 716.0, 654.0, 708.0),
-];
-
-const fn region(
-    action: PanelAction,
-    x_min: f32,
-    x_max: f32,
-    y_min: f32,
-    y_max: f32,
-) -> ButtonRegion {
-    ButtonRegion {
-        action,
-        x_min: x_min / PANEL_WIDTH_PX,
-        x_max: x_max / PANEL_WIDTH_PX,
-        y_min: y_min / PANEL_HEIGHT_PX,
-        y_max: y_max / PANEL_HEIGHT_PX,
-    }
 }
 
 pub fn action_at_uv(uv: PanelUv) -> Option<PanelAction> {
@@ -158,23 +120,26 @@ pub fn action_at_uv_for_page(
                 return Some(PanelAction::ToggleOsc);
             }
 
-            for button in [SETTINGS_INVITES, SETTINGS_VRCHAT] {
-                if inside(uv, button) {
-                    return Some(button.action);
-                }
+            let values = SettingsValueLayout::compute();
+            if contains(values.invite_rules, x, y) {
+                return Some(PanelAction::CycleInviteProfile);
             }
-            for button in SOCIAL_REMOVE {
-                if inside(uv, button) {
-                    return Some(button.action);
+            if contains(values.vrchat_status, x, y) {
+                return Some(PanelAction::CycleVrchatStatus);
+            }
+
+            let social_remove = SocialRemoveLayout::compute();
+            for index in 0..social_remove.buttons.len() {
+                if social_remove
+                    .hit(index)
+                    .is_some_and(|rect| contains(rect, x, y))
+                {
+                    return Some(PanelAction::RemoveSocial(index as u8));
                 }
             }
         }
     }
     None
-}
-
-fn inside(uv: PanelUv, button: ButtonRegion) -> bool {
-    uv.u >= button.x_min && uv.u <= button.x_max && uv.v >= button.y_min && uv.v <= button.y_max
 }
 
 pub fn begin_panel_grab(controller_pose: PanelPose, panel_pose: PanelPose) -> Option<PanelGrab> {
