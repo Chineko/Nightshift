@@ -1,20 +1,29 @@
 use super::*;
-use crate::home_layout::{HomeBrightnessLayout, HomePrimaryLayout, PanelNavLayout};
+use crate::home_layout::{
+    HomeBrightnessLayout, HomeCompositionLayout, PanelChromeLayout, PanelNavLayout,
+};
 
 impl PanelBitmap {
     pub(super) fn draw_home(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
-        let brightness_layout = HomeBrightnessLayout::compute();
-        let primary_layout = HomePrimaryLayout::compute();
-        let nav_layout = PanelNavLayout::compute();
-        let down = pixel_rect(brightness_layout.down);
-        let up = pixel_rect(brightness_layout.up);
-        let primary = pixel_rect(primary_layout.action);
-        let nav_home = pixel_rect(nav_layout.home);
+        let chrome = PanelChromeLayout::compute();
+        let home = HomeCompositionLayout::compute();
+        let brightness = HomeBrightnessLayout::compute();
+        let nav = PanelNavLayout::compute();
+        let header = pixel_rect(chrome.header);
+        let brightness_panel = pixel_rect(home.brightness_panel);
+        let brightness_track = pixel_rect(home.brightness_track);
+        let status_cards = home.status_cards.map(pixel_rect);
+        let automation = pixel_rect(home.automation_panel);
+        let primary = pixel_rect(home.primary_action);
+        let connection = pixel_rect(home.connection_badge);
+        let down = pixel_rect(brightness.down);
+        let up = pixel_rect(brightness.up);
+        let nav_home = pixel_rect(nav.home);
 
-        self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
-        self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
-        self.draw_crescent(74, 62, 13, PURPLE_BRIGHT, PURPLE_DARK);
-        self.draw_text(112, 49, "NIGHTSHIFT", 4, TEXT);
+        self.rounded_rect(header.0, header.1, header.2, header.3, 18, PANEL, BORDER);
+        self.rounded_rect(header.0 + 20, header.1 + 16, 44, 44, 13, PURPLE_DARK, PURPLE);
+        self.draw_crescent(header.0 + 42, header.1 + 38, 13, PURPLE_BRIGHT, PURPLE_DARK);
+        self.draw_text(header.0 + 80, header.1 + 25, "NIGHTSHIFT", 4, TEXT);
         self.rounded_rect(
             nav_home.0,
             nav_home.1 + 1,
@@ -30,42 +39,74 @@ impl PanelBitmap {
         self.draw_text(48, 124, "VR OVERLAY", 2, PURPLE_BRIGHT);
         self.draw_text(48, 151, "GOOD EVENING.", 5, TEXT);
         self.draw_text(48, 194, "EVERYTHING IS CALM AND CONNECTED.", 2, MUTED);
-        self.rounded_rect(621, 135, 99, 44, 14, PANEL, BORDER);
-        self.draw_circle(641, 157, 5, if content.connected { GREEN } else { MUTED });
+        self.rounded_rect(connection.0, connection.1, connection.2, connection.3, 14, PANEL, BORDER);
+        self.draw_circle(
+            connection.0 + 20,
+            connection.1 + 22,
+            5,
+            if content.connected { GREEN } else { MUTED },
+        );
         self.draw_text(
-            654,
-            149,
+            connection.0 + 33,
+            connection.1 + 14,
             if content.connected { "LIVE" } else { "OFFLINE" },
             2,
             if content.connected { GREEN } else { MUTED },
         );
 
-        self.glass_panel(40, 230, 688, 250, 20, [18, 20, 31, 218]);
-        self.rounded_rect(62, 250, 54, 54, 14, AMBER_DARK, AMBER_DARK);
-        self.draw_sun(89, 277, 11, AMBER);
-        self.draw_text(132, 251, "BRIGHTNESS", 3, TEXT);
-        self.draw_text(132, 278, "OVERLAY DISPLAY LEVEL", 2, MUTED);
-        let value = format!("{}%", content.brightness_percent);
-        self.draw_text(551, 260, &value, 6, TEXT);
-
-        let track_x = 92;
-        let track_y = 370;
-        let track_w = 584;
+        self.glass_panel(
+            brightness_panel.0,
+            brightness_panel.1,
+            brightness_panel.2,
+            brightness_panel.3,
+            20,
+            [18, 20, 31, 218],
+        );
         self.rounded_rect(
-            track_x,
-            track_y,
-            track_w,
-            7,
+            brightness_panel.0 + 22,
+            brightness_panel.1 + 20,
+            54,
+            54,
+            14,
+            AMBER_DARK,
+            AMBER_DARK,
+        );
+        self.draw_sun(brightness_panel.0 + 49, brightness_panel.1 + 47, 11, AMBER);
+        self.draw_text(brightness_panel.0 + 92, brightness_panel.1 + 21, "BRIGHTNESS", 3, TEXT);
+        self.draw_text(
+            brightness_panel.0 + 92,
+            brightness_panel.1 + 48,
+            "OVERLAY DISPLAY LEVEL",
+            2,
+            MUTED,
+        );
+        let value = format!("{}%", content.brightness_percent);
+        self.draw_text(brightness_panel.0 + 511, brightness_panel.1 + 30, &value, 6, TEXT);
+
+        self.rounded_rect(
+            brightness_track.0,
+            brightness_track.1,
+            brightness_track.2,
+            brightness_track.3,
             3,
             [48, 52, 66, 255],
             [48, 52, 66, 255],
         );
-        let fill_w = ((track_w as f32 * content.brightness_percent as f32 / 100.0).round() as u32)
-            .clamp(7, track_w);
-        self.rounded_rect(track_x, track_y, fill_w, 7, 3, PURPLE, PURPLE);
-        let knob_x = track_x + fill_w.saturating_sub(1);
-        self.draw_circle(knob_x, track_y + 3, 10, PURPLE_BRIGHT);
-        self.draw_circle(knob_x, track_y + 3, 5, TEXT);
+        let fill_w = ((brightness_track.2 as f32 * content.brightness_percent as f32 / 100.0)
+            .round() as u32)
+            .clamp(brightness_track.3, brightness_track.2);
+        self.rounded_rect(
+            brightness_track.0,
+            brightness_track.1,
+            fill_w,
+            brightness_track.3,
+            3,
+            PURPLE,
+            PURPLE,
+        );
+        let knob_x = brightness_track.0 + fill_w.saturating_sub(1);
+        self.draw_circle(knob_x, brightness_track.1 + 3, 10, PURPLE_BRIGHT);
+        self.draw_circle(knob_x, brightness_track.1 + 3, 5, TEXT);
 
         let down_hover = hover == Some(PanelAction::BrightnessDown);
         let up_hover = hover == Some(PanelAction::BrightnessUp);
@@ -77,33 +118,38 @@ impl PanelBitmap {
         }
         self.draw_crescent(down.0 + 22, down.1 + 33, 10, MUTED, PANEL);
         self.draw_sun(up.0 + 34, up.1 + 33, 8, MUTED);
-        self.draw_line(64, 421, 704, 421, BORDER);
-        self.draw_text(64, 443, "TARGET BRIGHTNESS", 2, MUTED);
+        self.draw_line(
+            brightness_panel.0 + 24,
+            brightness_panel.1 + 191,
+            brightness_panel.0 + brightness_panel.2 - 24,
+            brightness_panel.1 + 191,
+            BORDER,
+        );
         self.draw_text(
-            615,
-            443,
-            if content.brightness_synced {
-                "SYNCED"
-            } else {
-                "FADING"
-            },
+            brightness_panel.0 + 24,
+            brightness_panel.1 + 213,
+            "TARGET BRIGHTNESS",
             2,
-            if content.brightness_synced {
-                GREEN
-            } else {
-                AMBER
-            },
+            MUTED,
+        );
+        self.draw_text(
+            brightness_panel.0 + 575,
+            brightness_panel.1 + 213,
+            if content.brightness_synced { "SYNCED" } else { "FADING" },
+            2,
+            if content.brightness_synced { GREEN } else { AMBER },
         );
 
         self.draw_text(48, 505, "AT A GLANCE", 3, TEXT);
         self.draw_text(659, 507, "LIVE", 2, GREEN);
         self.draw_circle(643, 515, 5, GREEN);
 
+        let [heart_rate, osc, vrchat] = status_cards;
         self.status_card(
-            40,
-            540,
-            216,
-            136,
+            heart_rate.0,
+            heart_rate.1,
+            heart_rate.2,
+            heart_rate.3,
             PINK,
             "HR",
             "HEART RATE",
@@ -111,10 +157,10 @@ impl PanelBitmap {
             Some((&content.heart_rate_status, GREEN)),
         );
         self.status_card(
-            276,
-            540,
-            216,
-            136,
+            osc.0,
+            osc.1,
+            osc.2,
+            osc.3,
             BLUE,
             "OSC",
             "OSC AUTOMATION",
@@ -122,10 +168,10 @@ impl PanelBitmap {
             None,
         );
         self.status_card(
-            512,
-            540,
-            216,
-            136,
+            vrchat.0,
+            vrchat.1,
+            vrchat.2,
+            vrchat.3,
             PURPLE_BRIGHT,
             "VR",
             "VRCHAT STATUS",
@@ -133,18 +179,39 @@ impl PanelBitmap {
             None,
         );
 
-        self.glass_panel(40, 700, 688, 112, 18, [28, 22, 47, 224]);
-        self.rounded_rect(62, 721, 54, 54, 14, PURPLE_DARK, PURPLE_DARK);
-        self.draw_lightning(89, 748, PURPLE_BRIGHT);
-        self.draw_text(132, 717, "AUTOMATION READY", 3, TEXT);
+        self.glass_panel(
+            automation.0,
+            automation.1,
+            automation.2,
+            automation.3,
+            18,
+            [28, 22, 47, 224],
+        );
+        self.rounded_rect(
+            automation.0 + 22,
+            automation.1 + 21,
+            54,
+            54,
+            14,
+            PURPLE_DARK,
+            PURPLE_DARK,
+        );
+        self.draw_lightning(automation.0 + 49, automation.1 + 48, PURPLE_BRIGHT);
+        self.draw_text(automation.0 + 92, automation.1 + 17, "AUTOMATION READY", 3, TEXT);
         self.draw_text(
-            132,
-            751,
+            automation.0 + 92,
+            automation.1 + 51,
             &format!("SLEEP TARGET {}%", content.target_brightness_percent),
             2,
             MUTED,
         );
-        self.draw_text(132, 777, "BRIGHTNESS + VRCHAT UPDATE", 2, MUTED);
+        self.draw_text(
+            automation.0 + 92,
+            automation.1 + 77,
+            "BRIGHTNESS + VRCHAT UPDATE",
+            2,
+            MUTED,
+        );
 
         let primary_action = if content.sleep_action_is_wake() {
             PanelAction::Wake
