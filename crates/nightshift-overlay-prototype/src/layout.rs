@@ -1,5 +1,9 @@
-use anyhow::{Context, Result};
+use std::collections::HashMap;
+
+use anyhow::{Context, Result, anyhow};
 use taffy::prelude::*;
+
+use crate::widget::WidgetId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LayoutNode(NodeId);
@@ -14,6 +18,7 @@ pub struct LayoutRect {
 
 pub struct LayoutEngine {
     tree: TaffyTree<()>,
+    widgets: HashMap<WidgetId, LayoutNode>,
 }
 
 impl Default for LayoutEngine {
@@ -26,6 +31,7 @@ impl LayoutEngine {
     pub fn new() -> Self {
         Self {
             tree: TaffyTree::new(),
+            widgets: HashMap::new(),
         }
     }
 
@@ -73,6 +79,10 @@ impl LayoutEngine {
             .context("creating Nightshift flex container")
     }
 
+    pub fn bind(&mut self, widget: WidgetId, node: LayoutNode) {
+        self.widgets.insert(widget, node);
+    }
+
     pub fn compute(&mut self, root: LayoutNode, width: f32, height: f32) -> Result<()> {
         self.tree
             .compute_layout(
@@ -97,11 +107,21 @@ impl LayoutEngine {
             height: layout.size.height,
         })
     }
+
+    pub fn rect_for_widget(&self, widget: WidgetId) -> Result<LayoutRect> {
+        let node = self
+            .widgets
+            .get(&widget)
+            .copied()
+            .ok_or_else(|| anyhow!("widget has no Nightshift layout node"))?;
+        self.rect(node)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widget::{Widget, WidgetArena, WidgetKind};
 
     #[test]
     fn columns_space_children_without_manual_coordinates() {
@@ -127,5 +147,25 @@ mod tests {
 
         assert_eq!(layout.rect(first).unwrap().x, 0.0);
         assert_eq!(layout.rect(second).unwrap().x, 88.0);
+    }
+
+    #[test]
+    fn widget_ids_resolve_the_same_geometry_used_for_drawing() {
+        let mut widgets = WidgetArena::new();
+        let button = widgets.insert(Widget::new("sleep", WidgetKind::Button));
+        let mut layout = LayoutEngine::new();
+        let node = layout.leaf(240.0, 72.0).unwrap();
+        layout.bind(button, node);
+        layout.compute(node, 240.0, 72.0).unwrap();
+
+        assert_eq!(
+            layout.rect_for_widget(button).unwrap(),
+            LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                width: 240.0,
+                height: 72.0,
+            }
+        );
     }
 }
