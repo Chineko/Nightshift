@@ -20,6 +20,13 @@ const SOCIAL_TABS_Y: f32 = 302.0;
 const SOCIAL_TAB_WIDTH: f32 = 102.0;
 const SOCIAL_TAB_HEIGHT: f32 = 46.0;
 const SOCIAL_TAB_GAP: f32 = 4.0;
+const SETTINGS_TOGGLE_X: f32 = 370.0;
+const SETTINGS_TOGGLE_Y: f32 = 261.0;
+const SETTINGS_TOGGLE_WIDTH: f32 = 62.0;
+const SETTINGS_TOGGLE_HEIGHT: f32 = 36.0;
+const SETTINGS_TOGGLE_GAP: f32 = 80.0;
+const SETTINGS_TOGGLE_HIT_PAD_X: f32 = 14.0;
+const SETTINGS_TOGGLE_HIT_PAD_Y: f32 = 23.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomeBrightnessLayout {
@@ -42,6 +49,12 @@ pub struct PanelNavLayout {
 pub struct SocialTabsLayout {
     pub whitelist: LayoutRect,
     pub blacklist: LayoutRect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SettingsToggleLayout {
+    pub heart_rate: LayoutRect,
+    pub osc: LayoutRect,
 }
 
 impl HomeBrightnessLayout {
@@ -182,6 +195,60 @@ impl SocialTabsLayout {
     }
 }
 
+impl SettingsToggleLayout {
+    pub fn compute() -> Self {
+        let mut layout = LayoutEngine::new();
+        let heart_rate = layout
+            .leaf(SETTINGS_TOGGLE_WIDTH, SETTINGS_TOGGLE_HEIGHT)
+            .expect("static heart-rate toggle layout should be valid");
+        let osc = layout
+            .leaf(SETTINGS_TOGGLE_WIDTH, SETTINGS_TOGGLE_HEIGHT)
+            .expect("static OSC toggle layout should be valid");
+        let root = layout
+            .column(&[heart_rate, osc], SETTINGS_TOGGLE_GAP)
+            .expect("static Settings toggle column should be valid");
+
+        layout
+            .compute(
+                root,
+                SETTINGS_TOGGLE_WIDTH,
+                SETTINGS_TOGGLE_HEIGHT * 2.0 + SETTINGS_TOGGLE_GAP,
+            )
+            .expect("static Settings toggle layout should compute");
+
+        Self {
+            heart_rate: offset(
+                layout
+                    .rect(heart_rate)
+                    .expect("heart-rate toggle rectangle should exist"),
+                SETTINGS_TOGGLE_X,
+                SETTINGS_TOGGLE_Y,
+            ),
+            osc: offset(
+                layout.rect(osc).expect("OSC toggle rectangle should exist"),
+                SETTINGS_TOGGLE_X,
+                SETTINGS_TOGGLE_Y,
+            ),
+        }
+    }
+
+    pub fn heart_rate_hit(self) -> LayoutRect {
+        expand(
+            self.heart_rate,
+            SETTINGS_TOGGLE_HIT_PAD_X,
+            SETTINGS_TOGGLE_HIT_PAD_Y,
+        )
+    }
+
+    pub fn osc_hit(self) -> LayoutRect {
+        expand(
+            self.osc,
+            SETTINGS_TOGGLE_HIT_PAD_X,
+            SETTINGS_TOGGLE_HIT_PAD_Y,
+        )
+    }
+}
+
 pub fn contains(rect: LayoutRect, x: f32, y: f32) -> bool {
     x >= rect.x
         && x <= rect.x + rect.width
@@ -193,6 +260,15 @@ fn offset(mut rect: LayoutRect, x: f32, y: f32) -> LayoutRect {
     rect.x += x;
     rect.y += y;
     rect
+}
+
+fn expand(rect: LayoutRect, x: f32, y: f32) -> LayoutRect {
+    LayoutRect {
+        x: rect.x - x,
+        y: rect.y - y,
+        width: rect.width + x * 2.0,
+        height: rect.height + y * 2.0,
+    }
 }
 
 #[cfg(test)]
@@ -285,11 +361,54 @@ mod tests {
     }
 
     #[test]
+    fn settings_toggles_keep_visual_and_hit_contracts() {
+        let toggles = SettingsToggleLayout::compute();
+
+        assert_eq!(
+            toggles.heart_rate,
+            LayoutRect {
+                x: 370.0,
+                y: 261.0,
+                width: 62.0,
+                height: 36.0,
+            }
+        );
+        assert_eq!(
+            toggles.osc,
+            LayoutRect {
+                x: 370.0,
+                y: 377.0,
+                width: 62.0,
+                height: 36.0,
+            }
+        );
+        assert_eq!(
+            toggles.heart_rate_hit(),
+            LayoutRect {
+                x: 356.0,
+                y: 238.0,
+                width: 90.0,
+                height: 82.0,
+            }
+        );
+        assert_eq!(
+            toggles.osc_hit(),
+            LayoutRect {
+                x: 356.0,
+                y: 354.0,
+                width: 90.0,
+                height: 82.0,
+            }
+        );
+    }
+
+    #[test]
     fn hit_testing_uses_the_computed_rectangles() {
         let brightness = HomeBrightnessLayout::compute();
         let primary = HomePrimaryLayout::compute();
         let navigation = PanelNavLayout::compute();
         let tabs = SocialTabsLayout::compute();
+        let toggles = SettingsToggleLayout::compute();
 
         assert!(contains(brightness.down, 60.0, 340.0));
         assert!(contains(brightness.up, 708.0, 406.0));
@@ -303,5 +422,8 @@ mod tests {
         assert!(contains(tabs.whitelist, 500.0, 302.0));
         assert!(contains(tabs.blacklist, 708.0, 348.0));
         assert!(!contains(tabs.whitelist, 603.0, 348.0));
+        assert!(contains(toggles.heart_rate_hit(), 356.0, 238.0));
+        assert!(contains(toggles.osc_hit(), 446.0, 436.0));
+        assert!(!contains(toggles.heart_rate_hit(), 447.0, 320.0));
     }
 }
