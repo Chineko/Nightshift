@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 ash = { version = "0.38", default-features = false, features = ["loaded"] }
+cosmic-text = { version = "0.19", default-features = false, features = ["std", "swash"] }
 ctrlc = "3.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 nightshift-pose = { path = "../nightshift-pose" }
