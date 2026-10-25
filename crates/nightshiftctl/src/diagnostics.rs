@@ -73,6 +73,7 @@ fn build_report(state: &AppState) -> Result<String> {
     writeln!(report)?;
 
     write_state_summary(&mut report, state)?;
+    write_recent_events(&mut report, state)?;
     write_system_summary(&mut report)?;
     write_process_summary(&mut report)?;
 
@@ -137,6 +138,20 @@ fn write_state_summary(report: &mut String, state: &AppState) -> Result<()> {
         state.osc.avatar_parameter_count
     )?;
     writeln!(report, "  gogo_detected: {}", state.osc.gogo_detected)?;
+    writeln!(report)?;
+    Ok(())
+}
+
+fn write_recent_events(report: &mut String, state: &AppState) -> Result<()> {
+    writeln!(report, "recent_events")?;
+    writeln!(report, "  count: {}", state.recent_events.len())?;
+    for event in &state.recent_events {
+        writeln!(
+            report,
+            "  - uptime_ms={} kind={:?} message={}",
+            event.uptime_ms, event.kind, event.message
+        )?;
+    }
     writeln!(report)?;
     Ok(())
 }
@@ -333,6 +348,7 @@ fn overlay_mode_name(mode: OverlaySpawnMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nightshift_protocol::{RecentEvent, RecentEventKind};
 
     #[test]
     fn parses_proc_status_values() {
@@ -348,5 +364,19 @@ mod tests {
         assert!(!is_managed_report_name("nightshift-debug-not-a-time.txt"));
         assert!(!is_managed_report_name("my-nightshift-debug-123.txt"));
         assert!(!is_managed_report_name("nightshift-debug-123.log"));
+    }
+
+    #[test]
+    fn debug_report_includes_recent_events() {
+        let mut state = AppState::default();
+        state.recent_events.push(RecentEvent {
+            uptime_ms: 42,
+            kind: RecentEventKind::Sleep,
+            message: "sleep mode requested".into(),
+        });
+        let report = build_report(&state).unwrap();
+        assert!(report.contains("recent_events"));
+        assert!(report.contains("uptime_ms=42"));
+        assert!(report.contains("sleep mode requested"));
     }
 }
