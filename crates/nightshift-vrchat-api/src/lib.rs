@@ -95,6 +95,7 @@ pub struct CurrentUserSummary {
     pub id: String,
     pub display_name: String,
     pub status: VrchatStatus,
+    pub status_description: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +137,8 @@ struct CurrentUserResponse {
     #[serde(rename = "displayName")]
     display_name: String,
     status: String,
+    #[serde(rename = "statusDescription", default)]
+    status_description: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -144,6 +147,8 @@ struct LoginResponse {
     #[serde(rename = "displayName")]
     display_name: Option<String>,
     status: Option<String>,
+    #[serde(rename = "statusDescription", default)]
+    status_description: Option<String>,
     #[serde(rename = "requiresTwoFactorAuth", default)]
     requires_two_factor_auth: Vec<String>,
     error: Option<ApiError>,
@@ -167,6 +172,13 @@ struct VerifyTwoFactorBody<'a> {
 #[derive(Debug, Serialize)]
 struct StatusChangeBody<'a> {
     status: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct PresenceChangeBody<'a> {
+    status: &'a str,
+    #[serde(rename = "statusDescription")]
+    status_description: &'a str,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -345,6 +357,7 @@ impl VrchatApiClient {
             id: user.id,
             display_name: user.display_name,
             status: parse_status(&user.status)?,
+            status_description: user.status_description,
         })
     }
 
@@ -373,6 +386,37 @@ impl VrchatApiClient {
             .error_for_status()
             .context("VRChat status update failed")?;
         Ok(())
+    }
+
+    pub async fn set_presence(
+        &self,
+        cookies: &SessionCookies,
+        user_id: &str,
+        status: VrchatStatus,
+        status_description: &str,
+    ) -> Result<CurrentUserSummary> {
+        let user_id = validate_vrchat_user_id(user_id)?;
+        let response = self
+            .http
+            .put(format!("{BASE_URL}/users/{user_id}"))
+            .header(COOKIE, cookies.cookie_header())
+            .json(&PresenceChangeBody {
+                status: status_wire_value(status),
+                status_description,
+            })
+            .send()
+            .await
+            .context("updating VRChat presence")?;
+
+        if let Some(error) = api_status_error(response.status(), "updating presence") {
+            return Err(error.into());
+        }
+        response
+            .error_for_status()
+            .context("VRChat presence update failed")?;
+
+        // VRChat may normalize presence text. Trust the read-back, not our wishful thinking.
+        self.current_user(cookies).await
     }
 }
 
@@ -427,6 +471,7 @@ fn login_user(body: LoginResponse) -> Result<CurrentUserSummary> {
                 .as_deref()
                 .context("VRChat login response is missing status")?,
         )?,
+        status_description: body.status_description.unwrap_or_default(),
     })
 }
 
@@ -579,6 +624,39 @@ mod tests {
             assert_eq!(status_wire_value(status), wire);
             assert_eq!(parse_status(wire).unwrap(), status);
         }
+    }
+
+    #[test]
+    fn current_user_status_description_defaults_to_empty() {
+        let user: CurrentUserResponse = serde_json::from_str(
+            r#"{"id":"usr_test","displayName":"Hydra","status":"active"}"#,
+        )
+        .unwrap();
+        assert!(user.status_description.is_empty());
+    }
+
+    #[test]
+    fn current_user_status_description_is_parsed() {
+        let user: CurrentUserResponse = serde_json::from_str(
+            r#"{"id":"usr_test","displayName":"Hydra","status":"active","statusDescription":"Sleeping in VR 🌙"}"#,
+        )
+        .unwrap();
+        assert_eq!(user.status_description, "Sleeping in VR 🌙");
+    }
+
+    #[test]
+    fn presence_write_uses_vrchat_wire_names() {
+        let body = PresenceChangeBody {
+            status: "ask me",
+            status_description: "Sleeping in VR 🌙",
+        };
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::json!({
+                "status": "ask me",
+                "statusDescription": "Sleeping in VR 🌙"
+            })
+        );
     }
 
     #[test]
