@@ -79,15 +79,24 @@ fn parse_flag_u32(name: &str) -> Result<Option<u32>> {
     let mut index = 0;
 
     while index < args.len() {
-        if args[index] == name {
+        let arg = &args[index];
+        if arg == name {
             let value = args
                 .get(index + 1)
-                .ok_or_else(|| anyhow!("missing value for {name}"))?;
+                .ok_or_else(|| anyhow!("{name} requires a value"))?;
             return value
                 .parse::<u32>()
-                .with_context(|| format!("parsing {name} value {value}"))
-                .map(Some);
+                .map(Some)
+                .map_err(|error| anyhow!("invalid {name} value {value:?}: {error}"));
         }
+
+        if let Some(value) = arg.strip_prefix(&format!("{name}=")) {
+            return value
+                .parse::<u32>()
+                .map(Some)
+                .map_err(|error| anyhow!("invalid {name} value {value:?}: {error}"));
+        }
+
         index += 1;
     }
 
@@ -96,4 +105,115 @@ fn parse_flag_u32(name: &str) -> Result<Option<u32>> {
 
 fn has_flag(name: &str) -> bool {
     std::env::args().skip(1).any(|arg| arg == name)
+}
+
+#[cfg(test)]
+use ipc::hidden_surface_target;
+#[cfg(test)]
+use nightshift_protocol::{BrightnessState, WorkerReport};
+#[cfg(test)]
+use placement::PanelPose;
+#[cfg(test)]
+use runtime_state::{
+    Fade, MAX_TRANSITION_SECONDS, OverlayTarget, brightness_target, overlay_pose_report_if_changed,
+    sanitize_brightness, sanitize_transition_seconds,
+};
+#[cfg(test)]
+use surface::panel_pose_to_protocol;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brightness_targets_follow_transition_state() {
+        let transitioning = BrightnessState {
+            current: 0.9,
+            target: 0.1,
+            sleep_target: 0.06,
+            transitioning: true,
+            manual_override: false,
+        };
+        assert_eq!(
+            brightness_target(&transitioning, 4.0),
+            OverlayTarget {
+                brightness: 0.1,
+                transition_seconds: 4.0,
+            }
+        );
+
+        let settled = BrightnessState {
+            current: 0.65,
+            target: 0.1,
+            sleep_target: 0.06,
+            transitioning: false,
+            manual_override: true,
+        };
+        assert_eq!(
+            brightness_target(&settled, 4.0),
+            OverlayTarget {
+                brightness: 0.65,
+                transition_seconds: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn overlay_targets_reject_non_finite_values_and_bound_ranges() {
+        assert_eq!(sanitize_brightness(f32::NAN), 1.0);
+        assert_eq!(sanitize_brightness(f32::INFINITY), 1.0);
+        assert_eq!(sanitize_brightness(-5.0), 0.02);
+        assert_eq!(sanitize_brightness(8.0), 1.0);
+
+        assert_eq!(sanitize_transition_seconds(f32::NAN), 0.0);
+        assert_eq!(sanitize_transition_seconds(f32::INFINITY), 0.0);
+        assert_eq!(sanitize_transition_seconds(-1.0), 0.0);
+        assert_eq!(sanitize_transition_seconds(999.0), MAX_TRANSITION_SECONDS);
+    }
+
+    #[test]
+    fn overlay_pose_reports_are_deduplicated() {
+        let first = PanelPose {
+            position: [1.0, 2.0, 3.0],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        };
+        let second = PanelPose {
+            position: [4.0, 5.0, 6.0],
+            orientation_xyzw: [0.0, 0.0, 0.0, 1.0],
+        };
+        let mut reported = None;
+
+        assert_eq!(overlay_pose_report_if_changed(&mut reported, None), None);
+        assert_eq!(
+            overlay_pose_report_if_changed(&mut reported, Some(first)),
+            Some(WorkerReport::OverlayRuntimePose {
+                pose: panel_pose_to_protocol(first),
+            })
+        );
+        assert_eq!(
+            overlay_pose_report_if_changed(&mut reported, Some(first)),
+            None
+        );
+        assert_eq!(
+            overlay_pose_report_if_changed(&mut reported, Some(second)),
+            Some(WorkerReport::OverlayRuntimePose {
+                pose: panel_pose_to_protocol(second),
+            })
+        );
+    }
+
+    #[test]
+    fn fade_constructor_sanitizes_inputs() {
+        let fade = Fade::new(f32::NAN, f32::NEG_INFINITY, f32::INFINITY);
+        assert_eq!(fade.start, 1.0);
+        assert_eq!(fade.target, 1.0);
+        assert_eq!(fade.duration_seconds, 0.0);
+    }
+
+    #[test]
+    fn hidden_surface_target_is_safe_by_default() {
+        let target = hidden_surface_target();
+        assert!(!target.visible);
+        assert_eq!(target.distance_m, 1.0);
+    }
 }
