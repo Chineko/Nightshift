@@ -29,6 +29,7 @@ enum FriendCommand {
 
 enum FriendUpdate {
     Busy(bool),
+    ResetPresentation,
     Profiles {
         profiles: Vec<FriendProfile>,
         stale_age: Option<Duration>,
@@ -77,11 +78,16 @@ impl FriendBridge {
                 match command {
                     FriendCommand::Refresh => {
                         let _ = update_tx.send(FriendUpdate::Busy(true));
-                        if let Ok(Some((profiles, age))) = runtime.block_on(service.cached_friends()) {
-                            let _ = update_tx.send(FriendUpdate::Profiles {
-                                profiles,
-                                stale_age: Some(age),
-                            });
+                        match runtime.block_on(service.cached_friends()) {
+                            Ok(Some((profiles, age))) => {
+                                let _ = update_tx.send(FriendUpdate::Profiles {
+                                    profiles,
+                                    stale_age: Some(age),
+                                });
+                            }
+                            Ok(None) | Err(_) => {
+                                let _ = update_tx.send(FriendUpdate::ResetPresentation);
+                            }
                         }
                         let update = match runtime.block_on(service.friends()) {
                             Ok(profiles) => FriendUpdate::Profiles {
@@ -249,6 +255,15 @@ impl InviteSettingsUi {
         while let Ok(update) = bridge.updates.try_recv() {
             match update {
                 FriendUpdate::Busy(busy) => self.friend_busy = busy,
+                FriendUpdate::ResetPresentation => {
+                    self.friend_profiles.clear();
+                    self.friend_stale_age = None;
+                    self.requested_images.clear();
+                    self.friend_textures.clear();
+                    self.friend_texture_sources.clear();
+                    self.friend_texture_order.clear();
+                    // New account, new presentation cache. No avatar stowaways across the session airlock.
+                }
                 FriendUpdate::Profiles {
                     profiles,
                     stale_age,
