@@ -1,3 +1,5 @@
+mod diagnostics;
+
 use std::{env, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -19,6 +21,7 @@ fn socket_path() -> Result<PathBuf> {
 fn usage() -> &'static str {
     "nightshiftctl commands:\n\
        status\n\
+       debug-report [path]\n\
        sleep\n\
        wake\n\
        brightness <2-100 percent>\n\
@@ -28,6 +31,7 @@ fn usage() -> &'static str {
        overlay-hide\n\
        overlay-distance <0.25-5.0 meters>\n\
        overlay-mode <in-front|restore-last-position>\n\n\
+       debug-report writes a privacy-conscious resource/state snapshot.\n\
        Overlay show/hide/distance/mode control the positioned panel.\n\
        Brightness/fade control the full-screen OpenXR dimmer separately."
 }
@@ -209,27 +213,38 @@ fn print_status(state: &AppState) {
     }
 }
 
+enum RequestedAction {
+    Status,
+    DebugReport(Option<PathBuf>),
+    Command(UiCommand),
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "status".into());
 
     let action = match command.as_str() {
-        "status" => None,
-        "sleep" => Some(UiCommand::EnterSleep),
-        "wake" => Some(UiCommand::Wake),
-        "brightness" => Some(UiCommand::SetBrightness(parse_percent(args.next(), "brightness")?)),
-        "sleep-brightness" => Some(UiCommand::SetSleepBrightness(parse_percent(
+        "status" => RequestedAction::Status,
+        "debug-report" => RequestedAction::DebugReport(args.next().map(PathBuf::from)),
+        "sleep" => RequestedAction::Command(UiCommand::EnterSleep),
+        "wake" => RequestedAction::Command(UiCommand::Wake),
+        "brightness" => RequestedAction::Command(UiCommand::SetBrightness(parse_percent(
             args.next(),
-            "sleep-brightness",
+            "brightness",
         )?)),
-        "fade" => Some(UiCommand::SetFadeDuration(parse_seconds(args.next())?)),
-        "overlay-show" => Some(UiCommand::ShowOverlay),
-        "overlay-hide" => Some(UiCommand::HideOverlay),
-        "overlay-distance" => Some(UiCommand::SetOverlaySpawnDistance(parse_overlay_distance(
-            args.next(),
-        )?)),
-        "overlay-mode" => Some(UiCommand::SetOverlaySpawnMode(parse_overlay_mode(args.next())?)),
+        "sleep-brightness" => RequestedAction::Command(UiCommand::SetSleepBrightness(
+            parse_percent(args.next(), "sleep-brightness")?,
+        )),
+        "fade" => RequestedAction::Command(UiCommand::SetFadeDuration(parse_seconds(args.next())?)),
+        "overlay-show" => RequestedAction::Command(UiCommand::ShowOverlay),
+        "overlay-hide" => RequestedAction::Command(UiCommand::HideOverlay),
+        "overlay-distance" => RequestedAction::Command(UiCommand::SetOverlaySpawnDistance(
+            parse_overlay_distance(args.next())?,
+        )),
+        "overlay-mode" => RequestedAction::Command(UiCommand::SetOverlaySpawnMode(
+            parse_overlay_mode(args.next())?,
+        )),
         "help" | "--help" | "-h" => {
             println!("{}", usage());
             return Ok(());
@@ -244,12 +259,17 @@ async fn main() -> Result<()> {
     let (mut reader, mut writer) = connect().await?;
     let state = read_snapshot(&mut reader).await?;
 
-    if let Some(command) = action {
-        write_message(&mut writer, &ClientMessage::Command { command }).await?;
-        writer.shutdown().await?;
-        println!("ok");
-    } else {
-        print_status(&state);
+    match action {
+        RequestedAction::Command(command) => {
+            write_message(&mut writer, &ClientMessage::Command { command }).await?;
+            writer.shutdown().await?;
+            println!("ok");
+        }
+        RequestedAction::Status => print_status(&state),
+        RequestedAction::DebugReport(path) => {
+            let path = diagnostics::write_debug_report(&state, path)?;
+            println!("wrote {}", path.display());
+        }
     }
 
     Ok(())
