@@ -1,0 +1,51 @@
+name: Temporary VRChat Split
+
+on:
+  push:
+    branches:
+      - prototype/refactor-vrchat-generator
+
+permissions:
+  contents: write
+
+jobs:
+  split:
+    if: github.event.head_commit.message == 'Arm disposable VRChat split workflow'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: prototype/refactor-vrchat-generator
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libopenxr-dev pkg-config
+
+      - name: Split VRChat worker source
+        run: python .github/tmp-vrchat-split.py
+
+      - name: Validate VRChat worker split
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check -p nightshift-vrchat-worker --all-targets --locked 2>&1 | tee vrchat-split.log
+          cargo test -p nightshift-vrchat-worker --locked 2>&1 | tee -a vrchat-split.log
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vrchat-split-diagnostics
+          path: vrchat-split.log
+          if-no-files-found: ignore
+
+      - name: Commit generated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/nightshift-vrchat-worker/src
+          git commit -m 'Split VRChat worker modules'
+          git push origin HEAD:prototype/refactor-vrchat-generator
