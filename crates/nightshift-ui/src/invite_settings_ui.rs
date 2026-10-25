@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, mpsc},
     thread,
+    time::Duration,
 };
 
 use eframe::egui::{self, Color32, RichText, TextureHandle};
@@ -23,13 +24,20 @@ enum SocialListTarget {
 
 enum FriendCommand {
     Refresh,
-    LoadImage { url: String },
+    LoadImage { friend_id: String, url: String },
 }
 
 enum FriendUpdate {
     Busy(bool),
-    Profiles(Vec<FriendProfile>),
-    Image { url: String, bytes: Arc<[u8]> },
+    Profiles {
+        profiles: Vec<FriendProfile>,
+        stale_age: Option<Duration>,
+    },
+    Image {
+        friend_id: String,
+        url: String,
+        bytes: Arc<[u8]>,
+    },
     Error(String),
 }
 
@@ -69,20 +77,33 @@ impl FriendBridge {
                 match command {
                     FriendCommand::Refresh => {
                         let _ = update_tx.send(FriendUpdate::Busy(true));
+                        if let Ok(Some((profiles, age))) = runtime.block_on(service.cached_friends()) {
+                            let _ = update_tx.send(FriendUpdate::Profiles {
+                                profiles,
+                                stale_age: Some(age),
+                            });
+                        }
                         let update = match runtime.block_on(service.friends()) {
-                            Ok(profiles) => FriendUpdate::Profiles(profiles),
+                            Ok(profiles) => FriendUpdate::Profiles {
+                                profiles,
+                                stale_age: None,
+                            },
                             Err(error) => FriendUpdate::Error(error.to_string()),
                         };
                         let _ = update_tx.send(update);
                         let _ = update_tx.send(FriendUpdate::Busy(false));
                     }
-                    FriendCommand::LoadImage { url } => {
+                    FriendCommand::LoadImage { friend_id, url } => {
                         match runtime.block_on(service.friend_image_bytes(&url)) {
                             Ok(bytes) => {
-                                let _ = update_tx.send(FriendUpdate::Image { url, bytes });
+                                let _ = update_tx.send(FriendUpdate::Image {
+                                    friend_id,
+                                    url,
+                                    bytes,
+                                });
                             }
                             Err(_) => {
-                                // Image failures are intentionally silent; rows keep initials.
+                                // Image failures are intentionally silent; an old thumbnail or initials keep watch.
                             }
                         }
                     }
@@ -113,10 +134,12 @@ pub struct InviteSettingsUi {
     friend_query: String,
     friend_busy: bool,
     friend_error: Option<String>,
+    friend_stale_age: Option<Duration>,
     friend_refresh_started: bool,
     social_target: SocialListTarget,
     requested_images: HashSet<String>,
     friend_textures: HashMap<String, TextureHandle>,
+    friend_texture_sources: HashMap<String, String>,
     friend_texture_order: VecDeque<String>,
 }
 
@@ -133,10 +156,12 @@ impl Default for InviteSettingsUi {
             friend_query: String::new(),
             friend_busy: false,
             friend_error: None,
+            friend_stale_age: None,
             friend_refresh_started: false,
             social_target: SocialListTarget::Whitelist,
             requested_images: HashSet::new(),
             friend_textures: HashMap::new(),
+            friend_texture_sources: HashMap::new(),
             friend_texture_order: VecDeque::new(),
         }
     }
@@ -224,11 +249,23 @@ impl InviteSettingsUi {
         while let Ok(update) = bridge.updates.try_recv() {
             match update {
                 FriendUpdate::Busy(busy) => self.friend_busy = busy,
-                FriendUpdate::Profiles(profiles) => {
+                FriendUpdate::Profiles {
+                    profiles,
+                    stale_age,
+                } => {
                     self.friend_profiles = profiles;
-                    self.friend_error = None;
+                    self.friend_stale_age = stale_age;
+                    if stale_age.is_none() {
+                        self.friend_error = None;
+                        self.requested_images
+                            .retain(|url| self.friend_textures.contains_key(url));
+                    }
                 }
-                FriendUpdate::Image { url, bytes } => {
+                FriendUpdate::Image {
+                    friend_id,
+                    url,
+                    bytes,
+                } => {
                     if let Ok(decoded) = image::load_from_memory(&bytes) {
                         let rgba = decoded
                             .resize_to_fill(
@@ -247,11 +284,14 @@ impl InviteSettingsUi {
                             egui::TextureOptions::LINEAR,
                         );
                         self.friend_textures.insert(url.clone(), texture);
+                        self.friend_texture_sources.insert(friend_id, url.clone());
                         self.friend_texture_order.push_back(url);
                         while self.friend_texture_order.len() > MAX_FRIEND_TEXTURES {
                             if let Some(oldest) = self.friend_texture_order.pop_front() {
                                 self.friend_textures.remove(&oldest);
                                 self.requested_images.remove(&oldest);
+                                self.friend_texture_sources
+                                    .retain(|_, source| source != &oldest);
                             }
                         }
                         // Downloaded bytes and full-size decode fall out of scope here. Tiny textures stay; boxes do not.
@@ -295,6 +335,16 @@ impl InviteSettingsUi {
                 ui.label("Refreshing VRChat friends…");
             });
         }
+        if let Some(age) = self.friend_stale_age {
+            ui.label(
+                RichText::new(format!(
+                    "Showing cached friend data ({} old) while refresh is pending.",
+                    format_cache_age(age)
+                ))
+                .color(MUTED)
+                .small(),
+            );
+        }
         if let Some(error) = &self.friend_error {
             ui.label(RichText::new(error).color(ERROR_RED).small());
         }
@@ -328,7 +378,10 @@ impl InviteSettingsUi {
                         && self.requested_images.insert(url.to_owned())
                         && let Some(bridge) = &self.friend_bridge
                     {
-                        bridge.send(FriendCommand::LoadImage { url: url.to_owned() });
+                        bridge.send(FriendCommand::LoadImage {
+                            friend_id: profile.id.clone(),
+                            url: url.to_owned(),
+                        });
                     }
 
                     let in_whitelist = self.draft_rules.whitelist.iter().any(|id| id == &profile.id);
@@ -344,10 +397,15 @@ impl InviteSettingsUi {
                         .inner_margin(8)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                if let Some(texture) = image_url
+                                let texture = image_url
                                     .as_deref()
                                     .and_then(|url| self.friend_textures.get(url))
-                                {
+                                    .or_else(|| {
+                                        self.friend_texture_sources
+                                            .get(&profile.id)
+                                            .and_then(|url| self.friend_textures.get(url))
+                                    });
+                                if let Some(texture) = texture {
                                     ui.add(egui::Image::new((texture.id(), egui::vec2(34.0, 34.0))));
                                 } else {
                                     let initials = friend_initials(&profile.display_name);
@@ -487,6 +545,16 @@ fn friend_initials(name: &str) -> String {
     }
 }
 
+fn format_cache_age(age: Duration) -> String {
+    if age.as_secs() < 60 {
+        return format!("{}s", age.as_secs());
+    }
+    if age.as_secs() < 60 * 60 {
+        return format!("{}m", age.as_secs() / 60);
+    }
+    format!("{}h", age.as_secs() / (60 * 60))
+}
+
 fn render_feedback(ui: &mut egui::Ui, state: &InviteState) {
     if state.last_action.is_none() && state.last_error.is_none() {
         return;
@@ -573,5 +641,12 @@ mod tests {
         assert_eq!(FRIEND_THUMBNAIL_SIZE, 128);
         assert_eq!(MAX_FRIEND_TEXTURES, 128);
         assert_eq!(FRIEND_THUMBNAIL_SIZE as usize * FRIEND_THUMBNAIL_SIZE as usize * 4 * MAX_FRIEND_TEXTURES, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn cached_friend_age_is_compact() {
+        assert_eq!(format_cache_age(Duration::from_secs(45)), "45s");
+        assert_eq!(format_cache_age(Duration::from_secs(90)), "1m");
+        assert_eq!(format_cache_age(Duration::from_secs(7_200)), "2h");
     }
 }
