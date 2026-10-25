@@ -1,5 +1,7 @@
 use std::{collections::VecDeque, time::Duration};
 
+use nightshift_protocol::{AppState, SleepPhase, StateEvent};
+
 const MAX_TOASTS: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +49,39 @@ impl Toast {
             timeout: Duration::from_secs(9),
             show_while_sleeping: true,
         }
+    }
+}
+
+pub fn toast_for_event(previous: &AppState, event: &StateEvent) -> Option<Toast> {
+    match event {
+        StateEvent::SleepChanged(state) if state.phase != previous.sleep.phase => match state.phase {
+            SleepPhase::Sleeping => Some(Toast::info(
+                "Sleep mode active",
+                "Nightshift automation is settling in.",
+            )),
+            SleepPhase::Awake => Some(Toast::info(
+                "Awake",
+                "Nightshift restored your awake state.",
+            )),
+            SleepPhase::EnteringSleep | SleepPhase::Waking => None,
+        },
+        StateEvent::VrchatChanged(state)
+            if previous.vrchat.connected && !state.connected =>
+        {
+            Some(Toast::warning(
+                "VRChat disconnected",
+                "Presence and invite automation are paused.",
+            ))
+        }
+        StateEvent::VrchatChanged(state)
+            if !previous.vrchat.connected && state.connected =>
+        {
+            Some(Toast::info(
+                "VRChat connected",
+                "Presence and invite automation are ready.",
+            ))
+        }
+        _ => None,
     }
 }
 
@@ -145,5 +180,30 @@ mod tests {
 
         assert_eq!(queue.len(), 1);
         assert_eq!(queue.visible().next().unwrap().title, "second");
+    }
+
+    #[test]
+    fn sleep_notifications_only_fire_on_settled_edges() {
+        let previous = AppState::default();
+        let mut sleeping = previous.sleep.clone();
+        sleeping.phase = SleepPhase::Sleeping;
+
+        let toast = toast_for_event(&previous, &StateEvent::SleepChanged(sleeping)).unwrap();
+        assert_eq!(toast.title, "Sleep mode active");
+
+        let mut entering = previous.sleep.clone();
+        entering.phase = SleepPhase::EnteringSleep;
+        assert!(toast_for_event(&previous, &StateEvent::SleepChanged(entering)).is_none());
+    }
+
+    #[test]
+    fn vrchat_connection_changes_are_notified_without_poll_noise() {
+        let mut previous = AppState::default();
+        previous.vrchat.connected = true;
+        let mut disconnected = previous.vrchat.clone();
+        disconnected.connected = false;
+
+        let toast = toast_for_event(&previous, &StateEvent::VrchatChanged(disconnected)).unwrap();
+        assert_eq!(toast.severity, ToastSeverity::Warning);
     }
 }
