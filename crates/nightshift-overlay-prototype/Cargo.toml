@@ -16,4 +16,5 @@ nightshift-protocol = { path = "../nightshift-protocol" }
 nightshift-vrchat-auth = { path = "../nightshift-vrchat-auth" }
 openxr = { version = "0.21.1", features = ["linked"] }
 serde_json.workspace = true
+taffy = { version = "0.15", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
