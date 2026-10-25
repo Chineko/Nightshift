@@ -1,12 +1,26 @@
 use super::*;
+use crate::panel_layout::PanelLayout;
 
 impl PanelBitmap {
     pub(super) fn draw_home(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
+        let layout = PanelLayout::for_page(PanelPage::Home, content.sleep_action_is_wake());
+        let nav_home = pixel_rect(layout.rect(PanelAction::NavigateHome).unwrap());
+        let brightness_down = pixel_rect(layout.rect(PanelAction::BrightnessDown).unwrap());
+        let brightness_up = pixel_rect(layout.rect(PanelAction::BrightnessUp).unwrap());
+
         self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
         self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
         self.draw_crescent(74, 62, 13, PURPLE_BRIGHT, PURPLE_DARK);
         self.draw_text(112, 49, "NIGHTSHIFT", 4, TEXT);
-        self.rounded_rect(500, 39, 96, 46, 14, PURPLE_DARK, BORDER);
+        self.rounded_rect(
+            nav_home.0,
+            nav_home.1 + 1,
+            nav_home.2 + 2,
+            nav_home.3.saturating_sub(2),
+            14,
+            PURPLE_DARK,
+            BORDER,
+        );
         self.draw_text(519, 54, "HOME", 3, TEXT);
         self.draw_text(620, 54, "SETTINGS", 3, MUTED);
 
@@ -50,13 +64,27 @@ impl PanelBitmap {
         self.draw_circle(knob_x, track_y + 3, 10, PURPLE_BRIGHT);
         self.draw_circle(knob_x, track_y + 3, 5, TEXT);
 
-        let down_hover = hover == Some(PanelAction::BrightnessDown);
-        let up_hover = hover == Some(PanelAction::BrightnessUp);
-        if down_hover {
-            self.rounded_rect(60, 340, 56, 66, 16, PURPLE_DARK, PURPLE_BRIGHT);
+        if hover == Some(PanelAction::BrightnessDown) {
+            self.rounded_rect(
+                brightness_down.0,
+                brightness_down.1,
+                brightness_down.2,
+                brightness_down.3,
+                16,
+                PURPLE_DARK,
+                PURPLE_BRIGHT,
+            );
         }
-        if up_hover {
-            self.rounded_rect(652, 340, 56, 66, 16, PURPLE_DARK, PURPLE_BRIGHT);
+        if hover == Some(PanelAction::BrightnessUp) {
+            self.rounded_rect(
+                brightness_up.0,
+                brightness_up.1,
+                brightness_up.2,
+                brightness_up.3,
+                16,
+                PURPLE_DARK,
+                PURPLE_BRIGHT,
+            );
         }
         self.draw_crescent(82, 373, 10, MUTED, PANEL);
         self.draw_sun(686, 373, 8, MUTED);
@@ -134,12 +162,13 @@ impl PanelBitmap {
         } else {
             PanelAction::EnterSleep
         };
+        let primary = pixel_rect(layout.rect(primary_action).unwrap());
         let hovered = hover == Some(primary_action);
         self.rounded_rect(
-            40,
-            840,
-            688,
-            74,
+            primary.0,
+            primary.1,
+            primary.2,
+            primary.3,
             20,
             if hovered { PURPLE_BRIGHT } else { PURPLE },
             if hovered { TEXT } else { PURPLE_BRIGHT },
@@ -158,4 +187,13 @@ impl PanelBitmap {
 
         self.draw_text(271, 935, "NIGHTSHIFT OVERLAY  V1.4.2", 1, MUTED);
     }
+}
+
+fn pixel_rect(rect: crate::layout::LayoutRect) -> (u32, u32, u32, u32) {
+    (
+        rect.x.round() as u32,
+        rect.y.round() as u32,
+        rect.width.round() as u32,
+        rect.height.round() as u32,
+    )
 }
