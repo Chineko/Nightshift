@@ -19,9 +19,7 @@ use nightshift_vrchat_api::{
     SessionCookies, VrchatApiClient, VrchatNotification, parse_pipeline_notification, pipeline_url,
 };
 use nightshift_vrchat_session::{VrchatSession, VrchatSessionStore};
-use nightshift_vrchat_status::{
-    StatusAutomationConfig, sleeping_phase, target_for_transition,
-};
+use nightshift_vrchat_status::{StatusAutomationConfig, sleeping_phase};
 use nightshift_vrchat_worker::{
     instance_context::InstanceSource,
     invite_bridge::{
