@@ -6,11 +6,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
-use reqwest::{StatusCode, header::COOKIE};
+use anyhow::{Context, Result};
+use reqwest::header::COOKIE;
 use serde::Deserialize;
 
-use super::{BASE_URL, SessionCookies, VrchatApiClient};
+use super::{BASE_URL, SessionCookies, VrchatApiClient, api_status_error};
 
 pub const FRIEND_METADATA_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const FRIEND_PAGE_SIZE: usize = 100;
@@ -119,11 +119,8 @@ impl VrchatApiClient {
                     .await
                     .context("requesting VRChat friends")?;
 
-                if response.status() == StatusCode::UNAUTHORIZED {
-                    bail!("VRChat session expired while refreshing friends");
-                }
-                if response.status() == StatusCode::TOO_MANY_REQUESTS {
-                    bail!("VRChat rate-limited the friend refresh");
+                if let Some(error) = api_status_error(response.status(), "refreshing friends") {
+                    return Err(error.into());
                 }
 
                 let response = response
