@@ -5,11 +5,20 @@ const BRIGHTNESS_Y: f32 = 340.0;
 const BUTTON_WIDTH: f32 = 56.0;
 const BUTTON_HEIGHT: f32 = 66.0;
 const BUTTON_GAP: f32 = 536.0;
+const PRIMARY_X: f32 = 40.0;
+const PRIMARY_Y: f32 = 840.0;
+const PRIMARY_WIDTH: f32 = 688.0;
+const PRIMARY_HEIGHT: f32 = 74.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomeBrightnessLayout {
     pub down: LayoutRect,
     pub up: LayoutRect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HomePrimaryLayout {
+    pub action: LayoutRect,
 }
 
 impl HomeBrightnessLayout {
@@ -38,9 +47,35 @@ impl HomeBrightnessLayout {
                 layout
                     .rect(down)
                     .expect("brightness-down rectangle should exist"),
+                BRIGHTNESS_X,
+                BRIGHTNESS_Y,
             ),
             up: offset(
                 layout.rect(up).expect("brightness-up rectangle should exist"),
+                BRIGHTNESS_X,
+                BRIGHTNESS_Y,
+            ),
+        }
+    }
+}
+
+impl HomePrimaryLayout {
+    pub fn compute() -> Self {
+        let mut layout = LayoutEngine::new();
+        let action = layout
+            .leaf(PRIMARY_WIDTH, PRIMARY_HEIGHT)
+            .expect("static primary-action layout should be valid");
+        layout
+            .compute(action, PRIMARY_WIDTH, PRIMARY_HEIGHT)
+            .expect("static primary-action layout should compute");
+
+        Self {
+            action: offset(
+                layout
+                    .rect(action)
+                    .expect("primary-action rectangle should exist"),
+                PRIMARY_X,
+                PRIMARY_Y,
             ),
         }
     }
@@ -53,9 +88,9 @@ pub fn contains(rect: LayoutRect, x: f32, y: f32) -> bool {
         && y <= rect.y + rect.height
 }
 
-fn offset(mut rect: LayoutRect) -> LayoutRect {
-    rect.x += BRIGHTNESS_X;
-    rect.y += BRIGHTNESS_Y;
+fn offset(mut rect: LayoutRect, x: f32, y: f32) -> LayoutRect {
+    rect.x += x;
+    rect.y += y;
     rect
 }
 
@@ -88,11 +123,28 @@ mod tests {
     }
 
     #[test]
-    fn hit_testing_uses_the_computed_rectangles() {
-        let layout = HomeBrightnessLayout::compute();
+    fn primary_action_keeps_the_existing_visual_contract() {
+        assert_eq!(
+            HomePrimaryLayout::compute().action,
+            LayoutRect {
+                x: 40.0,
+                y: 840.0,
+                width: 688.0,
+                height: 74.0,
+            }
+        );
+    }
 
-        assert!(contains(layout.down, 60.0, 340.0));
-        assert!(contains(layout.up, 708.0, 406.0));
-        assert!(!contains(layout.down, 120.0, 340.0));
+    #[test]
+    fn hit_testing_uses_the_computed_rectangles() {
+        let brightness = HomeBrightnessLayout::compute();
+        let primary = HomePrimaryLayout::compute();
+
+        assert!(contains(brightness.down, 60.0, 340.0));
+        assert!(contains(brightness.up, 708.0, 406.0));
+        assert!(!contains(brightness.down, 120.0, 340.0));
+        assert!(contains(primary.action, 40.0, 840.0));
+        assert!(contains(primary.action, 728.0, 914.0));
+        assert!(!contains(primary.action, 729.0, 914.0));
     }
 }
