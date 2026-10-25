@@ -1,11 +1,14 @@
 use super::*;
-use crate::home_layout::PanelNavLayout;
+use crate::home_layout::{PanelNavLayout, SocialTabsLayout};
 
 impl PanelBitmap {
     pub(super) fn draw_settings(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
         let nav_layout = PanelNavLayout::compute();
+        let social_tabs = SocialTabsLayout::compute();
         let nav_home = pixel_rect(nav_layout.home);
         let nav_settings = pixel_rect(nav_layout.settings);
+        let whitelist = pixel_rect(social_tabs.whitelist);
+        let blacklist = pixel_rect(social_tabs.blacklist);
 
         self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
         self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
@@ -103,10 +106,10 @@ impl PanelBitmap {
         let whitelist_hover = hover == Some(PanelAction::SelectWhitelist);
         let blacklist_hover = hover == Some(PanelAction::SelectBlacklist);
         self.rounded_rect(
-            500,
-            302,
-            102,
-            46,
+            whitelist.0,
+            whitelist.1,
+            whitelist.2,
+            whitelist.3,
             12,
             if whitelist_selected || whitelist_hover {
                 PURPLE_DARK
@@ -116,17 +119,17 @@ impl PanelBitmap {
             if whitelist_selected { PURPLE } else { BORDER },
         );
         self.draw_text(
-            512,
-            318,
+            whitelist.0 + 12,
+            whitelist.1 + 16,
             "WHITELIST",
             2,
             if whitelist_selected { TEXT } else { MUTED },
         );
         self.rounded_rect(
-            606,
-            302,
-            102,
-            46,
+            blacklist.0,
+            blacklist.1,
+            blacklist.2,
+            blacklist.3,
             12,
             if blacklist_selected || blacklist_hover {
                 PURPLE_DARK
@@ -136,8 +139,8 @@ impl PanelBitmap {
             if blacklist_selected { PURPLE } else { BORDER },
         );
         self.draw_text(
-            617,
-            318,
+            blacklist.0 + 11,
+            blacklist.1 + 16,
             "BLACKLIST",
             2,
             if blacklist_selected { TEXT } else { MUTED },
