@@ -156,11 +156,11 @@ impl PanelBitmap {
         }
 
         let offset = ((y * self.width + x) * 4) as usize;
-        let alpha = source[3] as u16;
-        let inverse = 255_u16 - alpha;
+        let alpha = source[3] as u32;
+        let inverse = 255_u32 - alpha;
         for channel in 0..3 {
-            let blended = source[channel] as u16 * alpha
-                + self.rgba[offset + channel] as u16 * inverse;
+            let blended = source[channel] as u32 * alpha
+                + self.rgba[offset + channel] as u32 * inverse;
             self.rgba[offset + channel] = (blended / 255) as u8;
         }
         self.rgba[offset + 3] = 255;
