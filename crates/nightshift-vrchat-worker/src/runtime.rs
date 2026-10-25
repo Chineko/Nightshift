@@ -280,7 +280,6 @@ pub(crate) fn runtime_feedback_report(
     })
 }
 
-
 pub(crate) async fn load_session(store: VrchatSessionStore) -> Result<Option<VrchatSession>> {
     tokio::task::spawn_blocking(move || store.load())
         .await
@@ -301,7 +300,13 @@ pub(crate) async fn validated_user(
         Some(session) => session,
         None => return Ok(None),
     };
-    let user = api.current_user(&session_cookies(&session)).await?;
+    let cookies = session_cookies(&session);
+    let user = {
+        let _permit = shared_vrchat_requests()
+            .acquire(RequestClass::SessionRead)
+            .await;
+        api.current_user(&cookies).await?
+    };
 
     if let Some(expected_user_id) = session.user_id.as_deref() {
         if expected_user_id != user.id {
@@ -358,6 +363,9 @@ pub(crate) async fn set_runtime_status(
     let cookies = session_cookies(&session);
 
     if user.status != target {
+        let _permit = shared_vrchat_requests()
+            .acquire(RequestClass::StatusWrite)
+            .await;
         api.set_status(&cookies, &user.id, target).await?;
     }
 
