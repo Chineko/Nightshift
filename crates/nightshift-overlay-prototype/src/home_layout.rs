@@ -27,6 +27,19 @@ const SETTINGS_TOGGLE_HEIGHT: f32 = 36.0;
 const SETTINGS_TOGGLE_GAP: f32 = 80.0;
 const SETTINGS_TOGGLE_HIT_PAD_X: f32 = 14.0;
 const SETTINGS_TOGGLE_HIT_PAD_Y: f32 = 23.0;
+const SETTINGS_VALUE_X: f32 = 300.0;
+const SETTINGS_VALUE_Y: f32 = 470.0;
+const SETTINGS_VALUE_WIDTH: f32 = 146.0;
+const SETTINGS_VALUE_HEIGHT: f32 = 82.0;
+const SETTINGS_VALUE_GAP: f32 = 34.0;
+const SOCIAL_REMOVE_X: f32 = 676.0;
+const SOCIAL_REMOVE_Y: f32 = 368.0;
+const SOCIAL_REMOVE_WIDTH: f32 = 32.0;
+const SOCIAL_REMOVE_HEIGHT: f32 = 44.0;
+const SOCIAL_REMOVE_GAP: f32 = 28.0;
+const SOCIAL_REMOVE_HIT_TOP: f32 = 2.0;
+const SOCIAL_REMOVE_HIT_RIGHT: f32 = 8.0;
+const SOCIAL_REMOVE_HIT_BOTTOM: f32 = 8.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomeBrightnessLayout {
@@ -55,6 +68,17 @@ pub struct SocialTabsLayout {
 pub struct SettingsToggleLayout {
     pub heart_rate: LayoutRect,
     pub osc: LayoutRect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SettingsValueLayout {
+    pub invite_rules: LayoutRect,
+    pub vrchat_status: LayoutRect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SocialRemoveLayout {
+    pub buttons: [LayoutRect; 5],
 }
 
 impl HomeBrightnessLayout {
@@ -249,6 +273,103 @@ impl SettingsToggleLayout {
     }
 }
 
+impl SettingsValueLayout {
+    pub fn compute() -> Self {
+        let mut layout = LayoutEngine::new();
+        let invite_rules = layout
+            .leaf(SETTINGS_VALUE_WIDTH, SETTINGS_VALUE_HEIGHT)
+            .expect("static invite-rules value layout should be valid");
+        let vrchat_status = layout
+            .leaf(SETTINGS_VALUE_WIDTH, SETTINGS_VALUE_HEIGHT)
+            .expect("static VRChat-status value layout should be valid");
+        let root = layout
+            .column(&[invite_rules, vrchat_status], SETTINGS_VALUE_GAP)
+            .expect("static Settings value column should be valid");
+
+        layout
+            .compute(
+                root,
+                SETTINGS_VALUE_WIDTH,
+                SETTINGS_VALUE_HEIGHT * 2.0 + SETTINGS_VALUE_GAP,
+            )
+            .expect("static Settings value layout should compute");
+
+        Self {
+            invite_rules: offset(
+                layout
+                    .rect(invite_rules)
+                    .expect("invite-rules value rectangle should exist"),
+                SETTINGS_VALUE_X,
+                SETTINGS_VALUE_Y,
+            ),
+            vrchat_status: offset(
+                layout
+                    .rect(vrchat_status)
+                    .expect("VRChat-status value rectangle should exist"),
+                SETTINGS_VALUE_X,
+                SETTINGS_VALUE_Y,
+            ),
+        }
+    }
+}
+
+impl SocialRemoveLayout {
+    pub fn compute() -> Self {
+        let mut layout = LayoutEngine::new();
+        let button0 = layout
+            .leaf(SOCIAL_REMOVE_WIDTH, SOCIAL_REMOVE_HEIGHT)
+            .expect("static social-remove layout should be valid");
+        let button1 = layout
+            .leaf(SOCIAL_REMOVE_WIDTH, SOCIAL_REMOVE_HEIGHT)
+            .expect("static social-remove layout should be valid");
+        let button2 = layout
+            .leaf(SOCIAL_REMOVE_WIDTH, SOCIAL_REMOVE_HEIGHT)
+            .expect("static social-remove layout should be valid");
+        let button3 = layout
+            .leaf(SOCIAL_REMOVE_WIDTH, SOCIAL_REMOVE_HEIGHT)
+            .expect("static social-remove layout should be valid");
+        let button4 = layout
+            .leaf(SOCIAL_REMOVE_WIDTH, SOCIAL_REMOVE_HEIGHT)
+            .expect("static social-remove layout should be valid");
+        let nodes = [button0, button1, button2, button3, button4];
+        let root = layout
+            .column(&nodes, SOCIAL_REMOVE_GAP)
+            .expect("static social-remove column should be valid");
+
+        layout
+            .compute(
+                root,
+                SOCIAL_REMOVE_WIDTH,
+                SOCIAL_REMOVE_HEIGHT * 5.0 + SOCIAL_REMOVE_GAP * 4.0,
+            )
+            .expect("static social-remove layout should compute");
+
+        Self {
+            buttons: nodes.map(|node| {
+                offset(
+                    layout
+                        .rect(node)
+                        .expect("social-remove rectangle should exist"),
+                    SOCIAL_REMOVE_X,
+                    SOCIAL_REMOVE_Y,
+                )
+            }),
+        }
+    }
+
+    pub fn hit(self, index: usize) -> Option<LayoutRect> {
+        self.buttons.get(index).copied().map(|rect| {
+            expand_edges(
+                rect,
+                0.0,
+                SOCIAL_REMOVE_HIT_TOP,
+                SOCIAL_REMOVE_HIT_RIGHT,
+                SOCIAL_REMOVE_HIT_BOTTOM,
+            )
+        })
+    }
+}
+
 pub fn contains(rect: LayoutRect, x: f32, y: f32) -> bool {
     x >= rect.x
         && x <= rect.x + rect.width
@@ -263,11 +384,15 @@ fn offset(mut rect: LayoutRect, x: f32, y: f32) -> LayoutRect {
 }
 
 fn expand(rect: LayoutRect, x: f32, y: f32) -> LayoutRect {
+    expand_edges(rect, x, y, x, y)
+}
+
+fn expand_edges(rect: LayoutRect, left: f32, top: f32, right: f32, bottom: f32) -> LayoutRect {
     LayoutRect {
-        x: rect.x - x,
-        y: rect.y - y,
-        width: rect.width + x * 2.0,
-        height: rect.height + y * 2.0,
+        x: rect.x - left,
+        y: rect.y - top,
+        width: rect.width + left + right,
+        height: rect.height + top + bottom,
     }
 }
 
@@ -403,12 +528,78 @@ mod tests {
     }
 
     #[test]
+    fn settings_values_keep_the_existing_interaction_contract() {
+        let values = SettingsValueLayout::compute();
+        assert_eq!(
+            values.invite_rules,
+            LayoutRect {
+                x: 300.0,
+                y: 470.0,
+                width: 146.0,
+                height: 82.0,
+            }
+        );
+        assert_eq!(
+            values.vrchat_status,
+            LayoutRect {
+                x: 300.0,
+                y: 586.0,
+                width: 146.0,
+                height: 82.0,
+            }
+        );
+    }
+
+    #[test]
+    fn social_remove_buttons_keep_visual_and_hit_contracts() {
+        let remove = SocialRemoveLayout::compute();
+        assert_eq!(
+            remove.buttons[0],
+            LayoutRect {
+                x: 676.0,
+                y: 368.0,
+                width: 32.0,
+                height: 44.0,
+            }
+        );
+        assert_eq!(
+            remove.buttons[4],
+            LayoutRect {
+                x: 676.0,
+                y: 656.0,
+                width: 32.0,
+                height: 44.0,
+            }
+        );
+        assert_eq!(
+            remove.hit(0),
+            Some(LayoutRect {
+                x: 676.0,
+                y: 366.0,
+                width: 40.0,
+                height: 54.0,
+            })
+        );
+        assert_eq!(
+            remove.hit(4),
+            Some(LayoutRect {
+                x: 676.0,
+                y: 654.0,
+                width: 40.0,
+                height: 54.0,
+            })
+        );
+    }
+
+    #[test]
     fn hit_testing_uses_the_computed_rectangles() {
         let brightness = HomeBrightnessLayout::compute();
         let primary = HomePrimaryLayout::compute();
         let navigation = PanelNavLayout::compute();
         let tabs = SocialTabsLayout::compute();
         let toggles = SettingsToggleLayout::compute();
+        let values = SettingsValueLayout::compute();
+        let remove = SocialRemoveLayout::compute();
 
         assert!(contains(brightness.down, 60.0, 340.0));
         assert!(contains(brightness.up, 708.0, 406.0));
@@ -425,5 +616,9 @@ mod tests {
         assert!(contains(toggles.heart_rate_hit(), 356.0, 238.0));
         assert!(contains(toggles.osc_hit(), 446.0, 436.0));
         assert!(!contains(toggles.heart_rate_hit(), 447.0, 320.0));
+        assert!(contains(values.invite_rules, 300.0, 470.0));
+        assert!(contains(values.vrchat_status, 446.0, 668.0));
+        assert!(contains(remove.hit(0).unwrap(), 716.0, 420.0));
+        assert!(!contains(remove.hit(0).unwrap(), 717.0, 420.0));
     }
 }
