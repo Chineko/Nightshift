@@ -29,6 +29,7 @@ use nightshift_vrchat_worker::{
     },
     invite_dedup::RecentInviteNotifications,
     invite_execute::InviteExecutionOutcome,
+    request_coordinator::{RequestClass, shared_vrchat_requests},
 };
 use serde_json::Value;
 use tokio::{
