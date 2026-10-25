@@ -18,8 +18,8 @@ use config::{PersistedConfig, sanitize_overlay_pose};
 use nightshift_hr::{CalmPeriodConfig, CalmPeriodDetector, DetectionState};
 use nightshift_protocol::{
     AppState, Capability, ClientMessage, HrDeviceInfo, HrProviderStatus, HrStatus, InviteAction,
-    InviteActionKind, OverlayPose, OverlaySpawnMode, PROTOCOL_VERSION, ServerMessage, SleepPhase,
-    SleepingPose, StateEvent, UiCommand, VrchatStatus, WorkerReport,
+    InviteActionKind, OverlayPose, OverlaySpawnMode, PROTOCOL_VERSION, RecentEvent, RecentEventKind,
+    ServerMessage, SleepPhase, SleepingPose, StateEvent, UiCommand, VrchatStatus, WorkerReport,
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
