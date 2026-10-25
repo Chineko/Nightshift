@@ -4,7 +4,7 @@ mod primitives;
 mod settings;
 
 use super::{
-    content::PanelContent,
+    content::{PanelContent, SocialTab},
     interaction::{PanelAction, PanelPage},
 };
 
