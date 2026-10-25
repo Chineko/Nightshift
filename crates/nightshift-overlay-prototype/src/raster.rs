@@ -1,3 +1,5 @@
+#[path = "raster/effects.rs"]
+mod effects;
 #[path = "raster/home.rs"]
 mod home;
 #[path = "raster/primitives.rs"]
