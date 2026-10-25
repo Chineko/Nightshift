@@ -26,5 +26,5 @@ app_body = app_body.replace('    fn new(ctx: egui::Context) -> Self {', '    pub
 
 root = Path('crates/nightshift-ui/src')
 (root / 'bridge.rs').write_text('use super::*;\n\n' + bridge_body.rstrip() + '\n')
-(root / 'app.rs').write_text('use super::*;\nuse crate::bridge::Bridge;\n\n' + constants_and_page + app_body.rstrip() + '\n')
+(root / 'app.rs').write_text('use super::*;\nuse crate::bridge::{Bridge, UiUpdate};\n\n' + constants_and_page + app_body.rstrip() + '\n')
 path.write_text('mod app;\nmod bridge;\n\n' + imports.rstrip() + '\n\nuse app::NightshiftApp;\n\n' + main_body.rstrip() + '\n')
