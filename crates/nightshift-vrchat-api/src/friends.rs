@@ -24,10 +24,12 @@ impl FriendProfile {
     pub fn preferred_image_url(&self) -> Option<&str> {
         self.icon_url
             .as_deref()
+            .map(str::trim)
             .filter(|value| !value.is_empty())
             .or_else(|| {
                 self.profile_pic_override
                     .as_deref()
+                    .map(str::trim)
                     .filter(|value| !value.is_empty())
             })
     }
