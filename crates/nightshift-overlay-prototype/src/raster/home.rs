@@ -1,11 +1,13 @@
 use super::*;
-use crate::home_layout::HomeBrightnessLayout;
+use crate::home_layout::{HomeBrightnessLayout, HomePrimaryLayout};
 
 impl PanelBitmap {
     pub(super) fn draw_home(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
         let brightness_layout = HomeBrightnessLayout::compute();
+        let primary_layout = HomePrimaryLayout::compute();
         let down = pixel_rect(brightness_layout.down);
         let up = pixel_rect(brightness_layout.up);
+        let primary = pixel_rect(primary_layout.action);
 
         self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
         self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
@@ -141,17 +143,17 @@ impl PanelBitmap {
         };
         let hovered = hover == Some(primary_action);
         self.rounded_rect(
-            40,
-            840,
-            688,
-            74,
+            primary.0,
+            primary.1,
+            primary.2,
+            primary.3,
             20,
             if hovered { PURPLE_BRIGHT } else { PURPLE },
             if hovered { TEXT } else { PURPLE_BRIGHT },
         );
         self.draw_crescent(
-            254,
-            877,
+            primary.0 + 214,
+            primary.1 + 37,
             13,
             TEXT,
             if hovered { PURPLE_BRIGHT } else { PURPLE },
@@ -159,7 +161,7 @@ impl PanelBitmap {
         let label = content.primary_action_label();
         let label_width = label.chars().count() as u32 * 18;
         let label_x = 397_u32.saturating_sub(label_width / 2).max(290);
-        self.draw_text(label_x, 865, label, 3, TEXT);
+        self.draw_text(label_x, primary.1 + 25, label, 3, TEXT);
 
         self.draw_text(271, 935, "NIGHTSHIFT OVERLAY  V1.4.2", 1, MUTED);
     }
