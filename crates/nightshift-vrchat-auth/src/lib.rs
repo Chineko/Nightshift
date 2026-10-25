@@ -158,7 +158,7 @@ mod tests {
         });
 
         assert_eq!(stored.auth_cookie, "auth-cookie");
-        assert_eq!(stored.two_factor_auth.as_deref(), Some("2fa-cookie"));
+        assert_eq!(stored.two_factor_cookie.as_deref(), Some("2fa-cookie"));
         assert_eq!(stored.user_id.as_deref(), Some("usr_test"));
     }
 
