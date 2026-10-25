@@ -1,4 +1,4 @@
-use super::{PanelBitmap, font::glyph5x7};
+use super::{PanelBitmap, text::rasterize_text};
 
 impl PanelBitmap {
     pub(super) fn rounded_rect(
@@ -131,39 +131,39 @@ impl PanelBitmap {
     }
 
     pub(super) fn draw_text(&mut self, x: u32, y: u32, text: &str, scale: u32, color: [u8; 4]) {
-        let mut cursor_x = x;
-        let advance = 6 * scale;
-        for character in text.chars() {
-            if cursor_x.saturating_add(5 * scale) > self.width {
-                break;
+        let max_width = self.width.saturating_sub(x);
+        rasterize_text(text, scale, max_width, color, |px, py, width, height, color| {
+            let px = px + x as i32;
+            let py = py + y as i32;
+            if px < 0 || py < 0 {
+                return;
             }
-            self.draw_glyph(cursor_x, y, glyph5x7(character), scale, color);
-            cursor_x = cursor_x.saturating_add(advance);
-        }
-    }
-
-    pub(super) fn draw_glyph(
-        &mut self,
-        x: u32,
-        y: u32,
-        glyph: [u8; 7],
-        scale: u32,
-        color: [u8; 4],
-    ) {
-        for (row, bits) in glyph.into_iter().enumerate() {
-            for column in 0..5_u32 {
-                let mask = 1 << (4 - column);
-                if bits & mask != 0 {
-                    self.fill_rect(
-                        x + column * scale,
-                        y + row as u32 * scale,
-                        scale,
-                        scale,
-                        color,
-                    );
+            for offset_y in 0..height {
+                for offset_x in 0..width {
+                    self.blend_pixel(px as u32 + offset_x, py as u32 + offset_y, color);
                 }
             }
+        });
+    }
+
+    fn blend_pixel(&mut self, x: u32, y: u32, source: [u8; 4]) {
+        if x >= self.width || y >= self.height || source[3] == 0 {
+            return;
         }
+        if source[3] == 255 {
+            self.put_pixel(x, y, source);
+            return;
+        }
+
+        let offset = ((y * self.width + x) * 4) as usize;
+        let alpha = source[3] as u16;
+        let inverse = 255_u16 - alpha;
+        for channel in 0..3 {
+            let blended = source[channel] as u16 * alpha
+                + self.rgba[offset + channel] as u16 * inverse;
+            self.rgba[offset + channel] = (blended / 255) as u8;
+        }
+        self.rgba[offset + 3] = 255;
     }
 
     pub(super) fn put_pixel(&mut self, x: u32, y: u32, color: [u8; 4]) {
