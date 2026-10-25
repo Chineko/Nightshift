@@ -13,6 +13,8 @@ pub struct AppState {
     pub invites: InviteState,
     pub overlay: OverlayState,
     pub settings: SettingsState,
+    #[serde(default)]
+    pub recent_events: Vec<RecentEvent>,
 }
 
 impl Default for AppState {
@@ -27,6 +29,7 @@ impl Default for AppState {
             invites: InviteState::default(),
             overlay: OverlayState::default(),
             settings: SettingsState::default(),
+            recent_events: Vec::new(),
         }
     }
 }
@@ -51,6 +54,26 @@ impl AppState {
             heart_rate_provider_status: self.heart_rate.provider_status,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecentEventKind {
+    #[default]
+    Runtime,
+    Sleep,
+    Vrchat,
+    Invite,
+    HeartRate,
+    Osc,
+    Overlay,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecentEvent {
+    pub uptime_ms: u64,
+    pub kind: RecentEventKind,
+    pub message: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
