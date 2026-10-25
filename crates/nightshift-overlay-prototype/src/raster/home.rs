@@ -1,7 +1,12 @@
 use super::*;
+use crate::home_layout::HomeBrightnessLayout;
 
 impl PanelBitmap {
     pub(super) fn draw_home(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
+        let brightness_layout = HomeBrightnessLayout::compute();
+        let down = pixel_rect(brightness_layout.down);
+        let up = pixel_rect(brightness_layout.up);
+
         self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
         self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
         self.draw_crescent(74, 62, 13, PURPLE_BRIGHT, PURPLE_DARK);
@@ -53,13 +58,13 @@ impl PanelBitmap {
         let down_hover = hover == Some(PanelAction::BrightnessDown);
         let up_hover = hover == Some(PanelAction::BrightnessUp);
         if down_hover {
-            self.rounded_rect(60, 340, 56, 66, 16, PURPLE_DARK, PURPLE_BRIGHT);
+            self.rounded_rect(down.0, down.1, down.2, down.3, 16, PURPLE_DARK, PURPLE_BRIGHT);
         }
         if up_hover {
-            self.rounded_rect(652, 340, 56, 66, 16, PURPLE_DARK, PURPLE_BRIGHT);
+            self.rounded_rect(up.0, up.1, up.2, up.3, 16, PURPLE_DARK, PURPLE_BRIGHT);
         }
-        self.draw_crescent(82, 373, 10, MUTED, PANEL);
-        self.draw_sun(686, 373, 8, MUTED);
+        self.draw_crescent(down.0 + 22, down.1 + 33, 10, MUTED, PANEL);
+        self.draw_sun(up.0 + 34, up.1 + 33, 8, MUTED);
         self.draw_line(64, 421, 704, 421, BORDER);
         self.draw_text(64, 443, "TARGET BRIGHTNESS", 2, MUTED);
         self.draw_text(
@@ -158,4 +163,13 @@ impl PanelBitmap {
 
         self.draw_text(271, 935, "NIGHTSHIFT OVERLAY  V1.4.2", 1, MUTED);
     }
+}
+
+fn pixel_rect(rect: crate::layout::LayoutRect) -> (u32, u32, u32, u32) {
+    (
+        rect.x.round() as u32,
+        rect.y.round() as u32,
+        rect.width.round() as u32,
+        rect.height.round() as u32,
+    )
 }
