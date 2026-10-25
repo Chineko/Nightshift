@@ -1,5 +1,107 @@
 use super::*;
 
+const MAX_RECENT_EVENTS: usize = 128;
+static RECENT_EVENTS: std::sync::OnceLock<std::sync::Mutex<std::collections::VecDeque<RecentEvent>>> =
+    std::sync::OnceLock::new();
+
+fn recent_events() -> &'static std::sync::Mutex<std::collections::VecDeque<RecentEvent>> {
+    RECENT_EVENTS.get_or_init(|| std::sync::Mutex::new(std::collections::VecDeque::new()))
+}
+
+fn record_recent_event(store: &StateStore, kind: RecentEventKind, message: impl Into<String>) {
+    let message = message.into();
+    let mut events = recent_events().lock().expect("recent event ring poisoned");
+    if events
+        .back()
+        .is_some_and(|event| event.kind == kind && event.message == message)
+    {
+        return;
+    }
+    if events.len() == MAX_RECENT_EVENTS {
+        events.pop_front();
+    }
+    // Hydra gets a notebook, not infinite storage.
+    events.push_back(RecentEvent {
+        uptime_ms: store.now_ms(),
+        kind,
+        message,
+    });
+}
+
+fn attach_recent_events(mut state: AppState) -> AppState {
+    state.recent_events = recent_events()
+        .lock()
+        .expect("recent event ring poisoned")
+        .iter()
+        .cloned()
+        .collect();
+    state
+}
+
+fn record_command_event(store: &StateStore, command: &UiCommand) {
+    match command {
+        UiCommand::EnterSleep => {
+            record_recent_event(store, RecentEventKind::Sleep, "sleep mode requested")
+        }
+        UiCommand::Wake => record_recent_event(store, RecentEventKind::Sleep, "wake requested"),
+        _ => {}
+    }
+}
+
+fn record_worker_event(store: &StateStore, report: &WorkerReport) {
+    match report {
+        WorkerReport::OscRuntime { connected, .. } => record_recent_event(
+            store,
+            RecentEventKind::Osc,
+            if *connected {
+                "OSC worker connected"
+            } else {
+                "OSC worker disconnected"
+            },
+        ),
+        WorkerReport::HeartRateProviderRuntime { status, .. } => record_recent_event(
+            store,
+            RecentEventKind::HeartRate,
+            format!("heart-rate provider is {status:?}"),
+        ),
+        WorkerReport::VrchatRuntime {
+            connected,
+            status,
+            last_invite_action,
+            invite_error,
+            ..
+        } => {
+            record_recent_event(
+                store,
+                RecentEventKind::Vrchat,
+                if *connected {
+                    format!("VRChat runtime connected with status {status:?}")
+                } else {
+                    "VRChat runtime disconnected".into()
+                },
+            );
+            if let Some(action) = last_invite_action {
+                record_recent_event(
+                    store,
+                    RecentEventKind::Invite,
+                    format!("invite automation action: {:?}", action.kind),
+                );
+            }
+            if invite_error.is_some() {
+                record_recent_event(
+                    store,
+                    RecentEventKind::Invite,
+                    "invite automation reported an error",
+                );
+            }
+        }
+        WorkerReport::SleepingPose { .. }
+        | WorkerReport::OverlayRuntimePose { .. }
+        | WorkerReport::HeartRateRuntime { .. }
+        | WorkerReport::HeartRateDevices { .. } => {}
+    }
+}
+
 struct OverlayClientGuard {
     store: StateStore,
 }
@@ -8,6 +110,11 @@ impl Drop for OverlayClientGuard {
     fn drop(&mut self) {
         let previous = self.store.overlay_clients.fetch_sub(1, Ordering::AcqRel);
         if previous == 1 {
+            record_recent_event(
+                &self.store,
+                RecentEventKind::Overlay,
+                "overlay runtime disconnected",
+            );
             let store = self.store.clone();
             tokio::spawn(async move {
                 store.set_overlay_runtime(false, None).await;
@@ -26,6 +133,11 @@ impl Drop for OscClientGuard {
     fn drop(&mut self) {
         let previous = self.store.osc_clients.fetch_sub(1, Ordering::AcqRel);
         if previous == 1 {
+            record_recent_event(
+                &self.store,
+                RecentEventKind::Osc,
+                "OSC worker disconnected",
+            );
             let store = self.store.clone();
             tokio::spawn(async move {
                 store.set_osc_runtime(false, None, 0, false).await;
@@ -43,6 +155,11 @@ impl Drop for HrClientGuard {
     fn drop(&mut self) {
         let previous = self.store.hr_clients.fetch_sub(1, Ordering::AcqRel);
         if previous == 1 {
+            record_recent_event(
+                &self.store,
+                RecentEventKind::HeartRate,
+                "heart-rate worker disconnected",
+            );
             let store = self.store.clone();
             tokio::spawn(async move {
                 store.set_hr_runtime(false, None).await;
@@ -63,6 +180,11 @@ impl Drop for VrchatClientGuard {
     fn drop(&mut self) {
         let previous = self.store.vrchat_clients.fetch_sub(1, Ordering::AcqRel);
         if previous == 1 {
+            record_recent_event(
+                &self.store,
+                RecentEventKind::Vrchat,
+                "VRChat worker disconnected",
+            );
             let store = self.store.clone();
             tokio::spawn(async move {
                 store
@@ -173,6 +295,11 @@ pub(crate) async fn handle_client(stream: UnixStream, store: StateStore) -> Resu
             .set_overlay_runtime(true, Some(client_version.clone()))
             .await;
         if previous == 0 {
+            record_recent_event(
+                &store,
+                RecentEventKind::Overlay,
+                "overlay runtime connected",
+            );
             info!(version = %client_version, "Nightshift overlay runtime connected");
         }
         Some(OverlayClientGuard {
@@ -184,7 +311,10 @@ pub(crate) async fn handle_client(stream: UnixStream, store: StateStore) -> Resu
 
     let is_osc_worker = client == "nightshift-osc";
     let _osc_guard = if is_osc_worker {
-        store.osc_clients.fetch_add(1, Ordering::AcqRel);
+        let previous = store.osc_clients.fetch_add(1, Ordering::AcqRel);
+        if previous == 0 {
+            record_recent_event(&store, RecentEventKind::Osc, "OSC worker connected");
+        }
         Some(OscClientGuard {
             store: store.clone(),
         })
@@ -194,7 +324,14 @@ pub(crate) async fn handle_client(stream: UnixStream, store: StateStore) -> Resu
 
     let is_hr_worker = client == "nightshift-hr";
     let _hr_guard = if is_hr_worker {
-        store.hr_clients.fetch_add(1, Ordering::AcqRel);
+        let previous = store.hr_clients.fetch_add(1, Ordering::AcqRel);
+        if previous == 0 {
+            record_recent_event(
+                &store,
+                RecentEventKind::HeartRate,
+                "heart-rate worker connected",
+            );
+        }
         Some(HrClientGuard {
             store: store.clone(),
         })
@@ -204,7 +341,14 @@ pub(crate) async fn handle_client(stream: UnixStream, store: StateStore) -> Resu
 
     let is_vrchat_worker = client == "nightshift-vrchat";
     let _vrchat_guard = if is_vrchat_worker {
-        store.vrchat_clients.fetch_add(1, Ordering::AcqRel);
+        let previous = store.vrchat_clients.fetch_add(1, Ordering::AcqRel);
+        if previous == 0 {
+            record_recent_event(
+                &store,
+                RecentEventKind::Vrchat,
+                "VRChat worker connected",
+            );
+        }
         Some(VrchatClientGuard {
             store: store.clone(),
         })
@@ -234,7 +378,9 @@ pub(crate) async fn handle_client(stream: UnixStream, store: StateStore) -> Resu
     let (snapshot, mut updates) = store.snapshot_and_subscribe().await;
     send_message(
         &mut write_half,
-        &ServerMessage::FullState { state: snapshot },
+        &ServerMessage::FullState {
+            state: attach_recent_events(snapshot),
+        },
     )
     .await?;
 
@@ -270,10 +416,12 @@ pub(crate) async fn handle_client(stream: UnixStream, store: StateStore) -> Resu
                         match serde_json::from_str::<ClientMessage>(&line) {
                             Ok(ClientMessage::GetState) => ClientStep::Resync,
                             Ok(ClientMessage::Command { command }) => {
+                                record_command_event(&store, &command);
                                 store.apply(command).await;
                                 ClientStep::Continue
                             }
                             Ok(ClientMessage::Report { report }) => {
+                                record_worker_event(&store, &report);
                                 if !store.apply_worker_report(&client, report).await {
                                     send_message(
                                         &mut write_half,
@@ -321,7 +469,9 @@ pub(crate) async fn handle_client(stream: UnixStream, store: StateStore) -> Resu
                 updates = new_updates;
                 send_message(
                     &mut write_half,
-                    &ServerMessage::FullState { state: snapshot },
+                    &ServerMessage::FullState {
+                        state: attach_recent_events(snapshot),
+                    },
                 )
                 .await?;
             }
