@@ -236,6 +236,53 @@ async fn disconnect_aborts_pending_status_task() {
     assert!(!ran.load(std::sync::atomic::Ordering::Acquire));
 }
 
+#[tokio::test]
+async fn session_change_aborts_pending_status_task() {
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = ran.clone();
+    let mut task = AbortTask(Some(tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        flag.store(true, std::sync::atomic::Ordering::Release);
+    })));
+    let mut generation = 11;
+
+    cancel_pending_status_on_session_change(true, &mut generation, &mut task);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    assert_eq!(generation, 12);
+    assert!(!task.is_pending());
+    assert!(!ran.load(std::sync::atomic::Ordering::Acquire));
+}
+
+#[test]
+fn session_sync_reports_identity_changes() {
+    let mut current = Some(SessionCookies {
+        auth: "session-a".into(),
+        two_factor_auth: None,
+    });
+    let same = current.clone();
+    let replacement = Some(SessionCookies {
+        auth: "session-b".into(),
+        two_factor_auth: None,
+    });
+    let mut tasks = JoinSet::<Result<InviteHandlingResult>>::new();
+    let mut recent = RecentInviteNotifications::default();
+
+    assert!(!sync_invite_session(
+        &mut current,
+        same,
+        &mut tasks,
+        &mut recent,
+    ));
+    assert!(sync_invite_session(
+        &mut current,
+        replacement.clone(),
+        &mut tasks,
+        &mut recent,
+    ));
+    assert_eq!(current, replacement);
+}
+
 #[test]
 fn status_writes_wait_at_least_for_debounce() {
     assert!(status_update_delay(None) >= STATUS_DEBOUNCE);
