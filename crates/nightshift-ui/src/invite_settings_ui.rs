@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, mpsc},
     thread,
 };
@@ -12,6 +12,8 @@ const ERROR_RED: Color32 = Color32::from_rgb(235, 112, 112);
 const PURPLE: Color32 = Color32::from_rgb(183, 141, 255);
 const MUTED: Color32 = Color32::from_rgb(157, 159, 170);
 const FRIEND_RESULT_LIMIT: usize = 40;
+const FRIEND_THUMBNAIL_SIZE: u32 = 128;
+const MAX_FRIEND_TEXTURES: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SocialListTarget {
@@ -115,6 +117,7 @@ pub struct InviteSettingsUi {
     social_target: SocialListTarget,
     requested_images: HashSet<String>,
     friend_textures: HashMap<String, TextureHandle>,
+    friend_texture_order: VecDeque<String>,
 }
 
 impl Default for InviteSettingsUi {
@@ -134,6 +137,7 @@ impl Default for InviteSettingsUi {
             social_target: SocialListTarget::Whitelist,
             requested_images: HashSet::new(),
             friend_textures: HashMap::new(),
+            friend_texture_order: VecDeque::new(),
         }
     }
 }
@@ -226,15 +230,31 @@ impl InviteSettingsUi {
                 }
                 FriendUpdate::Image { url, bytes } => {
                     if let Ok(decoded) = image::load_from_memory(&bytes) {
-                        let rgba = decoded.to_rgba8();
-                        let size = [rgba.width() as usize, rgba.height() as usize];
-                        let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                        let rgba = decoded
+                            .resize_to_fill(
+                                FRIEND_THUMBNAIL_SIZE,
+                                FRIEND_THUMBNAIL_SIZE,
+                                image::imageops::FilterType::Triangle,
+                            )
+                            .to_rgba8();
+                        let color = egui::ColorImage::from_rgba_unmultiplied(
+                            [FRIEND_THUMBNAIL_SIZE as usize; 2],
+                            rgba.as_raw(),
+                        );
                         let texture = ctx.load_texture(
                             format!("vrchat-friend:{url}"),
                             color,
                             egui::TextureOptions::LINEAR,
                         );
-                        self.friend_textures.insert(url, texture);
+                        self.friend_textures.insert(url.clone(), texture);
+                        self.friend_texture_order.push_back(url);
+                        while self.friend_texture_order.len() > MAX_FRIEND_TEXTURES {
+                            if let Some(oldest) = self.friend_texture_order.pop_front() {
+                                self.friend_textures.remove(&oldest);
+                                self.requested_images.remove(&oldest);
+                            }
+                        }
+                        // Downloaded bytes and full-size decode fall out of scope here. Tiny textures stay; boxes do not.
                     }
                 }
                 FriendUpdate::Error(error) => self.friend_error = Some(error),
@@ -546,5 +566,12 @@ mod tests {
         assert_eq!(friend_initials("Sleepy Friend"), "SF");
         assert_eq!(friend_initials("Chineko"), "C");
         assert_eq!(friend_initials(""), "?");
+    }
+
+    #[test]
+    fn friend_thumbnail_budget_stays_small() {
+        assert_eq!(FRIEND_THUMBNAIL_SIZE, 128);
+        assert_eq!(MAX_FRIEND_TEXTURES, 128);
+        assert_eq!(FRIEND_THUMBNAIL_SIZE as usize * FRIEND_THUMBNAIL_SIZE as usize * 4 * MAX_FRIEND_TEXTURES, 8 * 1024 * 1024);
     }
 }
