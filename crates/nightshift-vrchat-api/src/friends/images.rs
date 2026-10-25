@@ -14,13 +14,6 @@ const MAX_FRIEND_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_FRIEND_IMAGE_CACHE_ENTRIES: usize = 128;
 const MAX_FRIEND_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct FriendImageCacheStats {
-    pub entries: usize,
-    pub total_bytes: usize,
-    pub oldest_age: Option<Duration>,
-}
-
 struct CachedImage {
     loaded_at: Instant,
     bytes: Arc<[u8]>,
@@ -101,20 +94,20 @@ impl VrchatApiClient {
         Ok(bytes)
     }
 
-    pub fn friend_image_cache_stats(&self) -> FriendImageCacheStats {
+    pub fn friend_image_cache_metrics(&self) -> (usize, usize, Option<Duration>) {
         let now = Instant::now();
         let Ok(mut cache) = cache().lock() else {
-            return FriendImageCacheStats::default();
+            return (0, 0, None);
         };
         prune_cache(&mut cache, now);
-        FriendImageCacheStats {
-            entries: cache.len(),
-            total_bytes: cache.values().map(|entry| entry.bytes.len()).sum(),
-            oldest_age: cache
+        (
+            cache.len(),
+            cache.values().map(|entry| entry.bytes.len()).sum(),
+            cache
                 .values()
                 .map(|entry| now.saturating_duration_since(entry.loaded_at))
                 .max(),
-        }
+        )
     }
 
     pub fn invalidate_friend_image_cache(&self) {
