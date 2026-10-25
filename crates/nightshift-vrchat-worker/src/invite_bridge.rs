@@ -1,4 +1,7 @@
-use std::{collections::HashSet, sync::{Arc, Mutex}};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context, Result, anyhow};
 use nightshift_invites::{InviteContext, InviteRules};
@@ -9,6 +12,7 @@ use crate::{
     instance_context::InstanceSource,
     invite_execute::{InviteExecutionOutcome, execute_invite_plan},
     invite_plan::plan_invite_action,
+    request_coordinator::{RequestClass, shared_vrchat_requests},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -59,9 +63,13 @@ async fn resolve_relationship_context(
 ) -> Result<(bool, bool)> {
     let (need_friend, need_favorite) = relationship_needs(rules);
     let is_favorite = if need_favorite {
-        api.invite_sender_is_favorite(cookies, user_id)
-            .await
-            .context("checking whether VRChat invite sender is a favorite friend")?
+        {
+            let _permit = shared_vrchat_requests()
+                .acquire(RequestClass::RelationshipRead)
+                .await;
+            api.invite_sender_is_favorite(cookies, user_id).await
+        }
+        .context("checking whether VRChat invite sender is a favorite friend")?
     } else {
         false
     };
@@ -71,9 +79,13 @@ async fn resolve_relationship_context(
     let is_friend = if is_favorite {
         true
     } else if need_friend {
-        api.invite_sender_is_friend(cookies, user_id)
-            .await
-            .context("checking whether VRChat invite sender is a friend")?
+        {
+            let _permit = shared_vrchat_requests()
+                .acquire(RequestClass::RelationshipRead)
+                .await;
+            api.invite_sender_is_friend(cookies, user_id).await
+        }
+        .context("checking whether VRChat invite sender is a friend")?
     } else {
         false
     };
