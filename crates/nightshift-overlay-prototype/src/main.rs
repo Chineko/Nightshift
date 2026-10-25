@@ -3,6 +3,7 @@ mod controller_input;
 mod interaction;
 mod ipc;
 mod laser;
+mod layout;
 mod panel;
 mod panel_cache;
 mod panel_state;
