@@ -10,7 +10,7 @@ use reqwest::Url;
 use super::super::VrchatApiClient;
 
 pub const FRIEND_IMAGE_CACHE_TTL: Duration = Duration::from_secs(60 * 60 * 6);
-const MAX_FRIEND_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_FRIEND_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_FRIEND_IMAGE_CACHE_ENTRIES: usize = 128;
 const MAX_FRIEND_IMAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
@@ -70,14 +70,14 @@ impl VrchatApiClient {
             .content_length()
             .is_some_and(|len| len > MAX_FRIEND_IMAGE_BYTES as u64)
         {
-            bail!("VRChat friend image exceeds the 8 MiB safety limit");
+            bail!("VRChat friend image exceeds the 2 MiB safety limit");
         }
         let bytes = response
             .bytes()
             .await
             .context("reading VRChat friend image")?;
         if bytes.len() > MAX_FRIEND_IMAGE_BYTES {
-            bail!("VRChat friend image exceeds the 8 MiB safety limit");
+            bail!("VRChat friend image exceeds the 2 MiB safety limit");
         }
         let bytes: Arc<[u8]> = Arc::from(bytes.as_ref());
         if let Ok(mut cache) = cache().lock() {
@@ -149,6 +149,11 @@ mod tests {
     }
 
     #[test]
+    fn per_image_limit_is_two_mib() {
+        assert_eq!(MAX_FRIEND_IMAGE_BYTES, 2 * 1024 * 1024);
+    }
+
+    #[test]
     fn cache_pruning_removes_expired_and_oldest_entries() {
         let now = Instant::now();
         let mut entries = HashMap::new();
@@ -174,7 +179,7 @@ mod tests {
     fn cache_pruning_enforces_total_byte_budget() {
         let now = Instant::now();
         let mut entries = HashMap::new();
-        for index in 0..9 {
+        for index in 0..33 {
             entries.insert(
                 format!("image-{index}"),
                 image(now - Duration::from_secs(index), MAX_FRIEND_IMAGE_BYTES),
@@ -185,7 +190,7 @@ mod tests {
 
         let total_bytes = entries.values().map(|entry| entry.bytes.len()).sum::<usize>();
         assert!(total_bytes <= MAX_FRIEND_IMAGE_CACHE_BYTES);
-        assert_eq!(entries.len(), 8);
-        assert!(!entries.contains_key("image-8"));
+        assert_eq!(entries.len(), 32);
+        assert!(!entries.contains_key("image-32"));
     }
 }
