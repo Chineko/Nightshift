@@ -1,0 +1,51 @@
+name: Temporary Desktop Split
+
+on:
+  push:
+    branches:
+      - prototype/refactor-ui-generator
+
+permissions:
+  contents: write
+
+jobs:
+  split:
+    if: github.event.head_commit.message == 'Arm disposable desktop split workflow'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: prototype/refactor-ui-generator
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libopenxr-dev pkg-config
+
+      - name: Split desktop source
+        run: python .github/tmp-ui-split.py
+
+      - name: Validate desktop split
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check -p nightshift-ui --all-targets --locked 2>&1 | tee ui-split.log
+          cargo test -p nightshift-ui --locked 2>&1 | tee -a ui-split.log
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-split-diagnostics
+          path: ui-split.log
+          if-no-files-found: ignore
+
+      - name: Commit generated source
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add crates/nightshift-ui/src
+          git commit -m 'Split desktop app and bridge modules'
+          git push origin HEAD:prototype/refactor-ui-generator
