@@ -67,8 +67,12 @@ pub(crate) struct FriendCache {
 }
 
 impl FriendCache {
-    pub(crate) fn fresh_for(&self, cookies: &SessionCookies, now: Instant) -> bool {
+    pub(crate) fn matches_session(&self, cookies: &SessionCookies) -> bool {
         self.session_auth == cookies.auth
+    }
+
+    pub(crate) fn fresh_for(&self, cookies: &SessionCookies, now: Instant) -> bool {
+        self.matches_session(cookies)
             && now.saturating_duration_since(self.loaded_at) < FRIEND_METADATA_CACHE_TTL
     }
 }
@@ -87,11 +91,26 @@ impl VrchatApiClient {
         if let Ok(mut cache) = self.friend_cache.lock() {
             *cache = Some(FriendCache {
                 session_auth: cookies.auth.clone(),
-                loaded_at: now,
+                loaded_at: Instant::now(),
                 profiles: profiles.clone(),
             });
         }
         Ok(profiles)
+    }
+
+    pub fn cached_friends(&self, cookies: &SessionCookies) -> Option<Vec<FriendProfile>> {
+        let cache = self.friend_cache.lock().ok()?;
+        let cache = cache.as_ref()?;
+        cache.matches_session(cookies).then(|| cache.profiles.clone())
+    }
+
+    pub fn friend_cache_age(&self, cookies: &SessionCookies) -> Option<Duration> {
+        let now = Instant::now();
+        let cache = self.friend_cache.lock().ok()?;
+        let cache = cache.as_ref()?;
+        cache
+            .matches_session(cookies)
+            .then(|| now.saturating_duration_since(cache.loaded_at))
     }
 
     pub fn invalidate_friend_cache(&self) {
@@ -217,6 +236,31 @@ mod tests {
             },
             loaded_at + Duration::from_secs(1),
         ));
+    }
+
+    #[test]
+    fn stale_cache_stays_readable_only_within_same_session() {
+        let cookies = SessionCookies {
+            auth: "session-a".into(),
+            two_factor_auth: None,
+        };
+        let cache = FriendCache {
+            session_auth: cookies.auth.clone(),
+            loaded_at: Instant::now() - FRIEND_METADATA_CACHE_TTL - Duration::from_secs(1),
+            profiles: vec![FriendProfile {
+                id: "usr_friend".into(),
+                display_name: "Friend".into(),
+                icon_url: None,
+                profile_pic_override: None,
+            }],
+        };
+
+        assert!(cache.matches_session(&cookies));
+        assert!(!cache.fresh_for(&cookies, Instant::now()));
+        assert!(!cache.matches_session(&SessionCookies {
+            auth: "session-b".into(),
+            two_factor_auth: None,
+        }));
     }
 
     #[test]
