@@ -1,4 +1,7 @@
 use super::*;
+use nightshift_vrchat_status::{VrchatPresence, restore_presence, target_presence};
+
+pub(crate) const SLEEP_STATUS_DESCRIPTION: &str = "Sleeping in VR 🌙";
 
 pub(crate) struct AbortTask(pub(crate) Option<JoinHandle<()>>);
 
@@ -27,6 +30,7 @@ impl Drop for AbortTask {
 
 pub(crate) struct RuntimeRefresh {
     pub(crate) report: WorkerReport,
+    pub(crate) presence: Option<VrchatPresence>,
     pub(crate) pipeline_auth_token: Option<String>,
     pub(crate) session_cookies: Option<SessionCookies>,
 }
@@ -56,6 +60,7 @@ pub(crate) fn disconnected_report() -> WorkerReport {
 pub(crate) fn disconnected_refresh() -> RuntimeRefresh {
     RuntimeRefresh {
         report: disconnected_report(),
+        presence: None,
         pipeline_auth_token: None,
         session_cookies: None,
     }
@@ -85,6 +90,14 @@ pub(crate) fn report_runtime(report: &WorkerReport) -> (bool, VrchatStatus) {
     }
 }
 
+pub(crate) fn offline_presence() -> VrchatPresence {
+    VrchatPresence::new(VrchatStatus::Offline, "")
+}
+
+pub(crate) fn user_presence(user: &nightshift_vrchat_api::CurrentUserSummary) -> VrchatPresence {
+    VrchatPresence::new(user.status, user.status_description.clone())
+}
+
 pub(crate) fn status_update_delay(last_write: Option<Instant>) -> Duration {
     let rate_limit_wait = last_write
         .map(|last| STATUS_MIN_INTERVAL.saturating_sub(last.elapsed()))
@@ -109,6 +122,25 @@ pub(crate) fn pending_retarget(
         automation.wake_status
     };
     (target != current_status).then_some(target)
+}
+
+pub(crate) fn pending_presence_retarget(
+    pending: bool,
+    sleeping: bool,
+    connected: bool,
+    current: &VrchatPresence,
+    captured: Option<&VrchatPresence>,
+    automation: StatusAutomationConfig,
+) -> Option<VrchatPresence> {
+    if !pending || !automation.enabled || !connected {
+        return None;
+    }
+
+    if sleeping {
+        target_presence(current, automation.sleep_status, SLEEP_STATUS_DESCRIPTION)
+    } else {
+        restore_presence(captured, current)
+    }
 }
 
 pub(crate) fn cancel_pending_status_on_disconnect(
@@ -351,18 +383,66 @@ pub(crate) async fn refresh_runtime(
         }
     };
     let cookies = session_cookies(&session);
+    let presence = user_presence(&user);
 
     RuntimeRefresh {
         report: WorkerReport::VrchatRuntime {
             connected: true,
             display_name: Some(user.display_name),
-            status: user.status,
+            status: presence.status,
             last_invite_action: None,
             invite_error: None,
         },
+        presence: Some(presence),
         pipeline_auth_token: Some(cookies.auth.clone()),
         session_cookies: Some(cookies),
     }
+}
+
+pub(crate) async fn set_runtime_presence(
+    api: VrchatApiClient,
+    store: VrchatSessionStore,
+    target: VrchatPresence,
+    expected_session: Option<SessionCookies>,
+) -> Result<RuntimeRefresh> {
+    let Some((session, user)) = validated_user(&api, &store).await? else {
+        bail!("no VRChat session is stored");
+    };
+    let cookies = session_cookies(&session);
+
+    if expected_session.as_ref() != Some(&cookies) {
+        bail!("VRChat session changed before pending presence update");
+    }
+
+    let current = user_presence(&user);
+    let verified = if current != target {
+        let _permit = shared_vrchat_requests()
+            .acquire(RequestClass::StatusWrite)
+            .await;
+        api.set_presence(
+            &cookies,
+            &user.id,
+            target.status,
+            &target.status_description,
+        )
+        .await?
+    } else {
+        user
+    };
+    let presence = user_presence(&verified);
+
+    Ok(RuntimeRefresh {
+        report: WorkerReport::VrchatRuntime {
+            connected: true,
+            display_name: Some(verified.display_name),
+            status: presence.status,
+            last_invite_action: None,
+            invite_error: None,
+        },
+        presence: Some(presence),
+        pipeline_auth_token: Some(cookies.auth.clone()),
+        session_cookies: Some(cookies),
+    })
 }
 
 pub(crate) async fn set_runtime_status(
@@ -387,6 +467,7 @@ pub(crate) async fn set_runtime_status(
         api.set_status(&cookies, &user.id, target).await?;
     }
 
+    let presence = VrchatPresence::new(target, user.status_description);
     Ok(RuntimeRefresh {
         report: WorkerReport::VrchatRuntime {
             connected: true,
@@ -395,6 +476,7 @@ pub(crate) async fn set_runtime_status(
             last_invite_action: None,
             invite_error: None,
         },
+        presence: Some(presence),
         pipeline_auth_token: Some(cookies.auth.clone()),
         session_cookies: Some(cookies),
     })
