@@ -19,6 +19,7 @@ pub struct LayoutRect {
 pub struct LayoutEngine {
     tree: TaffyTree<()>,
     widgets: HashMap<WidgetId, LayoutNode>,
+    parents: HashMap<LayoutNode, LayoutNode>,
 }
 
 impl Default for LayoutEngine {
@@ -32,6 +33,7 @@ impl LayoutEngine {
         Self {
             tree: TaffyTree::new(),
             widgets: HashMap::new(),
+            parents: HashMap::new(),
         }
     }
 
@@ -63,7 +65,8 @@ impl LayoutEngine {
         direction: FlexDirection,
     ) -> Result<LayoutNode> {
         let child_ids = children.iter().map(|child| child.0).collect::<Vec<_>>();
-        self.tree
+        let parent = self
+            .tree
             .new_with_children(
                 Style {
                     flex_direction: direction,
@@ -76,7 +79,11 @@ impl LayoutEngine {
                 &child_ids,
             )
             .map(LayoutNode)
-            .context("creating Nightshift flex container")
+            .context("creating Nightshift flex container")?;
+        for child in children {
+            self.parents.insert(*child, parent);
+        }
+        Ok(parent)
     }
 
     pub fn bind(&mut self, widget: WidgetId, node: LayoutNode) {
@@ -100,9 +107,23 @@ impl LayoutEngine {
             .tree
             .layout(node.0)
             .context("reading Nightshift UI layout")?;
+        let mut x = layout.location.x;
+        let mut y = layout.location.y;
+        let mut current = node;
+
+        while let Some(parent) = self.parents.get(&current).copied() {
+            let parent_layout = self
+                .tree
+                .layout(parent.0)
+                .context("reading Nightshift parent layout")?;
+            x += parent_layout.location.x;
+            y += parent_layout.location.y;
+            current = parent;
+        }
+
         Ok(LayoutRect {
-            x: layout.location.x,
-            y: layout.location.y,
+            x,
+            y,
             width: layout.size.width,
             height: layout.size.height,
         })
@@ -147,6 +168,21 @@ mod tests {
 
         assert_eq!(layout.rect(first).unwrap().x, 0.0);
         assert_eq!(layout.rect(second).unwrap().x, 88.0);
+    }
+
+    #[test]
+    fn nested_rectangles_are_root_relative() {
+        let mut layout = LayoutEngine::new();
+        let top = layout.leaf(200.0, 30.0).unwrap();
+        let nested_first = layout.leaf(80.0, 20.0).unwrap();
+        let nested_second = layout.leaf(80.0, 20.0).unwrap();
+        let nested = layout.column(&[nested_first, nested_second], 10.0).unwrap();
+        let root = layout.column(&[top, nested], 15.0).unwrap();
+
+        layout.compute(root, 200.0, 95.0).unwrap();
+
+        assert_eq!(layout.rect(nested_first).unwrap().y, 45.0);
+        assert_eq!(layout.rect(nested_second).unwrap().y, 75.0);
     }
 
     #[test]
