@@ -1,17 +1,25 @@
 use super::*;
 use crate::home_layout::{
-    PanelNavLayout, SettingsToggleLayout, SettingsValueLayout, SocialRemoveLayout, SocialTabsLayout,
+    PanelChromeLayout, PanelNavLayout, SettingsCompositionLayout, SettingsToggleLayout,
+    SettingsValueLayout, SocialRemoveLayout, SocialTabsLayout,
 };
 
 impl PanelBitmap {
     pub(super) fn draw_settings(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
-        let nav_layout = PanelNavLayout::compute();
+        let chrome = PanelChromeLayout::compute();
+        let settings = SettingsCompositionLayout::compute();
+        let nav = PanelNavLayout::compute();
         let social_tabs = SocialTabsLayout::compute();
         let toggles = SettingsToggleLayout::compute();
         let values = SettingsValueLayout::compute();
         let social_remove = SocialRemoveLayout::compute();
-        let nav_home = pixel_rect(nav_layout.home);
-        let nav_settings = pixel_rect(nav_layout.settings);
+        let header = pixel_rect(chrome.header);
+        let quick_cards = settings.quick_cards.map(pixel_rect);
+        let automation = pixel_rect(settings.automation_panel);
+        let social_panel = pixel_rect(settings.social_panel);
+        let social_rows = settings.social_rows.map(pixel_rect);
+        let nav_home = pixel_rect(nav.home);
+        let nav_settings = pixel_rect(nav.settings);
         let whitelist = pixel_rect(social_tabs.whitelist);
         let blacklist = pixel_rect(social_tabs.blacklist);
         let heart_rate_toggle = pixel_rect(toggles.heart_rate);
@@ -19,10 +27,10 @@ impl PanelBitmap {
         let invite_rules = pixel_rect(values.invite_rules);
         let vrchat_status = pixel_rect(values.vrchat_status);
 
-        self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
-        self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
-        self.draw_crescent(74, 62, 13, PURPLE_BRIGHT, PURPLE_DARK);
-        self.draw_text(112, 49, "NIGHTSHIFT", 4, TEXT);
+        self.rounded_rect(header.0, header.1, header.2, header.3, 18, PANEL, BORDER);
+        self.rounded_rect(header.0 + 20, header.1 + 16, 44, 44, 13, PURPLE_DARK, PURPLE);
+        self.draw_crescent(header.0 + 42, header.1 + 38, 13, PURPLE_BRIGHT, PURPLE_DARK);
+        self.draw_text(header.0 + 80, header.1 + 25, "NIGHTSHIFT", 4, TEXT);
         self.rounded_rect(
             nav_home.0,
             nav_home.1 + 1,
@@ -55,8 +63,7 @@ impl PanelBitmap {
         );
 
         self.quick_toggle_card(
-            40,
-            230,
+            quick_cards[0],
             "HR",
             PINK,
             "HR MONITORING",
@@ -66,8 +73,7 @@ impl PanelBitmap {
             hover == Some(PanelAction::ToggleHeartRate),
         );
         self.quick_toggle_card(
-            40,
-            346,
+            quick_cards[1],
             "OSC",
             BLUE,
             "OSC AUTOMATION",
@@ -77,8 +83,7 @@ impl PanelBitmap {
             hover == Some(PanelAction::ToggleOsc),
         );
         self.quick_value_card(
-            40,
-            462,
+            quick_cards[2],
             "IN",
             PURPLE_BRIGHT,
             "INVITE RULES",
@@ -88,8 +93,7 @@ impl PanelBitmap {
             hover == Some(PanelAction::CycleInviteProfile),
         );
         self.quick_value_card(
-            40,
-            578,
+            quick_cards[3],
             "VR",
             [94, 220, 210, 255],
             "VRCHAT STATUS",
@@ -99,20 +103,80 @@ impl PanelBitmap {
             hover == Some(PanelAction::CycleVrchatStatus),
         );
 
-        self.rounded_rect(43, 717, 420, 128, 18, SHADOW, SHADOW);
-        self.rounded_rect(40, 712, 420, 128, 18, [20, 18, 35, 255], [57, 44, 91, 255]);
-        self.rounded_rect(60, 736, 52, 52, 14, PURPLE_DARK, PURPLE_DARK);
-        self.draw_lightning(86, 762, PURPLE_BRIGHT);
-        self.draw_text(128, 730, "AUTOMATION READY", 3, TEXT);
-        self.draw_text(128, 765, "ADVANCED TUNING LIVES IN THE", 2, MUTED);
-        self.draw_text(128, 790, "DESKTOP CONTROL CENTER.", 2, MUTED);
+        self.rounded_rect(
+            automation.0 + 3,
+            automation.1 + 5,
+            automation.2,
+            automation.3,
+            18,
+            SHADOW,
+            SHADOW,
+        );
+        self.rounded_rect(
+            automation.0,
+            automation.1,
+            automation.2,
+            automation.3,
+            18,
+            [20, 18, 35, 255],
+            [57, 44, 91, 255],
+        );
+        self.rounded_rect(
+            automation.0 + 20,
+            automation.1 + 24,
+            52,
+            52,
+            14,
+            PURPLE_DARK,
+            PURPLE_DARK,
+        );
+        self.draw_lightning(automation.0 + 46, automation.1 + 50, PURPLE_BRIGHT);
+        self.draw_text(automation.0 + 88, automation.1 + 18, "AUTOMATION READY", 3, TEXT);
+        self.draw_text(
+            automation.0 + 88,
+            automation.1 + 53,
+            "ADVANCED TUNING LIVES IN THE",
+            2,
+            MUTED,
+        );
+        self.draw_text(
+            automation.0 + 88,
+            automation.1 + 78,
+            "DESKTOP CONTROL CENTER.",
+            2,
+            MUTED,
+        );
 
-        self.rounded_rect(483, 235, 248, 610, 18, SHADOW, SHADOW);
-        self.rounded_rect(480, 230, 248, 610, 18, PANEL, BORDER);
-        self.rounded_rect(500, 250, 48, 48, 13, PURPLE_DARK, PURPLE_DARK);
-        self.draw_text(511, 267, "PPL", 2, PURPLE_BRIGHT);
-        self.draw_text(560, 252, "SOCIAL ACCESS", 3, TEXT);
-        self.draw_text(560, 280, "QUICK REMOVE", 2, MUTED);
+        self.rounded_rect(
+            social_panel.0 + 3,
+            social_panel.1 + 5,
+            social_panel.2,
+            social_panel.3,
+            18,
+            SHADOW,
+            SHADOW,
+        );
+        self.rounded_rect(
+            social_panel.0,
+            social_panel.1,
+            social_panel.2,
+            social_panel.3,
+            18,
+            PANEL,
+            BORDER,
+        );
+        self.rounded_rect(
+            social_panel.0 + 20,
+            social_panel.1 + 20,
+            48,
+            48,
+            13,
+            PURPLE_DARK,
+            PURPLE_DARK,
+        );
+        self.draw_text(social_panel.0 + 31, social_panel.1 + 37, "PPL", 2, PURPLE_BRIGHT);
+        self.draw_text(social_panel.0 + 80, social_panel.1 + 22, "SOCIAL ACCESS", 3, TEXT);
+        self.draw_text(social_panel.0 + 80, social_panel.1 + 50, "QUICK REMOVE", 2, MUTED);
 
         let whitelist_selected = content.social_tab == SocialTab::Whitelist;
         let blacklist_selected = content.social_tab == SocialTab::Blacklist;
@@ -161,19 +225,25 @@ impl PanelBitmap {
 
         let entries = content.social_entries();
         if entries.is_empty() {
-            self.draw_text(514, 386, "NO PEOPLE HERE", 2, MUTED);
-            self.draw_text(514, 416, "ADD THEM ON DESKTOP", 2, MUTED);
+            self.draw_text(social_panel.0 + 34, social_panel.1 + 156, "NO PEOPLE HERE", 2, MUTED);
+            self.draw_text(
+                social_panel.0 + 34,
+                social_panel.1 + 186,
+                "ADD THEM ON DESKTOP",
+                2,
+                MUTED,
+            );
         } else {
             for (index, entry) in entries.iter().take(5).enumerate() {
+                let row = social_rows[index];
                 let remove = pixel_rect(social_remove.buttons[index]);
-                let y = remove.1 - 8;
                 let action = PanelAction::RemoveSocial(index as u8);
                 let row_hover = hover == Some(action);
                 self.rounded_rect(
-                    500,
-                    y,
-                    208,
-                    60,
+                    row.0,
+                    row.1,
+                    row.2,
+                    row.3,
                     14,
                     if row_hover {
                         [24, 26, 39, 255]
@@ -183,11 +253,11 @@ impl PanelBitmap {
                     if row_hover { PURPLE_DARK } else { BORDER },
                 );
                 let avatar = social_initial(entry);
-                self.draw_circle(526, y + 30, 19, BORDER);
-                self.draw_circle(526, y + 30, 16, PURPLE_DARK);
-                self.draw_text(520, y + 22, &avatar.to_string(), 2, PURPLE_BRIGHT);
+                self.draw_circle(row.0 + 26, row.1 + 30, 19, BORDER);
+                self.draw_circle(row.0 + 26, row.1 + 30, 16, PURPLE_DARK);
+                self.draw_text(row.0 + 20, row.1 + 22, &avatar.to_string(), 2, PURPLE_BRIGHT);
                 let label = compact_social_label(entry, 12);
-                self.draw_text(552, y + 21, &label, 2, TEXT);
+                self.draw_text(row.0 + 52, row.1 + 21, &label, 2, TEXT);
                 self.rounded_rect(
                     remove.0,
                     remove.1,
@@ -201,24 +271,35 @@ impl PanelBitmap {
             }
             if entries.len() > 5 {
                 self.draw_text(
-                    512,
-                    735,
+                    social_panel.0 + 32,
+                    social_panel.1 + 505,
                     &format!("+{} MORE ON DESKTOP", entries.len() - 5),
                     2,
                     MUTED,
                 );
             }
         }
-        self.draw_text(512, 792, "ADD + EDIT PEOPLE", 2, MUTED);
-        self.draw_text(512, 817, "IN DESKTOP SETTINGS", 2, MUTED);
+        self.draw_text(
+            social_panel.0 + 32,
+            social_panel.1 + 562,
+            "ADD + EDIT PEOPLE",
+            2,
+            MUTED,
+        );
+        self.draw_text(
+            social_panel.0 + 32,
+            social_panel.1 + 587,
+            "IN DESKTOP SETTINGS",
+            2,
+            MUTED,
+        );
 
         self.draw_text(271, 935, "NIGHTSHIFT OVERLAY  V1.4.2", 1, MUTED);
     }
 
     fn quick_toggle_card(
         &mut self,
-        x: u32,
-        y: u32,
+        card: (u32, u32, u32, u32),
         icon: &str,
         accent: [u8; 4],
         title: &str,
@@ -227,12 +308,12 @@ impl PanelBitmap {
         enabled: bool,
         hovered: bool,
     ) {
-        self.rounded_rect(x + 3, y + 5, 420, 100, 18, SHADOW, SHADOW);
+        self.rounded_rect(card.0 + 3, card.1 + 5, card.2, card.3, 18, SHADOW, SHADOW);
         self.rounded_rect(
-            x,
-            y,
-            420,
-            100,
+            card.0,
+            card.1,
+            card.2,
+            card.3,
             18,
             if hovered {
                 [19, 22, 33, 255]
@@ -241,19 +322,19 @@ impl PanelBitmap {
             },
             if hovered { PURPLE_DARK } else { BORDER },
         );
-        self.rounded_rect(x + 4, y + 16, 4, 68, 2, accent, accent);
+        self.rounded_rect(card.0 + 4, card.1 + 16, 4, 68, 2, accent, accent);
         self.rounded_rect(
-            x + 18,
-            y + 24,
+            card.0 + 18,
+            card.1 + 24,
             52,
             52,
             14,
             [28, 25, 40, 255],
             [28, 25, 40, 255],
         );
-        self.draw_text(x + 29, y + 42, icon, 2, accent);
-        self.draw_text(x + 84, y + 23, title, 3, TEXT);
-        self.draw_text(x + 84, y + 56, description, 1, MUTED);
+        self.draw_text(card.0 + 29, card.1 + 42, icon, 2, accent);
+        self.draw_text(card.0 + 84, card.1 + 23, title, 3, TEXT);
+        self.draw_text(card.0 + 84, card.1 + 56, description, 1, MUTED);
         self.rounded_rect(
             toggle.0,
             toggle.1,
@@ -264,11 +345,7 @@ impl PanelBitmap {
             if hovered { PURPLE_BRIGHT } else { BORDER },
         );
         self.draw_circle(
-            if enabled {
-                toggle.0 + 44
-            } else {
-                toggle.0 + 18
-            },
+            if enabled { toggle.0 + 44 } else { toggle.0 + 18 },
             toggle.1 + 18,
             12,
             TEXT,
@@ -277,8 +354,7 @@ impl PanelBitmap {
 
     fn quick_value_card(
         &mut self,
-        x: u32,
-        y: u32,
+        card: (u32, u32, u32, u32),
         icon: &str,
         accent: [u8; 4],
         title: &str,
@@ -287,12 +363,12 @@ impl PanelBitmap {
         value: &str,
         hovered: bool,
     ) {
-        self.rounded_rect(x + 3, y + 5, 420, 100, 18, SHADOW, SHADOW);
+        self.rounded_rect(card.0 + 3, card.1 + 5, card.2, card.3, 18, SHADOW, SHADOW);
         self.rounded_rect(
-            x,
-            y,
-            420,
-            100,
+            card.0,
+            card.1,
+            card.2,
+            card.3,
             18,
             if hovered {
                 [19, 22, 33, 255]
@@ -301,19 +377,19 @@ impl PanelBitmap {
             },
             if hovered { PURPLE_DARK } else { BORDER },
         );
-        self.rounded_rect(x + 4, y + 16, 4, 68, 2, accent, accent);
+        self.rounded_rect(card.0 + 4, card.1 + 16, 4, 68, 2, accent, accent);
         self.rounded_rect(
-            x + 18,
-            y + 24,
+            card.0 + 18,
+            card.1 + 24,
             52,
             52,
             14,
             [28, 25, 40, 255],
             [28, 25, 40, 255],
         );
-        self.draw_text(x + 29, y + 42, icon, 2, accent);
-        self.draw_text(x + 84, y + 23, title, 3, TEXT);
-        self.draw_text(x + 84, y + 56, description, 1, MUTED);
+        self.draw_text(card.0 + 29, card.1 + 42, icon, 2, accent);
+        self.draw_text(card.0 + 84, card.1 + 23, title, 3, TEXT);
+        self.draw_text(card.0 + 84, card.1 + 56, description, 1, MUTED);
         let width = (value.chars().count() as u32 * 12 + 28).clamp(82, 136);
         let pill_right = slot.0 + slot.2 - 8;
         let pill_x = pill_right.saturating_sub(width);
