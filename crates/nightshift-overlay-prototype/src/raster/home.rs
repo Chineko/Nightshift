@@ -23,8 +23,7 @@ impl PanelBitmap {
             if content.connected { GREEN } else { MUTED },
         );
 
-        self.rounded_rect(43, 235, 688, 250, 20, SHADOW, SHADOW);
-        self.rounded_rect(40, 230, 688, 250, 20, PANEL, BORDER);
+        self.glass_panel(40, 230, 688, 250, 20, [18, 20, 31, 218]);
         self.rounded_rect(62, 250, 54, 54, 14, AMBER_DARK, AMBER_DARK);
         self.draw_sun(89, 277, 11, AMBER);
         self.draw_text(132, 251, "BRIGHTNESS", 3, TEXT);
@@ -117,8 +116,7 @@ impl PanelBitmap {
             None,
         );
 
-        self.rounded_rect(43, 705, 688, 112, 18, SHADOW, SHADOW);
-        self.rounded_rect(40, 700, 688, 112, 18, [20, 18, 35, 255], [57, 44, 91, 255]);
+        self.glass_panel(40, 700, 688, 112, 18, [28, 22, 47, 224]);
         self.rounded_rect(62, 721, 54, 54, 14, PURPLE_DARK, PURPLE_DARK);
         self.draw_lightning(89, 748, PURPLE_BRIGHT);
         self.draw_text(132, 717, "AUTOMATION READY", 3, TEXT);
