@@ -1,9 +1,26 @@
-use crate::{content::PanelContent, interaction::PanelAction, raster::PanelBitmap};
+#[path = "social.rs"]
+mod social;
 
-#[derive(Clone, Debug, Default)]
+use crate::{content::PanelContent, interaction::PanelAction, raster::PanelBitmap};
+use social::SocialAvatarRuntime;
+
+#[derive(Debug)]
 pub struct PanelBitmapCache {
     last_content: Option<PanelContent>,
     last_hover: Option<PanelAction>,
+    last_social_revision: u64,
+    social: SocialAvatarRuntime,
+}
+
+impl Default for PanelBitmapCache {
+    fn default() -> Self {
+        Self {
+            last_content: None,
+            last_hover: None,
+            last_social_revision: 0,
+            social: SocialAvatarRuntime::spawn(),
+        }
+    }
 }
 
 impl PanelBitmapCache {
@@ -12,13 +29,22 @@ impl PanelBitmapCache {
         content: &PanelContent,
         hover: Option<PanelAction>,
     ) -> Option<PanelBitmap> {
-        if self.last_content.as_ref() == Some(content) && self.last_hover == hover {
+        self.social.poll();
+        self.social.request_visible(content);
+        let social_revision = self.social.revision();
+
+        if self.last_content.as_ref() == Some(content)
+            && self.last_hover == hover
+            && self.last_social_revision == social_revision
+        {
             return None;
         }
 
-        let bitmap = PanelBitmap::from_content_with_hover(content, hover);
+        let mut bitmap = PanelBitmap::from_content_with_hover(content, hover);
+        self.social.decorate(&mut bitmap, content, hover);
         self.last_content = Some(content.clone());
         self.last_hover = hover;
+        self.last_social_revision = social_revision;
         Some(bitmap)
     }
 

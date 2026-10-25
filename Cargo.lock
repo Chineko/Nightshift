@@ -2427,10 +2427,13 @@ dependencies = [
  "anyhow",
  "ash",
  "ctrlc",
+ "image",
  "nightshift-pose",
  "nightshift-protocol",
+ "nightshift-vrchat-auth",
  "openxr",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
