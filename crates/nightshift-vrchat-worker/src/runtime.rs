@@ -122,18 +122,31 @@ pub(crate) fn cancel_pending_status_on_disconnect(
     }
 }
 
+pub(crate) fn cancel_pending_status_on_session_change(
+    changed: bool,
+    status_generation: &mut u64,
+    status_task: &mut AbortTask,
+) {
+    if changed && status_task.is_pending() {
+        // A sleep edge belongs to the account that observed it. Do not mail it to the next tenant.
+        *status_generation = status_generation.wrapping_add(1);
+        status_task.abort();
+    }
+}
+
 pub(crate) fn sync_invite_session(
     current: &mut Option<SessionCookies>,
     next: Option<SessionCookies>,
     tasks: &mut JoinSet<Result<InviteHandlingResult>>,
     recent: &mut RecentInviteNotifications,
-) {
+) -> bool {
     if current.as_ref() == next.as_ref() {
-        return;
+        return false;
     }
     tasks.abort_all();
     recent.clear();
     *current = next;
+    true
 }
 
 pub(crate) fn invite_policy_changed(current: &InviteState, next: &InviteState) -> bool {
@@ -356,11 +369,16 @@ pub(crate) async fn set_runtime_status(
     api: VrchatApiClient,
     store: VrchatSessionStore,
     target: VrchatStatus,
+    expected_session: Option<SessionCookies>,
 ) -> Result<RuntimeRefresh> {
     let Some((session, user)) = validated_user(&api, &store).await? else {
         bail!("no VRChat session is stored");
     };
     let cookies = session_cookies(&session);
+
+    if expected_session.as_ref() != Some(&cookies) {
+        bail!("VRChat session changed before pending status update");
+    }
 
     if user.status != target {
         let _permit = shared_vrchat_requests()
