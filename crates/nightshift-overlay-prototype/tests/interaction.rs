@@ -1,7 +1,13 @@
+#[path = "../src/home_layout.rs"]
+mod home_layout;
 #[path = "../src/interaction.rs"]
 mod interaction;
+#[path = "../src/layout.rs"]
+mod layout;
 #[path = "../src/placement.rs"]
 mod placement;
+#[path = "../src/widget.rs"]
+mod widget;
 
 use interaction::{
     PanelAction, PanelPage, PanelRay, PanelUv, action_at_uv, action_at_uv_for_page,
