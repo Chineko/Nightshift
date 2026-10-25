@@ -1,5 +1,20 @@
 use nightshift_protocol::{SleepPhase, VrchatStatus};
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VrchatPresence {
+    pub status: VrchatStatus,
+    pub status_description: String,
+}
+
+impl VrchatPresence {
+    pub fn new(status: VrchatStatus, status_description: impl Into<String>) -> Self {
+        Self {
+            status,
+            status_description: status_description.into(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StatusAutomationConfig {
     pub enabled: bool,
@@ -44,6 +59,23 @@ pub fn target_for_transition(
     };
 
     (target != current_status).then_some(target)
+}
+
+pub fn target_presence(
+    current: &VrchatPresence,
+    status: VrchatStatus,
+    status_description: &str,
+) -> Option<VrchatPresence> {
+    let target = VrchatPresence::new(status, status_description);
+    (target != *current).then_some(target)
+}
+
+pub fn restore_presence(
+    captured: Option<&VrchatPresence>,
+    current: &VrchatPresence,
+) -> Option<VrchatPresence> {
+    let captured = captured?;
+    (captured != current).then(|| captured.clone())
 }
 
 #[cfg(test)]
@@ -175,5 +207,33 @@ mod tests {
             ),
             Some(VrchatStatus::Active)
         );
+    }
+
+    #[test]
+    fn presence_target_compares_status_and_text_together() {
+        let current = VrchatPresence::new(VrchatStatus::AskMe, "Still awake");
+        assert_eq!(
+            target_presence(&current, VrchatStatus::AskMe, "Sleeping in VR 🌙"),
+            Some(VrchatPresence::new(
+                VrchatStatus::AskMe,
+                "Sleeping in VR 🌙"
+            ))
+        );
+        assert_eq!(
+            target_presence(&current, VrchatStatus::AskMe, "Still awake"),
+            None
+        );
+    }
+
+    #[test]
+    fn restore_returns_captured_presence_only_when_needed() {
+        let captured = VrchatPresence::new(VrchatStatus::Busy, "Building pillow fort");
+        let sleeping = VrchatPresence::new(VrchatStatus::AskMe, "Sleeping in VR 🌙");
+        assert_eq!(
+            restore_presence(Some(&captured), &sleeping),
+            Some(captured.clone())
+        );
+        assert_eq!(restore_presence(Some(&captured), &captured), None);
+        assert_eq!(restore_presence(None, &sleeping), None);
     }
 }
