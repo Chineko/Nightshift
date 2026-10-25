@@ -38,13 +38,14 @@ pub(crate) fn schedule_status_update(
     api: VrchatApiClient,
     store: VrchatSessionStore,
     target: VrchatStatus,
+    expected_session: Option<SessionCookies>,
     last_write: Option<Instant>,
     generation: u64,
 ) {
     let delay = status_update_delay(last_write);
     task.replace(tokio::spawn(async move {
         tokio::time::sleep(delay).await;
-        let result = set_runtime_status(api, store, target).await;
+        let result = set_runtime_status(api, store, target, expected_session).await;
         let _ = result_tx.send(StatusTaskResult { generation, result });
     }));
 }
@@ -126,11 +127,16 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                                 session_cookies: next_session,
                             } = refresh_runtime(&api, &store).await;
                             (vrchat_connected, current_status) = report_runtime(&report);
-                            sync_invite_session(
+                            let session_changed = sync_invite_session(
                                 &mut active_session,
                                 next_session,
                                 &mut invite_tasks,
                                 &mut recent_invites,
+                            );
+                            cancel_pending_status_on_session_change(
+                                session_changed,
+                                &mut status_generation,
+                                &mut status_task,
                             );
                             sync_pipeline_task(
                                 &mut pipeline_task,
@@ -163,6 +169,7 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                                         api.clone(),
                                         store.clone(),
                                         target,
+                                        active_session.clone(),
                                         last_status_write,
                                         status_generation,
                                     );
@@ -178,7 +185,7 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                                 &mut status_task,
                             );
                             if !vrchat_connected {
-                                sync_invite_session(
+                                let _ = sync_invite_session(
                                     &mut active_session,
                                     None,
                                     &mut invite_tasks,
@@ -209,6 +216,7 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                                     api.clone(),
                                     store.clone(),
                                     target,
+                                    active_session.clone(),
                                     last_status_write,
                                     status_generation,
                                 );
@@ -236,11 +244,16 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                     &mut status_generation,
                     &mut status_task,
                 );
-                sync_invite_session(
+                let session_changed = sync_invite_session(
                     &mut active_session,
                     next_session,
                     &mut invite_tasks,
                     &mut recent_invites,
+                );
+                cancel_pending_status_on_session_change(
+                    session_changed,
+                    &mut status_generation,
+                    &mut status_task,
                 );
                 sync_pipeline_task(
                     &mut pipeline_task,
@@ -264,11 +277,16 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                             session_cookies: next_session,
                         } = refresh;
                         (vrchat_connected, current_status) = report_runtime(&report);
-                        sync_invite_session(
+                        let session_changed = sync_invite_session(
                             &mut active_session,
                             next_session,
                             &mut invite_tasks,
                             &mut recent_invites,
+                        );
+                        cancel_pending_status_on_session_change(
+                            session_changed,
+                            &mut status_generation,
+                            &mut status_task,
                         );
                         sync_pipeline_task(
                             &mut pipeline_task,
