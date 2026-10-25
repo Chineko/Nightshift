@@ -1,20 +1,30 @@
 use super::*;
-use crate::home_layout::{HomeBrightnessLayout, HomePrimaryLayout};
+use crate::home_layout::{HomeBrightnessLayout, HomePrimaryLayout, PanelNavLayout};
 
 impl PanelBitmap {
     pub(super) fn draw_home(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
         let brightness_layout = HomeBrightnessLayout::compute();
         let primary_layout = HomePrimaryLayout::compute();
+        let nav_layout = PanelNavLayout::compute();
         let down = pixel_rect(brightness_layout.down);
         let up = pixel_rect(brightness_layout.up);
         let primary = pixel_rect(primary_layout.action);
+        let nav_home = pixel_rect(nav_layout.home);
 
         self.rounded_rect(32, 24, 704, 72, 18, PANEL, BORDER);
         self.rounded_rect(52, 40, 44, 44, 13, PURPLE_DARK, PURPLE);
         self.draw_crescent(74, 62, 13, PURPLE_BRIGHT, PURPLE_DARK);
         self.draw_text(112, 49, "NIGHTSHIFT", 4, TEXT);
-        self.rounded_rect(500, 39, 96, 46, 14, PURPLE_DARK, BORDER);
-        self.draw_text(519, 54, "HOME", 3, TEXT);
+        self.rounded_rect(
+            nav_home.0,
+            nav_home.1 + 1,
+            nav_home.2 + 2,
+            nav_home.3 - 2,
+            14,
+            PURPLE_DARK,
+            BORDER,
+        );
+        self.draw_text(nav_home.0 + 19, nav_home.1 + 16, "HOME", 3, TEXT);
         self.draw_text(620, 54, "SETTINGS", 3, MUTED);
 
         self.draw_text(48, 124, "VR OVERLAY", 2, PURPLE_BRIGHT);
