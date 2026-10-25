@@ -1,5 +1,5 @@
 use crate::{
-    home_layout::{HomeBrightnessLayout, HomePrimaryLayout, contains},
+    home_layout::{HomeBrightnessLayout, HomePrimaryLayout, PanelNavLayout, contains},
     placement::{PanelPose, normalize_quaternion_xyzw},
 };
 
@@ -65,9 +65,7 @@ struct ButtonRegion {
 }
 
 // Legacy regions stay in place until each room gets its own basement inspection.
-// Brightness and the Home primary action now get their geometry from Taffy.
-const NAV_HOME: ButtonRegion = region(PanelAction::NavigateHome, 500.0, 594.0, 38.0, 86.0);
-const NAV_SETTINGS: ButtonRegion = region(PanelAction::NavigateSettings, 602.0, 720.0, 38.0, 86.0);
+// Brightness, primary action, and global navigation now get their geometry from Taffy.
 const SETTINGS_HR: ButtonRegion = region(PanelAction::ToggleHeartRate, 356.0, 446.0, 238.0, 320.0);
 const SETTINGS_OSC: ButtonRegion = region(PanelAction::ToggleOsc, 356.0, 446.0, 354.0, 436.0);
 const SETTINGS_INVITES: ButtonRegion = region(PanelAction::CycleInviteProfile, 300.0, 446.0, 470.0, 552.0);
@@ -114,17 +112,21 @@ pub fn action_at_uv_for_page(
     if !uv.u.is_finite() || !uv.v.is_finite() {
         return None;
     }
-    for button in [NAV_HOME, NAV_SETTINGS] {
-        if inside(uv, button) {
-            return Some(button.action);
-        }
+
+    let x = uv.u * PANEL_WIDTH_PX;
+    let y = uv.v * PANEL_HEIGHT_PX;
+    let navigation = PanelNavLayout::compute();
+    if contains(navigation.home, x, y) {
+        return Some(PanelAction::NavigateHome);
     }
+    if contains(navigation.settings, x, y) {
+        return Some(PanelAction::NavigateSettings);
+    }
+
     match page {
         PanelPage::Home => {
             let brightness = HomeBrightnessLayout::compute();
             let primary = HomePrimaryLayout::compute();
-            let x = uv.u * PANEL_WIDTH_PX;
-            let y = uv.v * PANEL_HEIGHT_PX;
             if contains(brightness.down, x, y) {
                 return Some(PanelAction::BrightnessDown);
             }
