@@ -1,5 +1,7 @@
 use crate::{
-    home_layout::{HomeBrightnessLayout, HomePrimaryLayout, PanelNavLayout, contains},
+    home_layout::{
+        HomeBrightnessLayout, HomePrimaryLayout, PanelNavLayout, SocialTabsLayout, contains,
+    },
     placement::{PanelPose, normalize_quaternion_xyzw},
 };
 
@@ -65,13 +67,11 @@ struct ButtonRegion {
 }
 
 // Legacy regions stay in place until each room gets its own basement inspection.
-// Brightness, primary action, and global navigation now get their geometry from Taffy.
+// Brightness, primary action, global navigation, and social tabs now get their geometry from Taffy.
 const SETTINGS_HR: ButtonRegion = region(PanelAction::ToggleHeartRate, 356.0, 446.0, 238.0, 320.0);
 const SETTINGS_OSC: ButtonRegion = region(PanelAction::ToggleOsc, 356.0, 446.0, 354.0, 436.0);
 const SETTINGS_INVITES: ButtonRegion = region(PanelAction::CycleInviteProfile, 300.0, 446.0, 470.0, 552.0);
 const SETTINGS_VRCHAT: ButtonRegion = region(PanelAction::CycleVrchatStatus, 300.0, 446.0, 586.0, 668.0);
-const SOCIAL_WHITELIST: ButtonRegion = region(PanelAction::SelectWhitelist, 500.0, 602.0, 302.0, 348.0);
-const SOCIAL_BLACKLIST: ButtonRegion = region(PanelAction::SelectBlacklist, 606.0, 708.0, 302.0, 348.0);
 const SOCIAL_REMOVE: [ButtonRegion; 5] = [
     region(PanelAction::RemoveSocial(0), 676.0, 716.0, 366.0, 420.0),
     region(PanelAction::RemoveSocial(1), 676.0, 716.0, 438.0, 492.0),
@@ -142,14 +142,14 @@ pub fn action_at_uv_for_page(
             }
         }
         PanelPage::Settings => {
-            for button in [
-                SETTINGS_HR,
-                SETTINGS_OSC,
-                SETTINGS_INVITES,
-                SETTINGS_VRCHAT,
-                SOCIAL_WHITELIST,
-                SOCIAL_BLACKLIST,
-            ] {
+            let social_tabs = SocialTabsLayout::compute();
+            if contains(social_tabs.whitelist, x, y) {
+                return Some(PanelAction::SelectWhitelist);
+            }
+            if contains(social_tabs.blacklist, x, y) {
+                return Some(PanelAction::SelectBlacklist);
+            }
+            for button in [SETTINGS_HR, SETTINGS_OSC, SETTINGS_INVITES, SETTINGS_VRCHAT] {
                 if inside(uv, button) {
                     return Some(button.action);
                 }
