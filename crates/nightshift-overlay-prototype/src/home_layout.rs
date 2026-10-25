@@ -20,6 +20,11 @@ const SOCIAL_TABS_Y: f32 = 302.0;
 const SOCIAL_TAB_WIDTH: f32 = 102.0;
 const SOCIAL_TAB_HEIGHT: f32 = 46.0;
 const SOCIAL_TAB_GAP: f32 = 4.0;
+const SOCIAL_REMOVE_X: f32 = 676.0;
+const SOCIAL_REMOVE_Y: f32 = 366.0;
+const SOCIAL_REMOVE_WIDTH: f32 = 40.0;
+const SOCIAL_REMOVE_HEIGHT: f32 = 54.0;
+const SOCIAL_REMOVE_GAP: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HomeBrightnessLayout {
@@ -42,6 +47,11 @@ pub struct PanelNavLayout {
 pub struct SocialTabsLayout {
     pub whitelist: LayoutRect,
     pub blacklist: LayoutRect,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SocialRemoveLayout {
+    pub targets: [LayoutRect; 5],
 }
 
 impl HomeBrightnessLayout {
@@ -182,6 +192,51 @@ impl SocialTabsLayout {
     }
 }
 
+impl SocialRemoveLayout {
+    pub fn compute() -> Self {
+        let mut layout = LayoutEngine::new();
+        let first = layout
+            .leaf(SOCIAL_REMOVE_WIDTH, SOCIAL_REMOVE_HEIGHT)
+            .expect("static first social-remove target should be valid");
+        let second = layout
+            .leaf(SOCIAL_REMOVE_WIDTH, SOCIAL_REMOVE_HEIGHT)
+            .expect("static second social-remove target should be valid");
+        let third = layout
+            .leaf(SOCIAL_REMOVE_WIDTH, SOCIAL_REMOVE_HEIGHT)
+            .expect("static third social-remove target should be valid");
+        let fourth = layout
+            .leaf(SOCIAL_REMOVE_WIDTH, SOCIAL_REMOVE_HEIGHT)
+            .expect("static fourth social-remove target should be valid");
+        let fifth = layout
+            .leaf(SOCIAL_REMOVE_WIDTH, SOCIAL_REMOVE_HEIGHT)
+            .expect("static fifth social-remove target should be valid");
+        let nodes = [first, second, third, fourth, fifth];
+        let root = layout
+            .column(&nodes, SOCIAL_REMOVE_GAP)
+            .expect("static social-remove column should be valid");
+
+        layout
+            .compute(
+                root,
+                SOCIAL_REMOVE_WIDTH,
+                SOCIAL_REMOVE_HEIGHT * 5.0 + SOCIAL_REMOVE_GAP * 4.0,
+            )
+            .expect("static social-remove layout should compute");
+
+        let mut targets = [LayoutRect::default(); 5];
+        for (index, node) in nodes.into_iter().enumerate() {
+            targets[index] = offset(
+                layout
+                    .rect(node)
+                    .expect("social-remove target rectangle should exist"),
+                SOCIAL_REMOVE_X,
+                SOCIAL_REMOVE_Y,
+            );
+        }
+        Self { targets }
+    }
+}
+
 pub fn contains(rect: LayoutRect, x: f32, y: f32) -> bool {
     x >= rect.x
         && x <= rect.x + rect.width
@@ -285,11 +340,28 @@ mod tests {
     }
 
     #[test]
+    fn social_remove_targets_keep_the_existing_interaction_contract() {
+        let remove = SocialRemoveLayout::compute();
+        for (index, rect) in remove.targets.into_iter().enumerate() {
+            assert_eq!(
+                rect,
+                LayoutRect {
+                    x: 676.0,
+                    y: 366.0 + index as f32 * 72.0,
+                    width: 40.0,
+                    height: 54.0,
+                }
+            );
+        }
+    }
+
+    #[test]
     fn hit_testing_uses_the_computed_rectangles() {
         let brightness = HomeBrightnessLayout::compute();
         let primary = HomePrimaryLayout::compute();
         let navigation = PanelNavLayout::compute();
         let tabs = SocialTabsLayout::compute();
+        let remove = SocialRemoveLayout::compute();
 
         assert!(contains(brightness.down, 60.0, 340.0));
         assert!(contains(brightness.up, 708.0, 406.0));
@@ -303,5 +375,8 @@ mod tests {
         assert!(contains(tabs.whitelist, 500.0, 302.0));
         assert!(contains(tabs.blacklist, 708.0, 348.0));
         assert!(!contains(tabs.whitelist, 603.0, 348.0));
+        assert!(contains(remove.targets[0], 676.0, 366.0));
+        assert!(contains(remove.targets[4], 716.0, 708.0));
+        assert!(!contains(remove.targets[0], 676.0, 421.0));
     }
 }
