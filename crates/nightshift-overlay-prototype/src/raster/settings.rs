@@ -1,10 +1,11 @@
 use super::*;
-use crate::home_layout::{PanelNavLayout, SocialTabsLayout};
+use crate::home_layout::{PanelNavLayout, SocialRemoveLayout, SocialTabsLayout};
 
 impl PanelBitmap {
     pub(super) fn draw_settings(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
         let nav_layout = PanelNavLayout::compute();
         let social_tabs = SocialTabsLayout::compute();
+        let social_remove = SocialRemoveLayout::compute();
         let nav_home = pixel_rect(nav_layout.home);
         let nav_settings = pixel_rect(nav_layout.settings);
         let whitelist = pixel_rect(social_tabs.whitelist);
@@ -155,6 +156,7 @@ impl PanelBitmap {
                 let y = 360 + index as u32 * 72;
                 let action = PanelAction::RemoveSocial(index as u8);
                 let row_hover = hover == Some(action);
+                let remove = pixel_rect(social_remove.targets[index]);
                 self.rounded_rect(
                     500,
                     y,
@@ -175,15 +177,15 @@ impl PanelBitmap {
                 let label = compact_social_label(entry, 12);
                 self.draw_text(552, y + 21, &label, 2, TEXT);
                 self.rounded_rect(
-                    676,
-                    y + 8,
+                    remove.0,
+                    remove.1 + 2,
                     32,
                     44,
                     10,
                     if row_hover { PURPLE_DARK } else { PANEL },
                     BORDER,
                 );
-                self.draw_text(686, y + 20, "X", 2, MUTED);
+                self.draw_text(remove.0 + 10, remove.1 + 14, "X", 2, MUTED);
             }
             if entries.len() > 5 {
                 self.draw_text(
