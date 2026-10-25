@@ -1,0 +1,42 @@
+name: Refactor Clippy Diagnostics
+
+on:
+  push:
+    branches:
+      - prototype/refactor-clippy-diagnostics
+
+jobs:
+  clippy-diagnostics:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libopenxr-dev pkg-config
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Capture Clippy output
+        id: clippy
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --locked 2>&1 | tee clippy.log
+
+      - name: Upload Clippy diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-diagnostics
+          path: clippy.log
+
+      - name: Preserve failure status
+        if: steps.clippy.outcome == 'failure'
+        run: exit 1
