@@ -150,6 +150,7 @@ mod tests {
                 id: "usr_test".into(),
                 display_name: "Hydra Employee".into(),
                 status: VrchatStatus::Active,
+                status_description: String::new(),
             },
             cookies: SessionCookies {
                 auth: "auth-cookie".into(),
