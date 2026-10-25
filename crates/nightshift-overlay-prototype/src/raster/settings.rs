@@ -288,7 +288,7 @@ impl PanelBitmap {
         self.draw_text(x + 410 - width, y + 43, value, 2, TEXT);
     }
 
-    fn status_card(
+    pub(super) fn status_card(
         &mut self,
         x: u32,
         y: u32,
