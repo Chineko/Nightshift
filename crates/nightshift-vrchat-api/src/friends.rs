@@ -1,3 +1,6 @@
+#[path = "friends/images.rs"]
+mod images;
+
 use std::{
     collections::HashMap,
     time::{Duration, Instant},

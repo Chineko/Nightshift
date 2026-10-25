@@ -1,9 +1,104 @@
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, mpsc},
+    thread,
+};
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Color32, RichText, TextureHandle};
 use nightshift_protocol::{InviteActionKind, InviteProfile, InviteRuleSettings, InviteState, UiCommand};
+use nightshift_vrchat_auth::{FriendProfile, VrchatAuthService};
 
 const ERROR_RED: Color32 = Color32::from_rgb(235, 112, 112);
+const PURPLE: Color32 = Color32::from_rgb(183, 141, 255);
+const MUTED: Color32 = Color32::from_rgb(157, 159, 170);
+const FRIEND_RESULT_LIMIT: usize = 40;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SocialListTarget {
+    Whitelist,
+    Blacklist,
+}
+
+enum FriendCommand {
+    Refresh,
+    LoadImage { url: String },
+}
+
+enum FriendUpdate {
+    Busy(bool),
+    Profiles(Vec<FriendProfile>),
+    Image { url: String, bytes: Arc<[u8]> },
+    Error(String),
+}
+
+struct FriendBridge {
+    commands: mpsc::Sender<FriendCommand>,
+    updates: mpsc::Receiver<FriendUpdate>,
+}
+
+impl FriendBridge {
+    fn spawn(ctx: egui::Context) -> Self {
+        let (command_tx, command_rx) = mpsc::channel::<FriendCommand>();
+        let (update_tx, update_rx) = mpsc::channel::<FriendUpdate>();
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = update_tx.send(FriendUpdate::Error(format!(
+                        "Failed to start VRChat friend runtime: {error}"
+                    )));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+            let service = match VrchatAuthService::new() {
+                Ok(service) => service,
+                Err(error) => {
+                    let _ = update_tx.send(FriendUpdate::Error(format!(
+                        "Failed to initialize VRChat friend service: {error}"
+                    )));
+                    ctx.request_repaint();
+                    return;
+                }
+            };
+
+            while let Ok(command) = command_rx.recv() {
+                match command {
+                    FriendCommand::Refresh => {
+                        let _ = update_tx.send(FriendUpdate::Busy(true));
+                        let update = match runtime.block_on(service.friends()) {
+                            Ok(profiles) => FriendUpdate::Profiles(profiles),
+                            Err(error) => FriendUpdate::Error(error.to_string()),
+                        };
+                        let _ = update_tx.send(update);
+                        let _ = update_tx.send(FriendUpdate::Busy(false));
+                    }
+                    FriendCommand::LoadImage { url } => {
+                        match runtime.block_on(service.friend_image_bytes(&url)) {
+                            Ok(bytes) => {
+                                let _ = update_tx.send(FriendUpdate::Image { url, bytes });
+                            }
+                            Err(_) => {
+                                // Image failures are intentionally silent; rows keep initials.
+                            }
+                        }
+                    }
+                }
+                ctx.request_repaint();
+            }
+        });
+
+        Self {
+            commands: command_tx,
+            updates: update_rx,
+        }
+    }
+
+    fn send(&self, command: FriendCommand) {
+        let _ = self.commands.send(command);
+    }
+}
 
 pub struct InviteSettingsUi {
     draft_rules: InviteRuleSettings,
@@ -11,6 +106,15 @@ pub struct InviteSettingsUi {
     whitelist_edit: String,
     blacklist_edit: String,
     initialized: bool,
+    friend_bridge: Option<FriendBridge>,
+    friend_profiles: Vec<FriendProfile>,
+    friend_query: String,
+    friend_busy: bool,
+    friend_error: Option<String>,
+    friend_refresh_started: bool,
+    social_target: SocialListTarget,
+    requested_images: HashSet<String>,
+    friend_textures: HashMap<String, TextureHandle>,
 }
 
 impl Default for InviteSettingsUi {
@@ -21,12 +125,23 @@ impl Default for InviteSettingsUi {
             whitelist_edit: String::new(),
             blacklist_edit: String::new(),
             initialized: false,
+            friend_bridge: None,
+            friend_profiles: Vec::new(),
+            friend_query: String::new(),
+            friend_busy: false,
+            friend_error: None,
+            friend_refresh_started: false,
+            social_target: SocialListTarget::Whitelist,
+            requested_images: HashSet::new(),
+            friend_textures: HashMap::new(),
         }
     }
 }
 
 impl InviteSettingsUi {
     pub fn render(&mut self, ui: &mut egui::Ui, state: &InviteState) -> Vec<UiCommand> {
+        self.ensure_friend_bridge(ui.ctx().clone());
+        self.drain_friend_updates(ui.ctx());
         self.sync_from_state(state);
         let mut commands = Vec::new();
 
@@ -64,50 +179,211 @@ impl InviteSettingsUi {
 
         match profile {
             InviteProfile::Disabled => {
-                ui.label(
-                    RichText::new("No invite notifications are acted on with this profile.")
-                        .weak()
-                        .small(),
-                );
+                ui.label(RichText::new("No invite notifications are acted on with this profile.").weak().small());
             }
             InviteProfile::Friends => {
-                ui.label(
-                    RichText::new("Invite requests from VRChat friends are accepted; others are ignored.")
-                        .weak()
-                        .small(),
-                );
+                ui.label(RichText::new("Invite requests from VRChat friends are accepted; others are ignored.").weak().small());
             }
             InviteProfile::Favorites => {
-                ui.label(
-                    RichText::new("Invite requests from favorite friends are accepted; others are ignored.")
-                        .weak()
-                        .small(),
-                );
+                ui.label(RichText::new("Invite requests from favorite friends are accepted; others are ignored.").weak().small());
             }
-            InviteProfile::Whitelist => {
-                self.whitelist_editor(ui, &mut commands);
-            }
-            InviteProfile::Custom => {
-                self.custom_editor(ui, &mut commands);
-            }
+            InviteProfile::Whitelist => self.whitelist_editor(ui, &mut commands),
+            InviteProfile::Custom => self.custom_editor(ui, &mut commands),
         }
 
         ui.add_space(12.0);
         ui.separator();
         self.blacklist_editor(ui, &mut commands);
 
+        ui.add_space(12.0);
+        ui.separator();
+        self.friend_picker(ui, &mut commands);
+
         render_feedback(ui, state);
         commands
     }
 
+    fn ensure_friend_bridge(&mut self, ctx: egui::Context) {
+        if self.friend_bridge.is_none() {
+            self.friend_bridge = Some(FriendBridge::spawn(ctx));
+        }
+        if !self.friend_refresh_started {
+            if let Some(bridge) = &self.friend_bridge {
+                bridge.send(FriendCommand::Refresh);
+                self.friend_refresh_started = true;
+            }
+        }
+    }
+
+    fn drain_friend_updates(&mut self, ctx: &egui::Context) {
+        let Some(bridge) = &self.friend_bridge else { return; };
+        while let Ok(update) = bridge.updates.try_recv() {
+            match update {
+                FriendUpdate::Busy(busy) => self.friend_busy = busy,
+                FriendUpdate::Profiles(profiles) => {
+                    self.friend_profiles = profiles;
+                    self.friend_error = None;
+                }
+                FriendUpdate::Image { url, bytes } => {
+                    if let Ok(decoded) = image::load_from_memory(&bytes) {
+                        let rgba = decoded.to_rgba8();
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+                        let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                        let texture = ctx.load_texture(
+                            format!("vrchat-friend:{url}"),
+                            color,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        self.friend_textures.insert(url, texture);
+                    }
+                }
+                FriendUpdate::Error(error) => self.friend_error = Some(error),
+            }
+        }
+    }
+
+    fn friend_picker(&mut self, ui: &mut egui::Ui, commands: &mut Vec<UiCommand>) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Friend picker").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add_enabled(!self.friend_busy, egui::Button::new("Refresh")).clicked() {
+                    self.friend_error = None;
+                    if let Some(bridge) = &self.friend_bridge {
+                        bridge.send(FriendCommand::Refresh);
+                    }
+                }
+            });
+        });
+        ui.label(
+            RichText::new("Search your VRChat friends and add them without copying user IDs. Rules still store stable usr_ IDs only.")
+                .color(MUTED)
+                .small(),
+        );
+
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.social_target, SocialListTarget::Whitelist, "Whitelist");
+            ui.selectable_value(&mut self.social_target, SocialListTarget::Blacklist, "Blacklist");
+        });
+        ui.add(
+            egui::TextEdit::singleline(&mut self.friend_query)
+                .hint_text("Search friends by display name"),
+        );
+
+        if self.friend_busy {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Refreshing VRChat friends…");
+            });
+        }
+        if let Some(error) = &self.friend_error {
+            ui.label(RichText::new(error).color(ERROR_RED).small());
+        }
+
+        let query = self.friend_query.trim().to_lowercase();
+        let profiles = self
+            .friend_profiles
+            .iter()
+            .filter(|profile| {
+                query.is_empty()
+                    || profile.display_name.to_lowercase().contains(&query)
+                    || profile.id.to_lowercase().contains(&query)
+            })
+            .take(FRIEND_RESULT_LIMIT)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if profiles.is_empty() && !self.friend_busy && self.friend_error.is_none() {
+            ui.label(RichText::new("No matching friends.").color(MUTED).small());
+            return;
+        }
+
+        egui::ScrollArea::vertical()
+            .id_salt("vrchat_friend_picker")
+            .max_height(260.0)
+            .show(ui, |ui| {
+                for profile in profiles {
+                    let image_url = profile.preferred_image_url().map(str::to_owned);
+                    if let Some(url) = image_url.as_deref()
+                        && !self.friend_textures.contains_key(url)
+                        && self.requested_images.insert(url.to_owned())
+                        && let Some(bridge) = &self.friend_bridge
+                    {
+                        bridge.send(FriendCommand::LoadImage { url: url.to_owned() });
+                    }
+
+                    let in_whitelist = self.draft_rules.whitelist.iter().any(|id| id == &profile.id);
+                    let in_blacklist = self.draft_rules.blacklist.iter().any(|id| id == &profile.id);
+                    let already_targeted = match self.social_target {
+                        SocialListTarget::Whitelist => in_whitelist,
+                        SocialListTarget::Blacklist => in_blacklist,
+                    };
+
+                    egui::Frame::new()
+                        .fill(Color32::from_rgb(30, 31, 38))
+                        .corner_radius(10)
+                        .inner_margin(8)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                if let Some(texture) = image_url
+                                    .as_deref()
+                                    .and_then(|url| self.friend_textures.get(url))
+                                {
+                                    ui.add(egui::Image::new((texture.id(), egui::vec2(34.0, 34.0))));
+                                } else {
+                                    let initials = friend_initials(&profile.display_name);
+                                    egui::Frame::new()
+                                        .fill(Color32::from_rgb(62, 50, 83))
+                                        .corner_radius(17)
+                                        .inner_margin(8)
+                                        .show(ui, |ui| {
+                                            ui.label(RichText::new(initials).strong().color(PURPLE));
+                                        });
+                                }
+
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(&profile.display_name).strong());
+                                    ui.label(RichText::new(&profile.id).color(MUTED).small());
+                                });
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let text = if already_targeted { "Added" } else { "Add" };
+                                    if ui.add_enabled(!already_targeted, egui::Button::new(text)).clicked() {
+                                        let mut rules = self.draft_rules.clone();
+                                        match self.social_target {
+                                            SocialListTarget::Whitelist => {
+                                                if !rules.whitelist.contains(&profile.id) {
+                                                    rules.whitelist.push(profile.id.clone());
+                                                }
+                                            }
+                                            SocialListTarget::Blacklist => {
+                                                if !rules.blacklist.contains(&profile.id) {
+                                                    rules.blacklist.push(profile.id.clone());
+                                                }
+                                            }
+                                        }
+                                        self.apply_draft_rules(rules.clone());
+                                        commands.push(UiCommand::SetInviteRules(rules));
+                                    }
+                                });
+                            });
+                        });
+                    ui.add_space(5.0);
+                }
+            });
+    }
+
     fn sync_from_state(&mut self, state: &InviteState) {
         if !self.initialized || state.rules != self.canonical_rules {
-            self.draft_rules = state.rules.clone();
+            self.apply_draft_rules(state.rules.clone());
             self.canonical_rules = state.rules.clone();
-            self.whitelist_edit = state.rules.whitelist.join("\n");
-            self.blacklist_edit = state.rules.blacklist.join("\n");
             self.initialized = true;
         }
+    }
+
+    fn apply_draft_rules(&mut self, rules: InviteRuleSettings) {
+        self.whitelist_edit = rules.whitelist.join("\n");
+        self.blacklist_edit = rules.blacklist.join("\n");
+        self.draft_rules = rules;
     }
 
     fn whitelist_editor(&mut self, ui: &mut egui::Ui, commands: &mut Vec<UiCommand>) {
@@ -118,11 +394,7 @@ impl InviteSettingsUi {
                 .desired_rows(4)
                 .hint_text("usr_xxxxxxxx\nusr_yyyyyyyy"),
         );
-        ui.label(
-            RichText::new("One VRChat user ID per line. Commas are also accepted.")
-                .weak()
-                .small(),
-        );
+        ui.label(RichText::new("One VRChat user ID per line. Commas are also accepted.").weak().small());
         if response.changed() {
             self.draft_rules.whitelist = parse_user_list(&self.whitelist_edit);
             commands.push(UiCommand::SetInviteRules(self.draft_rules.clone()));
@@ -152,21 +424,9 @@ impl InviteSettingsUi {
         ui.add_space(8.0);
         ui.label(RichText::new("Accept when").strong());
         let mut changed = false;
-        changed |= ui
-            .checkbox(&mut self.draft_rules.accept_friends, "Sender is a friend")
-            .changed();
-        changed |= ui
-            .checkbox(
-                &mut self.draft_rules.accept_favorites,
-                "Sender is a favorite friend",
-            )
-            .changed();
-        changed |= ui
-            .checkbox(
-                &mut self.draft_rules.accept_whitelist,
-                "Sender is on the whitelist",
-            )
-            .changed();
+        changed |= ui.checkbox(&mut self.draft_rules.accept_friends, "Sender is a friend").changed();
+        changed |= ui.checkbox(&mut self.draft_rules.accept_favorites, "Sender is a favorite friend").changed();
+        changed |= ui.checkbox(&mut self.draft_rules.accept_whitelist, "Sender is on the whitelist").changed();
 
         if self.draft_rules.accept_whitelist {
             self.whitelist_editor(ui, commands);
@@ -179,16 +439,8 @@ impl InviteSettingsUi {
                 egui::ComboBox::from_id_salt("invite_custom_fallback")
                     .selected_text(fallback_name(self.draft_rules.fallback))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.draft_rules.fallback,
-                            InviteActionKind::Ignored,
-                            "Ignore",
-                        );
-                        ui.selectable_value(
-                            &mut self.draft_rules.fallback,
-                            InviteActionKind::Declined,
-                            "Decline",
-                        );
+                        ui.selectable_value(&mut self.draft_rules.fallback, InviteActionKind::Ignored, "Ignore");
+                        ui.selectable_value(&mut self.draft_rules.fallback, InviteActionKind::Declined, "Decline");
                     });
             });
         });
@@ -198,12 +450,20 @@ impl InviteSettingsUi {
             commands.push(UiCommand::SetInviteRules(self.draft_rules.clone()));
         }
         ui.label(
-            RichText::new(
-                "Custom fallback is intentionally limited to Ignore or Decline; there is no implicit accept-everyone mode.",
-            )
-            .weak()
-            .small(),
+            RichText::new("Custom fallback is intentionally limited to Ignore or Decline; there is no implicit accept-everyone mode.")
+                .weak()
+                .small(),
         );
+    }
+}
+
+fn friend_initials(name: &str) -> String {
+    let mut words = name.split_whitespace().filter_map(|word| word.chars().next());
+    let first = words.next().unwrap_or('?');
+    let second = words.next();
+    match second {
+        Some(second) => format!("{}{}", first.to_uppercase(), second.to_uppercase()),
+        None => first.to_uppercase().collect(),
     }
 }
 
@@ -211,40 +471,22 @@ fn render_feedback(ui: &mut egui::Ui, state: &InviteState) {
     if state.last_action.is_none() && state.last_error.is_none() {
         return;
     }
-
     ui.add_space(10.0);
     ui.separator();
     ui.add_space(6.0);
-
     if let Some(action) = &state.last_action {
         let who = action.display_name.as_deref().unwrap_or("Unknown user");
-        ui.label(
-            RichText::new(format!(
-                "Last action: {} — {who}",
-                action_name(action.kind)
-            ))
-            .weak()
-            .small(),
-        );
+        ui.label(RichText::new(format!("Last action: {} — {who}", action_name(action.kind))).weak().small());
     }
-
     if let Some(error) = &state.last_error {
-        ui.label(
-            RichText::new(format!("Last failure: {error}"))
-                .color(ERROR_RED)
-                .small(),
-        );
+        ui.label(RichText::new(format!("Last failure: {error}")).color(ERROR_RED).small());
     }
 }
 
 fn parse_user_list(value: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
-    for id in value
-        .split(['\n', ','])
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
+    for id in value.split(['\n', ',']).map(str::trim).filter(|id| !id.is_empty()) {
         if seen.insert(id.to_owned()) {
             ids.push(id.to_owned());
         }
@@ -297,6 +539,12 @@ mod tests {
         assert_eq!(action_name(InviteActionKind::Accepted), "Accepted");
         assert_eq!(action_name(InviteActionKind::Declined), "Declined");
         assert_eq!(action_name(InviteActionKind::Ignored), "Ignored");
-        assert_eq!(action_name(InviteActionKind::Asked), "Asked");
+    }
+
+    #[test]
+    fn initials_are_generated_without_fake_avatar_data() {
+        assert_eq!(friend_initials("Sleepy Friend"), "SF");
+        assert_eq!(friend_initials("Chineko"), "C");
+        assert_eq!(friend_initials(""), "?");
     }
 }
