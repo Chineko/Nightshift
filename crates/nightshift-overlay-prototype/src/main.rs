@@ -12,6 +12,7 @@ mod raster;
 mod runtime;
 mod runtime_state;
 mod surface;
+mod widget;
 
 use std::sync::{
     Arc,
