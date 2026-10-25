@@ -146,7 +146,7 @@ impl PanelBitmap {
         });
     }
 
-    fn blend_pixel(&mut self, x: u32, y: u32, source: [u8; 4]) {
+    pub(super) fn blend_pixel(&mut self, x: u32, y: u32, source: [u8; 4]) {
         if x >= self.width || y >= self.height || source[3] == 0 {
             return;
         }
