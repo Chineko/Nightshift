@@ -366,8 +366,8 @@ impl VrchatApiClient {
             .await
             .context("updating VRChat status")?;
 
-        if response.status() == StatusCode::UNAUTHORIZED {
-            bail!("VRChat session expired while updating status");
+        if let Some(error) = api_status_error(response.status(), "updating status") {
+            return Err(error.into());
         }
         response
             .error_for_status()
