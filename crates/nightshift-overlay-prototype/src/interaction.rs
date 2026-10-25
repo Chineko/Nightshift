@@ -69,10 +69,14 @@ const BRIGHTNESS_UP: ButtonRegion = region(PanelAction::BrightnessUp, 652.0, 708
 const PRIMARY_ACTION: ButtonRegion = region(PanelAction::EnterSleep, 40.0, 728.0, 840.0, 914.0);
 const SETTINGS_HR: ButtonRegion = region(PanelAction::ToggleHeartRate, 356.0, 446.0, 238.0, 320.0);
 const SETTINGS_OSC: ButtonRegion = region(PanelAction::ToggleOsc, 356.0, 446.0, 354.0, 436.0);
-const SETTINGS_INVITES: ButtonRegion = region(PanelAction::CycleInviteProfile, 300.0, 446.0, 470.0, 552.0);
-const SETTINGS_VRCHAT: ButtonRegion = region(PanelAction::CycleVrchatStatus, 300.0, 446.0, 586.0, 668.0);
-const SOCIAL_WHITELIST: ButtonRegion = region(PanelAction::SelectWhitelist, 500.0, 602.0, 302.0, 348.0);
-const SOCIAL_BLACKLIST: ButtonRegion = region(PanelAction::SelectBlacklist, 606.0, 708.0, 302.0, 348.0);
+const SETTINGS_INVITES: ButtonRegion =
+    region(PanelAction::CycleInviteProfile, 300.0, 446.0, 470.0, 552.0);
+const SETTINGS_VRCHAT: ButtonRegion =
+    region(PanelAction::CycleVrchatStatus, 300.0, 446.0, 586.0, 668.0);
+const SOCIAL_WHITELIST: ButtonRegion =
+    region(PanelAction::SelectWhitelist, 500.0, 602.0, 302.0, 348.0);
+const SOCIAL_BLACKLIST: ButtonRegion =
+    region(PanelAction::SelectBlacklist, 606.0, 708.0, 302.0, 348.0);
 const SOCIAL_REMOVE: [ButtonRegion; 5] = [
     region(PanelAction::RemoveSocial(0), 676.0, 716.0, 366.0, 420.0),
     region(PanelAction::RemoveSocial(1), 676.0, 716.0, 438.0, 492.0),
@@ -126,7 +130,11 @@ pub fn action_at_uv_for_page(
                 }
             }
             if inside(uv, PRIMARY_ACTION) {
-                return Some(if wake_action { PanelAction::Wake } else { PanelAction::EnterSleep });
+                return Some(if wake_action {
+                    PanelAction::Wake
+                } else {
+                    PanelAction::EnterSleep
+                });
             }
         }
         PanelPage::Settings => {
