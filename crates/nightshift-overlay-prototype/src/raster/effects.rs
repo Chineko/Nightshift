@@ -11,13 +11,15 @@ impl PanelBitmap {
         tint: [u8; 4],
     ) {
         // Fake the expensive part of glass until profiling gives us permission to buy an airbrush robot.
-        self.rounded_rect_fill(
+        let shadow = [SHADOW[0], SHADOW[1], SHADOW[2], 185];
+        self.rounded_vertical_gradient(
             x + 3,
             y + 5,
             width,
             height,
             radius,
-            [SHADOW[0], SHADOW[1], SHADOW[2], 185],
+            shadow,
+            shadow,
         );
         self.rounded_rect_fill(x, y, width, height, radius, BORDER);
         if width <= 4 || height <= 4 {
@@ -42,13 +44,11 @@ impl PanelBitmap {
         );
 
         if width > 12 {
-            self.fill_rect(
-                x + radius.max(6),
-                y + 2,
-                width.saturating_sub(radius.max(6) * 2),
-                1,
-                [255, 255, 255, 34],
-            );
+            let highlight_x = x + radius.max(6);
+            let highlight_width = width.saturating_sub(radius.max(6) * 2);
+            for px in highlight_x..highlight_x.saturating_add(highlight_width) {
+                self.blend_pixel(px, y + 2, [255, 255, 255, 34]);
+            }
         }
     }
 
@@ -131,5 +131,16 @@ mod tests {
     fn tint_helpers_saturate_instead_of_summoning_color_overflow_goblins() {
         assert_eq!(brighten([250, 1, 2, 255], 20), [255, 21, 22, 255]);
         assert_eq!(darken([3, 4, 5, 255], 10), [0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn glass_effects_keep_an_opaque_overlay_opaque() {
+        let mut bitmap = PanelBitmap {
+            width: 80,
+            height: 80,
+            rgba: vec![255; 80 * 80 * 4],
+        };
+        bitmap.glass_panel(10, 10, 50, 40, 8, [30, 32, 48, 180]);
+        assert!(bitmap.rgba.chunks_exact(4).all(|pixel| pixel[3] == 255));
     }
 }
