@@ -8,6 +8,9 @@ use crate::{
 };
 use nightshift_vrchat_status::VrchatPresence;
 
+const LIVE_STATUS_CONFIRM_TIMEOUT: Duration = Duration::from_secs(2);
+const LIVE_STATUS_CONFIRM_POLL: Duration = Duration::from_millis(100);
+
 #[derive(Clone, Default)]
 pub(crate) struct PresenceCaptureSlot(Arc<Mutex<Option<(u64, VrchatPresence)>>>);
 
@@ -91,6 +94,21 @@ pub(crate) fn schedule_sleep_status_update(
     }));
 }
 
+async fn wait_for_live_status(user_id: &str, target_status: VrchatStatus) -> Option<VrchatPresence> {
+    let deadline = tokio::time::Instant::now() + LIVE_STATUS_CONFIRM_TIMEOUT;
+    loop {
+        if let Some(presence) = latest_live_user_presence(user_id)
+            && presence.status == target_status
+        {
+            return Some(presence);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(LIVE_STATUS_CONFIRM_POLL).await;
+    }
+}
+
 async fn set_runtime_sleep_presence(
     api: VrchatApiClient,
     store: VrchatSessionStore,
@@ -132,15 +150,55 @@ async fn set_runtime_sleep_presence(
     verified.status = current.status;
     verified.status_description = current.status_description.clone();
     if current != target {
-        let _permit = shared_vrchat_requests()
-            .acquire(RequestClass::StatusWrite)
-            .await;
-        // Match OyasumiVR's proven behavior: when only the coarse status changes,
-        // send only `status` instead of redundantly resending statusDescription.
-        api.set_status(&cookies, &verified.id, target.status).await?;
-        // A successful PUT patches the field we sent immediately. Do not issue a lagging
-        // `/auth/user` verification GET; the pipeline will reconcile the live state afterward.
-        verified.status = target.status;
+        {
+            let _permit = shared_vrchat_requests()
+                .acquire(RequestClass::StatusWrite)
+                .await;
+            // Match OyasumiVR's normal status-only request shape first.
+            api.set_status(&cookies, &verified.id, target.status).await?;
+        }
+
+        if let Some(live) = wait_for_live_status(&verified.id, target.status).await {
+            verified.status = live.status;
+            verified.status_description = live.status_description;
+            info!(
+                generation,
+                confirmed_status = ?verified.status,
+                "VRChat pipeline confirmed sleep status update"
+            );
+        } else {
+            warn!(
+                generation,
+                requested_status = ?target.status,
+                "VRChat accepted status-only PUT but pipeline did not confirm it; retrying with preserved status text"
+            );
+            {
+                let _permit = shared_vrchat_requests()
+                    .acquire(RequestClass::StatusWrite)
+                    .await;
+                api.set_presence(
+                    &cookies,
+                    &verified.id,
+                    target.status,
+                    &target.status_description,
+                )
+                .await?;
+            }
+
+            let Some(live) = wait_for_live_status(&verified.id, target.status).await else {
+                bail!(
+                    "VRChat accepted sleep status writes but the live pipeline never confirmed {:?}",
+                    target.status
+                );
+            };
+            verified.status = live.status;
+            verified.status_description = live.status_description;
+            info!(
+                generation,
+                confirmed_status = ?verified.status,
+                "VRChat pipeline confirmed compatibility sleep status update"
+            );
+        }
     } else {
         info!(generation, "VRChat sleep presence already matches target");
     }
@@ -148,7 +206,7 @@ async fn set_runtime_sleep_presence(
     info!(
         generation,
         requested_status = ?target.status,
-        verified_status = ?presence.status,
+        confirmed_status = ?presence.status,
         "VRChat sleep presence update completed"
     );
 
