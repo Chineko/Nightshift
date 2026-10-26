@@ -18,9 +18,11 @@ use config::{PersistedConfig, sanitize_overlay_pose};
 use nightshift_hr::{CalmPeriodConfig, CalmPeriodDetector, DetectionState};
 use nightshift_protocol::{
     AppState, Capability, ClientMessage, HrDeviceInfo, HrProviderStatus, HrStatus, InviteAction,
-    InviteActionKind, OverlayPose, OverlaySpawnMode, PROTOCOL_VERSION, RecentEvent, RecentEventKind,
-    ServerMessage, SleepPhase, SleepingPose, StateEvent, UiCommand, VrchatStatus, WorkerReport,
+    OverlayPose, PROTOCOL_VERSION, RecentEvent, RecentEventKind, ServerMessage, SleepPhase,
+    SleepingPose, StateEvent, UiCommand, VrchatStatus, WorkerReport,
 };
+#[cfg(test)]
+use nightshift_protocol::{InviteActionKind, OverlaySpawnMode};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
