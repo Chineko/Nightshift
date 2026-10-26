@@ -271,12 +271,36 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     )
     .await?;
 
+    let mut line = String::new();
+    let read = tokio::time::timeout(
+        nightshift_protocol::IPC_HELLO_TIMEOUT,
+        reader.read_line(&mut line),
+    )
+    .await
+    .context("timed out waiting for daemon hello")??;
+    if read == 0 {
+        bail!("daemon closed the socket during handshake");
+    }
+    match serde_json::from_str::<ServerMessage>(line.trim_end())
+        .context("decoding daemon hello")?
+    {
+        ServerMessage::Hello { protocol, .. } if protocol == PROTOCOL_VERSION => {
+            info!(protocol, "Nightshift heart-rate worker connected to daemon");
+        }
+        ServerMessage::Hello { protocol, .. } => bail!(
+            "daemon protocol mismatch: hr-worker={}, daemon={protocol}",
+            PROTOCOL_VERSION
+        ),
+        ServerMessage::Error { message } => bail!("daemon rejected connection: {message}"),
+        _ => bail!("daemon returned an unexpected handshake response"),
+    }
+    line.clear();
+
     let legacy_filter = legacy_device_filter();
     let (event_tx, mut event_rx) = mpsc::channel::<BleHeartRateEvent>(32);
     let mut provider = ProviderTask(None);
     let mut device_filter = legacy_filter.clone();
     let mut enabled = false;
-    let mut line = String::new();
 
     loop {
         tokio::select! {
@@ -290,15 +314,6 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
                 line.clear();
 
                 match message {
-                    ServerMessage::Hello { protocol, .. } => {
-                        if protocol != PROTOCOL_VERSION {
-                            bail!(
-                                "daemon protocol mismatch: hr-worker={}, daemon={protocol}",
-                                PROTOCOL_VERSION
-                            );
-                        }
-                        info!(protocol, "Nightshift heart-rate worker connected to daemon");
-                    }
                     ServerMessage::FullState { state } => {
                         apply_provider_config(
                             state.heart_rate.enabled,
