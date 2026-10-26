@@ -35,7 +35,7 @@ const MAX_IPC_LINE_BYTES: usize = 64 * 1024;
 use ipc::*;
 use state::*;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(

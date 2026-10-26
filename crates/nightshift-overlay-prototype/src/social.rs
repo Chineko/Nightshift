@@ -109,7 +109,10 @@ impl SocialBridge {
         let (update_tx, update_rx) = mpsc::channel::<SocialUpdate>();
 
         thread::spawn(move || {
-            let runtime = match tokio::runtime::Runtime::new() {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
                 Ok(runtime) => runtime,
                 Err(error) => {
                     let _ = update_tx.send(SocialUpdate::Error(format!(
