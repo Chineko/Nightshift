@@ -10,6 +10,7 @@ use nightshift_vrchat_status::VrchatPresence;
 
 const LIVE_STATUS_CONFIRM_TIMEOUT: Duration = Duration::from_secs(2);
 const LIVE_STATUS_CONFIRM_POLL: Duration = Duration::from_millis(100);
+const LIVE_STATUS_SETTLE_DURATION: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Default)]
 pub(crate) struct PresenceCaptureSlot(Arc<Mutex<Option<(u64, VrchatPresence)>>>);
@@ -109,6 +110,14 @@ async fn wait_for_live_status(user_id: &str, target_status: VrchatStatus) -> Opt
     }
 }
 
+async fn wait_for_settled_live_status(
+    user_id: &str,
+    target_status: VrchatStatus,
+) -> Option<VrchatPresence> {
+    tokio::time::sleep(LIVE_STATUS_SETTLE_DURATION).await;
+    latest_live_user_presence(user_id).filter(|presence| presence.status == target_status)
+}
+
 async fn set_runtime_sleep_presence(
     api: VrchatApiClient,
     store: VrchatSessionStore,
@@ -154,23 +163,23 @@ async fn set_runtime_sleep_presence(
             let _permit = shared_vrchat_requests()
                 .acquire(RequestClass::StatusWrite)
                 .await;
-            // Match OyasumiVR's normal status-only request shape first.
-            api.set_status(&cookies, &verified.id, target.status).await?;
+            // Send the complete presence in one request. A status-only PUT can be observed briefly
+            // on the pipeline while the running VRChat client still reasserts its local presence.
+            api.set_presence(
+                &cookies,
+                &verified.id,
+                target.status,
+                &target.status_description,
+            )
+            .await?;
         }
 
-        if let Some(live) = wait_for_live_status(&verified.id, target.status).await {
-            verified.status = live.status;
-            verified.status_description = live.status_description;
-            info!(
-                generation,
-                confirmed_status = ?verified.status,
-                "VRChat pipeline confirmed sleep status update"
-            );
-        } else {
+        let first_confirmation = wait_for_live_status(&verified.id, target.status).await;
+        if first_confirmation.is_none() {
             warn!(
                 generation,
                 requested_status = ?target.status,
-                "VRChat accepted status-only PUT but pipeline did not confirm it; retrying with preserved status text"
+                "VRChat accepted presence PUT but pipeline did not confirm it; retrying once"
             );
             {
                 let _permit = shared_vrchat_requests()
@@ -184,21 +193,54 @@ async fn set_runtime_sleep_presence(
                 )
                 .await?;
             }
+        }
 
-            let Some(live) = wait_for_live_status(&verified.id, target.status).await else {
+        let Some(mut live) = first_confirmation.or_else(|| latest_live_user_presence(&verified.id))
+            .filter(|presence| presence.status == target.status)
+            .or(wait_for_live_status(&verified.id, target.status).await)
+        else {
+            bail!(
+                "VRChat accepted sleep presence writes but the live pipeline never confirmed {:?}",
+                target.status
+            );
+        };
+
+        if let Some(settled) = wait_for_settled_live_status(&verified.id, target.status).await {
+            live = settled;
+        } else {
+            warn!(
+                generation,
+                requested_status = ?target.status,
+                "VRChat sleep status reverted after confirmation; reasserting full presence"
+            );
+            {
+                let _permit = shared_vrchat_requests()
+                    .acquire(RequestClass::StatusWrite)
+                    .await;
+                api.set_presence(
+                    &cookies,
+                    &verified.id,
+                    target.status,
+                    &target.status_description,
+                )
+                .await?;
+            }
+            let Some(settled) = wait_for_live_status(&verified.id, target.status).await else {
                 bail!(
-                    "VRChat accepted sleep status writes but the live pipeline never confirmed {:?}",
+                    "VRChat sleep status reverted and could not be re-applied as {:?}",
                     target.status
                 );
             };
-            verified.status = live.status;
-            verified.status_description = live.status_description;
-            info!(
-                generation,
-                confirmed_status = ?verified.status,
-                "VRChat pipeline confirmed compatibility sleep status update"
-            );
+            live = settled;
         }
+
+        verified.status = live.status;
+        verified.status_description = live.status_description;
+        info!(
+            generation,
+            confirmed_status = ?verified.status,
+            "VRChat pipeline confirmed stable sleep status update"
+        );
     } else {
         info!(generation, "VRChat sleep presence already matches target");
     }
