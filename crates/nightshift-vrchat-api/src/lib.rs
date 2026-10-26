@@ -7,11 +7,10 @@ pub use invites::{
 };
 
 use std::{
-    collections::HashSet,
     error::Error,
     fmt,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -25,7 +24,6 @@ use serde::{Deserialize, Serialize};
 const BASE_URL: &str = "https://api.vrchat.cloud/api/1";
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const FAVORITES_CACHE_TTL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VrchatApiError {
@@ -200,16 +198,9 @@ impl fmt::Debug for CapturedCookies {
     }
 }
 
-struct FavoriteCache {
-    session_auth: String,
-    loaded_at: Instant,
-    user_ids: HashSet<String>,
-}
-
 #[derive(Clone)]
 pub struct VrchatApiClient {
     http: HttpClient,
-    favorite_cache: Arc<Mutex<Option<FavoriteCache>>>,
     friend_cache: Arc<Mutex<Option<friends::FriendCache>>>,
 }
 
@@ -226,7 +217,6 @@ impl VrchatApiClient {
             .context("building VRChat HTTP client")?;
         Ok(Self {
             http,
-            favorite_cache: Arc::new(Mutex::new(None)),
             friend_cache: Arc::new(Mutex::new(None)),
         })
     }
