@@ -1,5 +1,7 @@
 #[path = "../src/placement.rs"]
 mod placement;
+#[path = "../src/swapchain_wait.rs"]
+mod swapchain_wait;
 #[path = "../src/panel.rs"]
 mod panel;
 

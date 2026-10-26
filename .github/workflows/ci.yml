@@ -48,8 +48,63 @@ jobs:
         continue-on-error: true
         run: cargo fmt --all -- --check
 
+      - name: Check OpenXR overlay early
+        id: openxr-check
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check -p nightshift-overlay --all-targets --locked 2>&1 | tee openxr-check.log
+
+      - name: Summarize OpenXR compiler failure
+        if: failure() && steps.openxr-check.outcome == 'failure'
+        shell: bash
+        run: |
+          echo '::error title=OpenXR overlay compile check failed::The overlay failed its early compile check. The compiler output is preserved in the job summary and artifact.'
+          {
+            echo '## 🚨 OpenXR overlay compile failure'
+            echo
+            echo 'The focused `nightshift-overlay` check failed before workspace Clippy.'
+            echo
+            echo '```text'
+            tail -n 200 openxr-check.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve OpenXR compiler failure log
+        if: failure() && steps.openxr-check.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: openxr-compiler-failure-${{ github.sha }}
+          path: openxr-check.log
+          if-no-files-found: error
+
       - name: Run Clippy
-        run: cargo clippy --workspace --all-targets --locked
+        id: clippy
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --locked 2>&1 | tee clippy.log
+
+      - name: Summarize Clippy failure
+        if: failure() && steps.clippy.outcome == 'failure'
+        shell: bash
+        run: |
+          echo '::error title=Rust workspace Clippy failed::Clippy/compiler output is preserved in the job summary and artifact.'
+          {
+            echo '## 🚨 Rust workspace Clippy failure'
+            echo
+            echo '```text'
+            tail -n 200 clippy.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Preserve Clippy failure log
+        if: failure() && steps.clippy.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-failure-${{ github.sha }}
+          path: clippy.log
+          if-no-files-found: error
 
       - name: Test protocol compatibility
         run: cargo test -p nightshift-protocol --locked

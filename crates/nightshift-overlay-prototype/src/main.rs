@@ -13,6 +13,7 @@ mod raster;
 mod runtime;
 mod runtime_state;
 mod surface;
+mod swapchain_wait;
 mod widget;
 
 use std::sync::{
@@ -190,10 +191,7 @@ mod tests {
                 pose: panel_pose_to_protocol(first),
             })
         );
-        assert_eq!(
-            overlay_pose_report_if_changed(&mut reported, Some(first)),
-            None
-        );
+        assert_eq!(overlay_pose_report_if_changed(&mut reported, Some(first)), None);
         assert_eq!(
             overlay_pose_report_if_changed(&mut reported, Some(second)),
             Some(WorkerReport::OverlayRuntimePose {

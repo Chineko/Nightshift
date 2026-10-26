@@ -30,6 +30,7 @@ use crate::runtime_state::{
     sanitize_transition_seconds,
 };
 use crate::surface::SurfaceController;
+use crate::swapchain_wait::{release_image, wait_image_bounded};
 
 const VIEW_TYPE: xr::ViewConfigurationType = xr::ViewConfigurationType::PRIMARY_STEREO;
 const VIEW_COUNT: u32 = 2;
@@ -771,9 +772,7 @@ pub(crate) fn run_overlay(
             let image_index = swapchain
                 .acquire_image()
                 .context("acquiring dimmer image")?;
-            swapchain
-                .wait_image(xr::Duration::INFINITE)
-                .context("waiting for dimmer image")?;
+            wait_image_bounded(&swapchain, "waiting for dimmer image")?;
 
             let image = *images.get(image_index as usize).ok_or_else(|| {
                 anyhow!("runtime returned invalid swapchain image index {image_index}")
@@ -857,9 +856,7 @@ pub(crate) fn run_overlay(
             vk_device
                 .wait_for_fences(&[fence], true, u64::MAX)
                 .context("waiting for dimmer clear to finish")?;
-            swapchain
-                .release_image()
-                .context("releasing dimmer image")?;
+            release_image(&swapchain, "releasing dimmer image")?;
 
             let projection_views = [
                 xr::CompositionLayerProjectionView::new()
