@@ -1,5 +1,8 @@
 use super::*;
-use crate::home_layout::{HomeCompositionLayout, PanelChromeLayout, PanelNavLayout};
+use crate::{
+    home_layout::{HomeCompositionLayout, PanelChromeLayout, PanelNavLayout},
+    interaction::slider_drag_visual_fraction,
+};
 
 impl PanelBitmap {
     pub(super) fn draw_home(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
@@ -83,7 +86,12 @@ impl PanelBitmap {
             2,
             MUTED,
         );
-        let value = format!("{}%", content.brightness_percent);
+        let drag_fraction = slider_drag_visual_fraction();
+        let shown_percent = drag_fraction
+            .map(|fraction| (fraction * 100.0).round() as u32)
+            .unwrap_or(content.brightness_percent)
+            .clamp(2, 100);
+        let value = format!("{shown_percent}%");
         self.draw_text(brightness_panel.0 + 511, brightness_panel.1 + 30, &value, 6, TEXT);
 
         self.rounded_rect(
@@ -95,8 +103,10 @@ impl PanelBitmap {
             [48, 52, 66, 255],
             [48, 52, 66, 255],
         );
-        let fill_w = ((brightness_track.2 as f32 * content.brightness_percent as f32 / 100.0)
-            .round() as u32)
+        let brightness_fraction = drag_fraction
+            .unwrap_or(content.brightness_percent as f32 / 100.0)
+            .clamp(0.02, 1.0);
+        let fill_w = ((brightness_track.2 as f32 * brightness_fraction).round() as u32)
             .clamp(brightness_track.3, brightness_track.2);
         self.rounded_rect(
             brightness_track.0,
