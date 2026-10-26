@@ -380,6 +380,30 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     )
     .await?;
 
+    let mut line = String::new();
+    let read = tokio::time::timeout(
+        nightshift_protocol::IPC_HELLO_TIMEOUT,
+        reader.read_line(&mut line),
+    )
+    .await
+    .context("timed out waiting for daemon hello")??;
+    if read == 0 {
+        bail!("daemon closed the socket during handshake");
+    }
+    match serde_json::from_str::<ServerMessage>(line.trim_end())
+        .context("decoding daemon hello")?
+    {
+        ServerMessage::Hello { protocol, .. } if protocol == PROTOCOL_VERSION => {
+            info!(protocol, "Nightshift OSC worker connected to daemon");
+        }
+        ServerMessage::Hello { protocol, .. } => bail!(
+            "daemon protocol mismatch: osc={}, daemon={protocol}",
+            PROTOCOL_VERSION
+        ),
+        ServerMessage::Error { message } => bail!("daemon rejected OSC worker: {message}"),
+        _ => bail!("daemon returned an unexpected handshake response"),
+    }
+
     let config = load_config().await?;
     let mut enabled = false;
     let mut gogo_enabled = false;
@@ -389,7 +413,6 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
     let mut avatar_context: Option<AvatarContext> = None;
     let mut last_report: Option<WorkerReport> = None;
     let mut scripts = ScriptTaskRegistry::default();
-    let mut line = String::new();
 
     loop {
         line.clear();
@@ -406,15 +429,7 @@ async fn run_connection(stream: UnixStream) -> Result<()> {
             serde_json::from_str(line.trim_end()).context("decoding daemon IPC message")?;
 
         match message {
-            ServerMessage::Hello { protocol, .. } => {
-                if protocol != PROTOCOL_VERSION {
-                    bail!(
-                        "daemon protocol mismatch: osc={}, daemon={protocol}",
-                        PROTOCOL_VERSION
-                    );
-                }
-                info!(protocol, "Nightshift OSC worker connected to daemon");
-            }
+            ServerMessage::Hello { .. } => bail!("daemon repeated IPC hello after handshake"),
             ServerMessage::FullState { state } => {
                 enabled = state.osc.enabled;
                 gogo_enabled = state.settings.gogo_automation_enabled;
