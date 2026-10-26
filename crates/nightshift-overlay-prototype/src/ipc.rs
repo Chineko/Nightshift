@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use nightshift_protocol::{
-    AppState, ClientMessage, PROTOCOL_VERSION, ServerMessage, StateEvent, UiCommand, WorkerReport,
+    AppState, ClientMessage, IPC_HELLO_TIMEOUT, PROTOCOL_VERSION, ServerMessage, StateEvent,
+    UiCommand, WorkerReport,
 };
 
 use crate::panel_state::PanelStateTracker;
@@ -22,6 +23,7 @@ use crate::runtime_state::{
 use crate::surface::SurfaceTarget;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+const IPC_POLL_TIMEOUT: Duration = Duration::from_millis(250);
 
 fn socket_path() -> Result<PathBuf> {
     let runtime_dir = env::var_os("XDG_RUNTIME_DIR")
@@ -125,8 +127,8 @@ fn run_ipc_connection(
     hydra_mode: bool,
 ) -> Result<()> {
     stream
-        .set_read_timeout(Some(Duration::from_millis(250)))
-        .context("setting daemon IPC read timeout")?;
+        .set_read_timeout(Some(IPC_HELLO_TIMEOUT))
+        .context("setting daemon IPC hello timeout")?;
 
     let mut writer = stream.try_clone().context("cloning daemon IPC socket")?;
     write_client_message(
@@ -140,6 +142,41 @@ fn run_ipc_connection(
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
+    match reader.read_line(&mut line) {
+        Ok(0) => bail!("daemon closed the socket during handshake"),
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            bail!("timed out waiting for daemon hello")
+        }
+        Err(error) => return Err(error).context("reading daemon hello"),
+    }
+
+    match serde_json::from_str::<ServerMessage>(line.trim_end())
+        .context("decoding daemon hello")?
+    {
+        ServerMessage::Hello { protocol, .. } if protocol == PROTOCOL_VERSION => {
+            if hydra_mode {
+                println!("[Hydra/IPC] handshake=accepted protocol={protocol}");
+            }
+        }
+        ServerMessage::Hello { protocol, .. } => bail!(
+            "daemon protocol mismatch: overlay={}, daemon={protocol}",
+            PROTOCOL_VERSION
+        ),
+        ServerMessage::Error { message } => bail!("daemon rejected overlay: {message}"),
+        _ => bail!("daemon returned an unexpected handshake response"),
+    }
+
+    reader
+        .get_ref()
+        .set_read_timeout(Some(IPC_POLL_TIMEOUT))
+        .context("setting daemon IPC read timeout")?;
+
     let mut fade_seconds = DEFAULT_TRANSITION_SECONDS;
     let mut panel_state = PanelStateTracker::default();
 
@@ -164,17 +201,7 @@ fn run_ipc_connection(
             serde_json::from_str(line.trim_end()).context("decoding daemon IPC message")?;
 
         match message {
-            ServerMessage::Hello { protocol, .. } => {
-                if protocol != PROTOCOL_VERSION {
-                    bail!(
-                        "daemon protocol mismatch: overlay={}, daemon={protocol}",
-                        PROTOCOL_VERSION
-                    );
-                }
-                if hydra_mode {
-                    println!("[Hydra/IPC] handshake=accepted protocol={protocol}");
-                }
-            }
+            ServerMessage::Hello { .. } => bail!("daemon repeated IPC hello after handshake"),
             ServerMessage::FullState { state } => {
                 fade_seconds = sanitize_transition_seconds(state.settings.fade_duration_seconds);
                 panel_state = PanelStateTracker::from_state(state.clone());
