@@ -3,18 +3,23 @@
 set -l script_dir (dirname (status --current-filename))
 set -l root (realpath "$script_dir/..")
 set -l hydra
-set -l with_ui 0
-set -l with_hr 0
-set -l with_vrchat 0
+set -l with_ui 1
+set -l with_hr 1
 
 function nightshift_usage
-    echo "Usage: scripts/nightshift-dev.fish [--hydra] [--ui] [--hr] [--vrchat] [--full]"
+    echo "Usage: scripts/nightshift-dev.fish [--hydra] [--no-ui] [--no-hr] [--core] [--full]"
+    echo
+    echo "By default this builds and starts the full local Nightshift stack:"
+    echo "  daemon + OSC + heart-rate + OpenXR overlay + desktop UI"
+    echo "  VRChat worker is supervised automatically by the daemon"
     echo
     echo "  --hydra    Enable overlay Hydra diagnostics"
-    echo "  --ui       Start the desktop UI"
-    echo "  --hr       Start the BLE heart-rate worker"
-    echo "  --vrchat   Start the VRChat runtime worker"
-    echo "  --full     Start UI, heart-rate, and VRChat workers"
+    echo "  --no-ui    Do not start the desktop UI"
+    echo "  --no-hr    Do not start the BLE heart-rate worker"
+    echo "  --core     Start only daemon + OSC + OpenXR overlay"
+    echo "  --full     Explicitly select the default full stack"
+    echo
+    echo "Compatibility flags --ui, --hr, and --vrchat are still accepted."
 end
 
 for arg in $argv
@@ -26,11 +31,18 @@ for arg in $argv
         case --hr
             set with_hr 1
         case --vrchat
-            set with_vrchat 1
+            # The daemon owns VRChat worker supervision now. Keep this flag accepted
+            # so old muscle memory does not summon a duplicate worker hydra head.
+        case --no-ui
+            set with_ui 0
+        case --no-hr
+            set with_hr 0
+        case --core
+            set with_ui 0
+            set with_hr 0
         case --full --all
             set with_ui 1
             set with_hr 1
-            set with_vrchat 1
         case --help -h
             nightshift_usage
             exit 0
@@ -43,19 +55,14 @@ end
 
 cd $root; or exit 1
 
-echo "Building Nightshift core..."
-cargo build -p nightshift-daemon -p nightshift-osc; or exit $status
+echo "Building full Nightshift stack..."
+cargo build \
+    -p nightshift-daemon \
+    -p nightshift-osc \
+    -p nightshift-hr-worker \
+    -p nightshift-ui \
+    -p nightshift-vrchat-worker; or exit $status
 cargo build --release -p nightshift-overlay; or exit $status
-
-if test $with_ui -eq 1
-    cargo build -p nightshift-ui; or exit $status
-end
-if test $with_hr -eq 1
-    cargo build -p nightshift-hr-worker; or exit $status
-end
-if test $with_vrchat -eq 1
-    cargo build -p nightshift-vrchat-worker; or exit $status
-end
 
 set -g nightshift_children
 
@@ -94,11 +101,9 @@ if test $with_hr -eq 1
     set -a nightshift_children $last_pid
 end
 
-if test $with_vrchat -eq 1
-    echo "Starting Nightshift VRChat worker..."
-    $root/target/debug/nightshift-vrchat-worker &
-    set -a nightshift_children $last_pid
-end
+# VRChat is deliberately not spawned here. The daemon supervises the current
+# workspace worker, avoids duplicates, restarts it on failure, and owns cleanup.
+echo "VRChat worker: managed by daemon"
 
 echo "Starting Nightshift OpenXR overlay..."
 $root/target/release/nightshift-overlay $hydra &
@@ -113,19 +118,18 @@ end
 echo
 echo "Nightshift is running. Ctrl+C stops the whole local stack."
 if test $with_hr -eq 0
-    echo "  heart-rate worker: off (use --hr or --full)"
-end
-if test $with_vrchat -eq 0
-    echo "  VRChat worker: off (use --vrchat or --full)"
+    echo "  heart-rate worker: off"
 end
 if test $with_ui -eq 0
-    echo "  desktop UI: off (use --ui or --full)"
+    echo "  desktop UI: off"
 end
+echo "  VRChat worker: daemon-supervised"
 echo "WayVR remains a separate process, because one hydra is enough."
 echo
 
-# Exit when any child exits unexpectedly; the fish_exit handler tears down the
-# remaining processes so we never leave a daemon lurking under the bed.
+# Exit when any directly supervised child exits unexpectedly; the fish_exit
+# handler tears down the remaining processes, and daemon shutdown owns its
+# managed VRChat child so we never leave workers lurking under the bed.
 wait -n $nightshift_children
 set -l child_status $status
 
