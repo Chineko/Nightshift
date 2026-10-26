@@ -5,6 +5,7 @@ use std::{
 
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
+const GLOBAL_REQUEST_INTERVAL: Duration = Duration::from_secs(4);
 const SESSION_READ_INTERVAL: Duration = Duration::from_millis(250);
 const RELATIONSHIP_READ_INTERVAL: Duration = Duration::from_millis(250);
 const STATUS_WRITE_INTERVAL: Duration = Duration::from_secs(10);
@@ -31,6 +32,7 @@ impl RequestClass {
 
 #[derive(Clone, Copy)]
 struct RequestIntervals {
+    global: Duration,
     session_read: Duration,
     relationship_read: Duration,
     status_write: Duration,
@@ -40,6 +42,7 @@ struct RequestIntervals {
 impl Default for RequestIntervals {
     fn default() -> Self {
         Self {
+            global: GLOBAL_REQUEST_INTERVAL,
             session_read: SESSION_READ_INTERVAL,
             relationship_read: RELATIONSHIP_READ_INTERVAL,
             status_write: STATUS_WRITE_INTERVAL,
@@ -60,7 +63,7 @@ impl ClassGate {
         }
     }
 
-    async fn acquire(&self, interval: Duration) -> RequestPermit {
+    async fn acquire(&self, interval: Duration) -> OwnedMutexGuard<Instant> {
         let mut guard = self.next_allowed.clone().lock_owned().await;
         let now = Instant::now();
         if *guard > now {
@@ -68,12 +71,13 @@ impl ClassGate {
         }
 
         *guard = Instant::now() + interval;
-        RequestPermit { _guard: guard }
+        guard
     }
 }
 
 #[derive(Clone)]
 pub struct RequestCoordinator {
+    global: ClassGate,
     session_read: ClassGate,
     relationship_read: ClassGate,
     status_write: ClassGate,
@@ -91,6 +95,7 @@ impl RequestCoordinator {
     fn new(intervals: RequestIntervals) -> Self {
         let now = Instant::now();
         Self {
+            global: ClassGate::new(now),
             session_read: ClassGate::new(now),
             relationship_read: ClassGate::new(now),
             status_write: ClassGate::new(now),
@@ -100,8 +105,11 @@ impl RequestCoordinator {
     }
 
     pub async fn acquire(&self, class: RequestClass) -> RequestPermit {
-        // Each request class gets its own clipboard. The goblins may finally work in parallel.
-        match class {
+        // Keep each request class orderly, then pass every request through one shared gate.
+        // OyasumiVR caps all VRChat API traffic at 15 requests/minute; four seconds between
+        // request starts gives Nightshift the same global budget while preserving the stricter
+        // per-class spacing below. Hydra gets one queue, not five goblins at the same door.
+        let class_guard = match class {
             RequestClass::SessionRead => {
                 self.session_read
                     .acquire(class.minimum_interval(self.intervals))
@@ -122,12 +130,19 @@ impl RequestCoordinator {
                     .acquire(class.minimum_interval(self.intervals))
                     .await
             }
+        };
+        let global_guard = self.global.acquire(self.intervals.global).await;
+
+        RequestPermit {
+            _class_guard: class_guard,
+            _global_guard: global_guard,
         }
     }
 }
 
 pub struct RequestPermit {
-    _guard: OwnedMutexGuard<Instant>,
+    _class_guard: OwnedMutexGuard<Instant>,
+    _global_guard: OwnedMutexGuard<Instant>,
 }
 
 pub fn shared_vrchat_requests() -> &'static RequestCoordinator {
@@ -141,6 +156,7 @@ mod tests {
 
     fn fast_coordinator() -> RequestCoordinator {
         RequestCoordinator::new(RequestIntervals {
+            global: Duration::from_millis(9),
             session_read: Duration::from_millis(5),
             relationship_read: Duration::from_millis(7),
             status_write: Duration::from_millis(15),
@@ -151,6 +167,7 @@ mod tests {
     #[test]
     fn request_classes_have_separate_spacing() {
         let intervals = RequestIntervals::default();
+        assert_eq!(intervals.global, GLOBAL_REQUEST_INTERVAL);
         assert_eq!(
             RequestClass::SessionRead.minimum_interval(intervals),
             SESSION_READ_INTERVAL
@@ -199,15 +216,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn independent_classes_run_while_another_class_is_in_flight() {
+    async fn global_budget_spaces_independent_request_classes() {
         let coordinator = fast_coordinator();
-        let status_write = coordinator.acquire(RequestClass::StatusWrite).await;
+        let first = coordinator.acquire(RequestClass::SessionRead).await;
+        drop(first);
 
         let started = Instant::now();
-        let session_read = coordinator.acquire(RequestClass::SessionRead).await;
-        assert!(started.elapsed() < Duration::from_millis(10));
+        let second = coordinator.acquire(RequestClass::RelationshipRead).await;
+        assert!(started.elapsed() >= Duration::from_millis(7));
+        drop(second);
+    }
 
-        drop(session_read);
-        drop(status_write);
+    #[tokio::test]
+    async fn class_permit_stays_exclusive_while_waiting_for_global_budget() {
+        let coordinator = fast_coordinator();
+        let global_slot = coordinator.acquire(RequestClass::RelationshipRead).await;
+        drop(global_slot);
+
+        let first_coordinator = coordinator.clone();
+        let first = tokio::spawn(async move {
+            first_coordinator.acquire(RequestClass::SessionRead).await
+        });
+        tokio::time::sleep(Duration::from_millis(2)).await;
+
+        let second_coordinator = coordinator.clone();
+        let second = tokio::spawn(async move {
+            second_coordinator.acquire(RequestClass::SessionRead).await
+        });
+        tokio::time::sleep(Duration::from_millis(4)).await;
+        assert!(!second.is_finished());
+
+        let first = first.await.unwrap();
+        drop(first);
+        let _second = second.await.unwrap();
     }
 }
