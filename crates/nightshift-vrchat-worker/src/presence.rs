@@ -125,13 +125,10 @@ async fn set_runtime_sleep_presence(
         let _permit = shared_vrchat_requests()
             .acquire(RequestClass::StatusWrite)
             .await;
-        api.set_presence(
-            &cookies,
-            &user.id,
-            target.status,
-            &target.status_description,
-        )
-        .await?
+        // Match OyasumiVR's proven behavior: when only the coarse status changes,
+        // send only `status` instead of redundantly resending statusDescription.
+        api.set_status(&cookies, &user.id, target.status).await?;
+        api.current_user(&cookies).await?
     } else {
         info!(generation, "VRChat sleep presence already matches target");
         user
@@ -196,7 +193,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(80)).await;
 
         assert_eq!(generation, 13);
-        assert!(!task.is_pending());
+        assert!(!status_task.is_pending());
         assert!(!ran.load(std::sync::atomic::Ordering::Acquire));
     }
 }
