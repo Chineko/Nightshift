@@ -1,7 +1,5 @@
 use super::*;
-use nightshift_vrchat_status::{VrchatPresence, restore_presence, target_presence};
-
-pub(crate) const SLEEP_STATUS_DESCRIPTION: &str = "Sleeping in VR 🌙";
+use nightshift_vrchat_status::VrchatPresence;
 
 pub(crate) struct AbortTask(pub(crate) Option<JoinHandle<()>>);
 
@@ -105,44 +103,6 @@ pub(crate) fn status_update_delay(last_write: Option<Instant>) -> Duration {
     STATUS_DEBOUNCE.max(rate_limit_wait)
 }
 
-pub(crate) fn pending_retarget(
-    pending: bool,
-    sleeping: bool,
-    connected: bool,
-    current_status: VrchatStatus,
-    automation: StatusAutomationConfig,
-) -> Option<VrchatStatus> {
-    if !pending || !automation.enabled || !connected {
-        return None;
-    }
-
-    let target = if sleeping {
-        automation.sleep_status
-    } else {
-        automation.wake_status
-    };
-    (target != current_status).then_some(target)
-}
-
-pub(crate) fn pending_presence_retarget(
-    pending: bool,
-    sleeping: bool,
-    connected: bool,
-    current: &VrchatPresence,
-    captured: Option<&VrchatPresence>,
-    automation: StatusAutomationConfig,
-) -> Option<VrchatPresence> {
-    if !pending || !automation.enabled || !connected {
-        return None;
-    }
-
-    if sleeping {
-        target_presence(current, automation.sleep_status, SLEEP_STATUS_DESCRIPTION)
-    } else {
-        restore_presence(captured, current)
-    }
-}
-
 pub(crate) fn cancel_pending_status_on_disconnect(
     connected: bool,
     status_generation: &mut u64,
@@ -201,60 +161,50 @@ pub(crate) fn sync_invite_state(
 pub(crate) fn log_invite_result(result: &InviteHandlingResult) {
     let sender_username = result.sender_username.as_deref().unwrap_or("<unknown>");
 
-    match &result.outcome {
-        InviteHandlingOutcome::ConfigurationUnavailable(profile) => {
-            warn!(
-                ?profile,
+    let InviteHandlingOutcome::Execution(outcome) = &result.outcome;
+    match outcome {
+        InviteExecutionOutcome::None => {}
+        InviteExecutionOutcome::AcceptedRequest => {
+            info!(
                 notification_id = %result.notification_id,
                 sender_user_id = %result.sender_user_id,
                 sender_username = %sender_username,
-                "invite automation profile requires configuration that is not available yet"
+                "accepted VRChat invite request"
             );
         }
-        InviteHandlingOutcome::Execution(outcome) => match outcome {
-            InviteExecutionOutcome::None => {}
-            InviteExecutionOutcome::AcceptedRequest => {
-                info!(
-                    notification_id = %result.notification_id,
-                    sender_user_id = %result.sender_user_id,
-                    sender_username = %sender_username,
-                    "accepted VRChat invite request"
-                );
-            }
-            InviteExecutionOutcome::Declined => {
-                info!(
-                    notification_id = %result.notification_id,
-                    sender_user_id = %result.sender_user_id,
-                    sender_username = %sender_username,
-                    "declined VRChat invite notification"
-                );
-            }
-            InviteExecutionOutcome::InviteRefused { message } => {
-                warn!(
-                    notification_id = %result.notification_id,
-                    sender_user_id = %result.sender_user_id,
-                    sender_username = %sender_username,
-                    vrchat_message = message.as_deref().unwrap_or("<none>"),
-                    "VRChat refused invite-request acceptance; original request was left visible"
-                );
-            }
-            InviteExecutionOutcome::MissingCurrentInstance => {
-                warn!(
-                    notification_id = %result.notification_id,
-                    sender_user_id = %result.sender_user_id,
-                    sender_username = %sender_username,
-                    "invite request matched policy but current VRChat instance is unavailable"
-                );
-            }
-            InviteExecutionOutcome::UnsupportedIncomingInviteAcceptance => {
-                info!(
-                    notification_id = %result.notification_id,
-                    sender_user_id = %result.sender_user_id,
-                    sender_username = %sender_username,
-                    "incoming VRChat invite matched accept policy, but automatic joining is not implemented"
-                );
-            }
-        },
+        InviteExecutionOutcome::Declined => {
+            info!(
+                notification_id = %result.notification_id,
+                sender_user_id = %result.sender_user_id,
+                sender_username = %sender_username,
+                "declined VRChat invite notification"
+            );
+        }
+        InviteExecutionOutcome::InviteRefused { message } => {
+            warn!(
+                notification_id = %result.notification_id,
+                sender_user_id = %result.sender_user_id,
+                sender_username = %sender_username,
+                vrchat_message = message.as_deref().unwrap_or("<none>"),
+                "VRChat refused invite-request acceptance; original request was left visible"
+            );
+        }
+        InviteExecutionOutcome::MissingCurrentInstance => {
+            warn!(
+                notification_id = %result.notification_id,
+                sender_user_id = %result.sender_user_id,
+                sender_username = %sender_username,
+                "invite request matched policy but current VRChat instance is unavailable"
+            );
+        }
+        InviteExecutionOutcome::UnsupportedIncomingInviteAcceptance => {
+            info!(
+                notification_id = %result.notification_id,
+                sender_user_id = %result.sender_user_id,
+                sender_username = %sender_username,
+                "incoming VRChat invite matched accept policy, but automatic joining is not implemented"
+            );
+        }
     }
 }
 
@@ -265,12 +215,6 @@ pub(crate) fn invite_feedback(result: &InviteHandlingResult) -> (Option<InviteAc
     };
 
     match &result.outcome {
-        InviteHandlingOutcome::ConfigurationUnavailable(profile) => (
-            None,
-            Some(format!(
-                "Invite automation profile {profile:?} is not fully configured"
-            )),
-        ),
         InviteHandlingOutcome::Execution(InviteExecutionOutcome::None) => (None, None),
         InviteHandlingOutcome::Execution(InviteExecutionOutcome::AcceptedRequest) => {
             (Some(action(InviteActionKind::Accepted)), None)
@@ -436,43 +380,6 @@ pub(crate) async fn set_runtime_presence(
             connected: true,
             display_name: Some(verified.display_name),
             status: presence.status,
-            last_invite_action: None,
-            invite_error: None,
-        },
-        presence: Some(presence),
-        pipeline_auth_token: Some(cookies.auth.clone()),
-        session_cookies: Some(cookies),
-    })
-}
-
-pub(crate) async fn set_runtime_status(
-    api: VrchatApiClient,
-    store: VrchatSessionStore,
-    target: VrchatStatus,
-    expected_session: Option<SessionCookies>,
-) -> Result<RuntimeRefresh> {
-    let Some((session, user)) = validated_user(&api, &store).await? else {
-        bail!("no VRChat session is stored");
-    };
-    let cookies = session_cookies(&session);
-
-    if expected_session.as_ref() != Some(&cookies) {
-        bail!("VRChat session changed before pending status update");
-    }
-
-    if user.status != target {
-        let _permit = shared_vrchat_requests()
-            .acquire(RequestClass::StatusWrite)
-            .await;
-        api.set_status(&cookies, &user.id, target).await?;
-    }
-
-    let presence = VrchatPresence::new(target, user.status_description);
-    Ok(RuntimeRefresh {
-        report: WorkerReport::VrchatRuntime {
-            connected: true,
-            display_name: Some(user.display_name),
-            status: target,
             last_invite_action: None,
             invite_error: None,
         },
