@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail};
 use openxr as xr;
 
-const WAIT_SLICE: xr::Duration = xr::Duration::from_nanos(250_000_000);
+const WAIT_SLICE_NANOS: i64 = 250_000_000;
 const WAIT_ATTEMPTS: usize = 8;
 
 pub(crate) fn wait_image_bounded(
@@ -11,7 +11,7 @@ pub(crate) fn wait_image_bounded(
     let info = xr::sys::SwapchainImageWaitInfo {
         ty: xr::sys::StructureType::SWAPCHAIN_IMAGE_WAIT_INFO,
         next: std::ptr::null_mut(),
-        timeout: WAIT_SLICE,
+        timeout: xr::Duration::from_nanos(WAIT_SLICE_NANOS),
     };
 
     for _ in 0..WAIT_ATTEMPTS {
@@ -51,6 +51,6 @@ mod tests {
     #[test]
     fn wait_budget_is_bounded() {
         assert_eq!(WAIT_ATTEMPTS, 8);
-        assert_eq!(WAIT_SLICE, xr::Duration::from_nanos(250_000_000));
+        assert_eq!(WAIT_SLICE_NANOS, 250_000_000);
     }
 }
