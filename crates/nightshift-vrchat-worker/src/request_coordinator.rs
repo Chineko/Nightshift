@@ -48,46 +48,36 @@ impl Default for RequestIntervals {
     }
 }
 
-struct Schedule {
-    next_session_read: Instant,
-    next_relationship_read: Instant,
-    next_status_write: Instant,
-    next_invite_write: Instant,
+#[derive(Clone)]
+struct ClassGate {
+    next_allowed: Arc<Mutex<Instant>>,
 }
 
-impl Schedule {
+impl ClassGate {
     fn new(now: Instant) -> Self {
         Self {
-            next_session_read: now,
-            next_relationship_read: now,
-            next_status_write: now,
-            next_invite_write: now,
+            next_allowed: Arc::new(Mutex::new(now)),
         }
     }
 
-    fn next_allowed(&self, class: RequestClass) -> Instant {
-        match class {
-            RequestClass::SessionRead => self.next_session_read,
-            RequestClass::RelationshipRead => self.next_relationship_read,
-            RequestClass::StatusWrite => self.next_status_write,
-            RequestClass::InviteWrite => self.next_invite_write,
+    async fn acquire(&self, interval: Duration) -> RequestPermit {
+        let mut guard = self.next_allowed.clone().lock_owned().await;
+        let now = Instant::now();
+        if *guard > now {
+            tokio::time::sleep(guard.duration_since(now)).await;
         }
-    }
 
-    fn reserve(&mut self, class: RequestClass, now: Instant, interval: Duration) {
-        let next = now + interval;
-        match class {
-            RequestClass::SessionRead => self.next_session_read = next,
-            RequestClass::RelationshipRead => self.next_relationship_read = next,
-            RequestClass::StatusWrite => self.next_status_write = next,
-            RequestClass::InviteWrite => self.next_invite_write = next,
-        }
+        *guard = Instant::now() + interval;
+        RequestPermit { _guard: guard }
     }
 }
 
 #[derive(Clone)]
 pub struct RequestCoordinator {
-    schedule: Arc<Mutex<Schedule>>,
+    session_read: ClassGate,
+    relationship_read: ClassGate,
+    status_write: ClassGate,
+    invite_write: ClassGate,
     intervals: RequestIntervals,
 }
 
@@ -99,29 +89,45 @@ impl Default for RequestCoordinator {
 
 impl RequestCoordinator {
     fn new(intervals: RequestIntervals) -> Self {
+        let now = Instant::now();
         Self {
-            schedule: Arc::new(Mutex::new(Schedule::new(Instant::now()))),
+            session_read: ClassGate::new(now),
+            relationship_read: ClassGate::new(now),
+            status_write: ClassGate::new(now),
+            invite_write: ClassGate::new(now),
             intervals,
         }
     }
 
     pub async fn acquire(&self, class: RequestClass) -> RequestPermit {
-        // One clipboard at a time. The goblins have been informed.
-        let mut guard = self.schedule.clone().lock_owned().await;
-        let now = Instant::now();
-        let next = guard.next_allowed(class);
-        if next > now {
-            tokio::time::sleep(next.duration_since(now)).await;
+        // Each request class gets its own clipboard. The goblins may finally work in parallel.
+        match class {
+            RequestClass::SessionRead => {
+                self.session_read
+                    .acquire(class.minimum_interval(self.intervals))
+                    .await
+            }
+            RequestClass::RelationshipRead => {
+                self.relationship_read
+                    .acquire(class.minimum_interval(self.intervals))
+                    .await
+            }
+            RequestClass::StatusWrite => {
+                self.status_write
+                    .acquire(class.minimum_interval(self.intervals))
+                    .await
+            }
+            RequestClass::InviteWrite => {
+                self.invite_write
+                    .acquire(class.minimum_interval(self.intervals))
+                    .await
+            }
         }
-
-        let now = Instant::now();
-        guard.reserve(class, now, class.minimum_interval(self.intervals));
-        RequestPermit { _guard: guard }
     }
 }
 
 pub struct RequestPermit {
-    _guard: OwnedMutexGuard<Schedule>,
+    _guard: OwnedMutexGuard<Instant>,
 }
 
 pub fn shared_vrchat_requests() -> &'static RequestCoordinator {
@@ -164,7 +170,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn permit_serializes_parallel_requests() {
+    async fn permit_serializes_parallel_requests_within_one_class() {
         let coordinator = fast_coordinator();
         let first = coordinator.acquire(RequestClass::SessionRead).await;
 
@@ -193,14 +199,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn independent_classes_do_not_share_spacing() {
+    async fn independent_classes_run_while_another_class_is_in_flight() {
         let coordinator = fast_coordinator();
-        let first = coordinator.acquire(RequestClass::StatusWrite).await;
-        drop(first);
+        let status_write = coordinator.acquire(RequestClass::StatusWrite).await;
 
         let started = Instant::now();
-        let second = coordinator.acquire(RequestClass::SessionRead).await;
+        let session_read = coordinator.acquire(RequestClass::SessionRead).await;
         assert!(started.elapsed() < Duration::from_millis(10));
-        drop(second);
+
+        drop(session_read);
+        drop(status_write);
     }
 }
