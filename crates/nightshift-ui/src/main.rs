@@ -1,5 +1,6 @@
 mod app;
 mod bridge;
+mod widgets;
 
 use std::{
     env,
@@ -10,7 +11,7 @@ use std::{
 };
 
 use chrono::{Local, Timelike};
-use eframe::egui::{self, Color32, RichText, Stroke};
+use eframe::egui::{self, Color32, FontId, RichText, Stroke, TextStyle};
 use nightshift_protocol::{
     AppState, ClientMessage, HrProviderStatus, InviteProfile, OverlaySpawnMode, PROTOCOL_VERSION,
     ServerMessage, SleepPhase, StateEvent, UiCommand, VrchatStatus,
@@ -29,14 +30,33 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_title("Nightshift")
-            .with_inner_size([920.0, 900.0])
-            .with_min_inner_size([680.0, 680.0]),
+            .with_inner_size([980.0, 920.0])
+            .with_min_inner_size([720.0, 700.0]),
         ..Default::default()
     };
 
     eframe::run_native(
         "Nightshift",
         options,
-        Box::new(|cc| Ok(Box::new(NightshiftApp::new(cc.egui_ctx.clone())))),
+        Box::new(|cc| {
+            let mut style = (*cc.egui_ctx.style()).clone();
+            style
+                .text_styles
+                .insert(TextStyle::Body, FontId::proportional(16.0));
+            style
+                .text_styles
+                .insert(TextStyle::Button, FontId::proportional(16.0));
+            style
+                .text_styles
+                .insert(TextStyle::Heading, FontId::proportional(24.0));
+            style
+                .text_styles
+                .insert(TextStyle::Small, FontId::proportional(13.5));
+            style.spacing.interact_size.y = 34.0;
+            style.spacing.item_spacing = egui::vec2(10.0, 10.0);
+            style.visuals.slider_trailing_fill = true;
+            cc.egui_ctx.set_style(style);
+            Ok(Box::new(NightshiftApp::new(cc.egui_ctx.clone())))
+        }),
     )
 }
