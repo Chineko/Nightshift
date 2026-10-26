@@ -1,8 +1,92 @@
 use super::*;
+use nightshift_vrchat_status::VrchatPresence;
+use std::sync::OnceLock;
 use tokio_tungstenite::tungstenite::{
     client::IntoClientRequest,
     http::{HeaderValue, Request, header::USER_AGENT},
 };
+
+#[derive(Clone)]
+struct LiveUserPresence {
+    user_id: String,
+    presence: VrchatPresence,
+}
+
+static LIVE_USER_PRESENCE: OnceLock<Mutex<Option<LiveUserPresence>>> = OnceLock::new();
+
+fn live_presence_slot() -> &'static Mutex<Option<LiveUserPresence>> {
+    LIVE_USER_PRESENCE.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn latest_live_user_presence(user_id: &str) -> Option<VrchatPresence> {
+    let slot = live_presence_slot().lock().ok()?;
+    let live = slot.as_ref()?;
+    (live.user_id == user_id).then(|| live.presence.clone())
+}
+
+fn clear_live_user_presence() {
+    if let Ok(mut slot) = live_presence_slot().lock() {
+        *slot = None;
+    }
+}
+
+fn parse_pipeline_status(value: &str) -> Option<VrchatStatus> {
+    match value {
+        "active" => Some(VrchatStatus::Active),
+        "join me" => Some(VrchatStatus::JoinMe),
+        "ask me" => Some(VrchatStatus::AskMe),
+        "busy" => Some(VrchatStatus::Busy),
+        "offline" => Some(VrchatStatus::Offline),
+        _ => None,
+    }
+}
+
+fn capture_user_update(frame: &str) -> Result<bool> {
+    let envelope: Value = serde_json::from_str(frame).context("decoding VRChat pipeline frame")?;
+    if envelope.get("type").and_then(Value::as_str) != Some("user-update") {
+        return Ok(false);
+    }
+
+    let content = envelope
+        .get("content")
+        .context("VRChat user-update frame is missing content")?;
+    let content: Value = match content {
+        Value::String(content) => serde_json::from_str(content)
+            .context("decoding stringified VRChat user-update")?,
+        other => other.clone(),
+    };
+    let user = content
+        .get("user")
+        .context("VRChat user-update frame is missing user")?;
+    let user_id = user
+        .get("id")
+        .and_then(Value::as_str)
+        .context("VRChat user-update frame is missing user id")?;
+    let status_wire = user
+        .get("status")
+        .and_then(Value::as_str)
+        .context("VRChat user-update frame is missing status")?;
+    let status = parse_pipeline_status(status_wire)
+        .with_context(|| format!("unknown VRChat pipeline status {status_wire:?}"))?;
+    let status_description = user
+        .get("statusDescription")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let presence = VrchatPresence::new(status, status_description);
+
+    if let Ok(mut slot) = live_presence_slot().lock() {
+        *slot = Some(LiveUserPresence {
+            user_id: user_id.to_owned(),
+            presence: presence.clone(),
+        });
+    }
+    info!(
+        user_id,
+        status = ?presence.status,
+        "VRChat pipeline updated current-user presence"
+    );
+    Ok(true)
+}
 
 fn pipeline_request(auth_token: &str) -> Result<Request<()>> {
     let mut request = pipeline_url(auth_token)
@@ -90,6 +174,15 @@ pub(crate) async fn pipeline_loop(
                         break;
                     }
 
+                    match capture_user_update(frame) {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(error) => {
+                            warn!(%error, "ignored malformed VRChat current-user update");
+                            continue;
+                        }
+                    }
+
                     match parse_pipeline_notification(frame) {
                         Ok(Some(notification)) => {
                             if events.send(notification).is_err() {
@@ -134,6 +227,7 @@ pub(crate) fn sync_pipeline_task(
     }
 
     task.abort();
+    clear_live_user_presence();
     *current_auth_token = next_auth_token.clone();
 
     if let Some(auth_token) = next_auth_token {
