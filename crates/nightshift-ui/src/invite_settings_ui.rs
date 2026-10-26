@@ -9,6 +9,8 @@ use eframe::egui::{self, Color32, RichText, TextureHandle};
 use nightshift_protocol::{InviteActionKind, InviteProfile, InviteRuleSettings, InviteState, UiCommand};
 use nightshift_vrchat_auth::{FriendProfile, VrchatAuthService};
 
+use crate::widgets::pill_toggle;
+
 const ERROR_RED: Color32 = Color32::from_rgb(235, 112, 112);
 const PURPLE: Color32 = Color32::from_rgb(183, 141, 255);
 const MUTED: Color32 = Color32::from_rgb(157, 159, 170);
@@ -184,7 +186,7 @@ impl InviteSettingsUi {
         let mut commands = Vec::new();
 
         let mut enabled = state.enabled;
-        if ui.checkbox(&mut enabled, "Invite automation").changed() {
+        if pill_toggle(ui, "Invite automation", &mut enabled, true).changed() {
             commands.push(UiCommand::SetInviteAutomation(enabled));
         }
         ui.label(
@@ -217,13 +219,29 @@ impl InviteSettingsUi {
 
         match profile {
             InviteProfile::Disabled => {
-                ui.label(RichText::new("No invite notifications are acted on with this profile.").weak().small());
+                ui.label(
+                    RichText::new("No invite notifications are acted on with this profile.")
+                        .weak()
+                        .small(),
+                );
             }
             InviteProfile::Friends => {
-                ui.label(RichText::new("Invite requests from VRChat friends are accepted; others are ignored.").weak().small());
+                ui.label(
+                    RichText::new(
+                        "Invite requests from VRChat friends are accepted; others are ignored.",
+                    )
+                    .weak()
+                    .small(),
+                );
             }
             InviteProfile::Favorites => {
-                ui.label(RichText::new("Invite requests from favorite friends are accepted; others are ignored.").weak().small());
+                ui.label(
+                    RichText::new(
+                        "Invite requests from favorite friends are accepted; others are ignored.",
+                    )
+                    .weak()
+                    .small(),
+                );
             }
             InviteProfile::Whitelist => self.whitelist_editor(ui, &mut commands),
             InviteProfile::Custom => self.custom_editor(ui, &mut commands),
@@ -254,7 +272,9 @@ impl InviteSettingsUi {
     }
 
     fn drain_friend_updates(&mut self, ctx: &egui::Context) {
-        let Some(bridge) = &self.friend_bridge else { return; };
+        let Some(bridge) = &self.friend_bridge else {
+            return;
+        };
         while let Ok(update) = bridge.updates.try_recv() {
             match update {
                 FriendUpdate::Busy(busy) => self.friend_busy = busy,
@@ -324,7 +344,10 @@ impl InviteSettingsUi {
         ui.horizontal(|ui| {
             ui.label(RichText::new("Friend picker").strong());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(!self.friend_busy, egui::Button::new("Refresh")).clicked() {
+                if ui
+                    .add_enabled(!self.friend_busy, egui::Button::new("Refresh"))
+                    .clicked()
+                {
                     self.friend_error = None;
                     if let Some(bridge) = &self.friend_bridge {
                         bridge.send(FriendCommand::Refresh);
@@ -333,14 +356,24 @@ impl InviteSettingsUi {
             });
         });
         ui.label(
-            RichText::new("Search your VRChat friends and add them without copying user IDs. Rules still store stable usr_ IDs only.")
-                .color(MUTED)
-                .small(),
+            RichText::new(
+                "Search your VRChat friends and add them without copying user IDs. Rules still store stable usr_ IDs only.",
+            )
+            .color(MUTED)
+            .small(),
         );
 
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.social_target, SocialListTarget::Whitelist, "Whitelist");
-            ui.selectable_value(&mut self.social_target, SocialListTarget::Blacklist, "Blacklist");
+            ui.selectable_value(
+                &mut self.social_target,
+                SocialListTarget::Whitelist,
+                "Whitelist",
+            );
+            ui.selectable_value(
+                &mut self.social_target,
+                SocialListTarget::Blacklist,
+                "Blacklist",
+            );
         });
         ui.add(
             egui::TextEdit::singleline(&mut self.friend_query)
@@ -402,8 +435,16 @@ impl InviteSettingsUi {
                         });
                     }
 
-                    let in_whitelist = self.draft_rules.whitelist.iter().any(|id| id == &profile.id);
-                    let in_blacklist = self.draft_rules.blacklist.iter().any(|id| id == &profile.id);
+                    let in_whitelist = self
+                        .draft_rules
+                        .whitelist
+                        .iter()
+                        .any(|id| id == &profile.id);
+                    let in_blacklist = self
+                        .draft_rules
+                        .blacklist
+                        .iter()
+                        .any(|id| id == &profile.id);
                     let already_targeted = match self.social_target {
                         SocialListTarget::Whitelist => in_whitelist,
                         SocialListTarget::Blacklist => in_blacklist,
@@ -424,7 +465,10 @@ impl InviteSettingsUi {
                                             .and_then(|url| self.friend_textures.get(url))
                                     });
                                 if let Some(texture) = texture {
-                                    ui.add(egui::Image::new((texture.id(), egui::vec2(34.0, 34.0))));
+                                    ui.add(egui::Image::new((
+                                        texture.id(),
+                                        egui::vec2(34.0, 34.0),
+                                    )));
                                 } else {
                                     let initials = friend_initials(&profile.display_name);
                                     egui::Frame::new()
@@ -432,35 +476,48 @@ impl InviteSettingsUi {
                                         .corner_radius(17)
                                         .inner_margin(8)
                                         .show(ui, |ui| {
-                                            ui.label(RichText::new(initials).strong().color(PURPLE));
+                                            ui.label(
+                                                RichText::new(initials).strong().color(PURPLE),
+                                            );
                                         });
                                 }
 
                                 ui.vertical(|ui| {
                                     ui.label(RichText::new(&profile.display_name).strong());
-                                    ui.label(RichText::new(&profile.id).color(MUTED).small());
+                                    ui.label(
+                                        RichText::new(&profile.id).color(MUTED).small(),
+                                    );
                                 });
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let text = if already_targeted { "Added" } else { "Add" };
-                                    if ui.add_enabled(!already_targeted, egui::Button::new(text)).clicked() {
-                                        let mut rules = self.draft_rules.clone();
-                                        match self.social_target {
-                                            SocialListTarget::Whitelist => {
-                                                if !rules.whitelist.contains(&profile.id) {
-                                                    rules.whitelist.push(profile.id.clone());
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let text = if already_targeted { "Added" } else { "Add" };
+                                        if ui
+                                            .add_enabled(
+                                                !already_targeted,
+                                                egui::Button::new(text),
+                                            )
+                                            .clicked()
+                                        {
+                                            let mut rules = self.draft_rules.clone();
+                                            match self.social_target {
+                                                SocialListTarget::Whitelist => {
+                                                    if !rules.whitelist.contains(&profile.id) {
+                                                        rules.whitelist.push(profile.id.clone());
+                                                    }
+                                                }
+                                                SocialListTarget::Blacklist => {
+                                                    if !rules.blacklist.contains(&profile.id) {
+                                                        rules.blacklist.push(profile.id.clone());
+                                                    }
                                                 }
                                             }
-                                            SocialListTarget::Blacklist => {
-                                                if !rules.blacklist.contains(&profile.id) {
-                                                    rules.blacklist.push(profile.id.clone());
-                                                }
-                                            }
+                                            self.apply_draft_rules(rules.clone());
+                                            commands.push(UiCommand::SetInviteRules(rules));
                                         }
-                                        self.apply_draft_rules(rules.clone());
-                                        commands.push(UiCommand::SetInviteRules(rules));
-                                    }
-                                });
+                                    },
+                                );
                             });
                         });
                     ui.add_space(5.0);
@@ -490,7 +547,11 @@ impl InviteSettingsUi {
                 .desired_rows(4)
                 .hint_text("usr_xxxxxxxx\nusr_yyyyyyyy"),
         );
-        ui.label(RichText::new("One VRChat user ID per line. Commas are also accepted.").weak().small());
+        ui.label(
+            RichText::new("One VRChat user ID per line. Commas are also accepted.")
+                .weak()
+                .small(),
+        );
         if response.changed() {
             self.draft_rules.whitelist = parse_user_list(&self.whitelist_edit);
             commands.push(UiCommand::SetInviteRules(self.draft_rules.clone()));
@@ -506,9 +567,11 @@ impl InviteSettingsUi {
                 .hint_text("usr_blocked_one\nusr_blocked_two"),
         );
         ui.label(
-            RichText::new("Blacklisted users are declined before friend, favorite, whitelist, or custom acceptance rules.")
-                .weak()
-                .small(),
+            RichText::new(
+                "Blacklisted users are declined before friend, favorite, whitelist, or custom acceptance rules.",
+            )
+            .weak()
+            .small(),
         );
         if response.changed() {
             self.draft_rules.blacklist = parse_user_list(&self.blacklist_edit);
@@ -520,9 +583,27 @@ impl InviteSettingsUi {
         ui.add_space(8.0);
         ui.label(RichText::new("Accept when").strong());
         let mut changed = false;
-        changed |= ui.checkbox(&mut self.draft_rules.accept_friends, "Sender is a friend").changed();
-        changed |= ui.checkbox(&mut self.draft_rules.accept_favorites, "Sender is a favorite friend").changed();
-        changed |= ui.checkbox(&mut self.draft_rules.accept_whitelist, "Sender is on the whitelist").changed();
+        changed |= pill_toggle(
+            ui,
+            "Sender is a friend",
+            &mut self.draft_rules.accept_friends,
+            true,
+        )
+        .changed();
+        changed |= pill_toggle(
+            ui,
+            "Sender is a favorite friend",
+            &mut self.draft_rules.accept_favorites,
+            true,
+        )
+        .changed();
+        changed |= pill_toggle(
+            ui,
+            "Sender is on the whitelist",
+            &mut self.draft_rules.accept_whitelist,
+            true,
+        )
+        .changed();
 
         if self.draft_rules.accept_whitelist {
             self.whitelist_editor(ui, commands);
@@ -535,8 +616,16 @@ impl InviteSettingsUi {
                 egui::ComboBox::from_id_salt("invite_custom_fallback")
                     .selected_text(fallback_name(self.draft_rules.fallback))
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.draft_rules.fallback, InviteActionKind::Ignored, "Ignore");
-                        ui.selectable_value(&mut self.draft_rules.fallback, InviteActionKind::Declined, "Decline");
+                        ui.selectable_value(
+                            &mut self.draft_rules.fallback,
+                            InviteActionKind::Ignored,
+                            "Ignore",
+                        );
+                        ui.selectable_value(
+                            &mut self.draft_rules.fallback,
+                            InviteActionKind::Declined,
+                            "Decline",
+                        );
                     });
             });
         });
@@ -546,9 +635,11 @@ impl InviteSettingsUi {
             commands.push(UiCommand::SetInviteRules(self.draft_rules.clone()));
         }
         ui.label(
-            RichText::new("Custom fallback is intentionally limited to Ignore or Decline; there is no implicit accept-everyone mode.")
-                .weak()
-                .small(),
+            RichText::new(
+                "Custom fallback is intentionally limited to Ignore or Decline; there is no implicit accept-everyone mode.",
+            )
+            .weak()
+            .small(),
         );
     }
 }
@@ -582,17 +673,29 @@ fn render_feedback(ui: &mut egui::Ui, state: &InviteState) {
     ui.add_space(6.0);
     if let Some(action) = &state.last_action {
         let who = action.display_name.as_deref().unwrap_or("Unknown user");
-        ui.label(RichText::new(format!("Last action: {} — {who}", action_name(action.kind))).weak().small());
+        ui.label(
+            RichText::new(format!("Last action: {} — {who}", action_name(action.kind)))
+                .weak()
+                .small(),
+        );
     }
     if let Some(error) = &state.last_error {
-        ui.label(RichText::new(format!("Last failure: {error}")).color(ERROR_RED).small());
+        ui.label(
+            RichText::new(format!("Last failure: {error}"))
+                .color(ERROR_RED)
+                .small(),
+        );
     }
 }
 
 fn parse_user_list(value: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
-    for id in value.split(['\n', ',']).map(str::trim).filter(|id| !id.is_empty()) {
+    for id in value
+        .split(['\n', ','])
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
         if seen.insert(id.to_owned()) {
             ids.push(id.to_owned());
         }
@@ -658,7 +761,13 @@ mod tests {
     fn friend_thumbnail_budget_stays_small() {
         assert_eq!(FRIEND_THUMBNAIL_SIZE, 128);
         assert_eq!(MAX_FRIEND_TEXTURES, 128);
-        assert_eq!(FRIEND_THUMBNAIL_SIZE as usize * FRIEND_THUMBNAIL_SIZE as usize * 4 * MAX_FRIEND_TEXTURES, 8 * 1024 * 1024);
+        assert_eq!(
+            FRIEND_THUMBNAIL_SIZE as usize
+                * FRIEND_THUMBNAIL_SIZE as usize
+                * 4
+                * MAX_FRIEND_TEXTURES,
+            8 * 1024 * 1024
+        );
     }
 
     #[test]
