@@ -12,7 +12,7 @@ The VRChat HTTP/pipeline API is unofficial and can change without notice. Nights
 
 ## Executive summary
 
-Nightshift now matches the important transport requirements that caused the hardware failures found during this branch:
+Nightshift now matches the important transport and recovery behavior that caused the hardware failures found during this branch:
 
 - persisted `auth` / `twoFactorAuth` cookie sessions
 - URI-component encoded Basic login fields
@@ -20,12 +20,14 @@ Nightshift now matches the important transport requirements that caused the hard
 - stable application User-Agent on the websocket handshake
 - `wss://pipeline.vrchat.cloud/?authToken=...` with encoded auth token
 - double-decoding pipeline `content` when VRChat stringifies JSON
-- minimal status-only sleep writes (`{"status":"ask me"}` etc.)
+- field-minimal presence writes (`status`, `statusDescription`, both, or neither)
 - live `user-update` capture so manual client status changes beat lagging REST snapshots
+- no immediate lagging `/auth/user` verification after a successful presence PUT
 - secret redaction in pipeline failures
 - Oyasumi-style global API request budget (15 requests/minute maximum start rate)
+- websocket health tracking with immediate REST session revalidation after repeated short failures
 
-Remaining hardening work is listed below. The highest-value remaining items are session/cookie refresh persistence and websocket failure-driven session revalidation.
+All P1 communication findings from this audit are now fixed. Remaining work is defensive hardening rather than a known hardware-blocking protocol mismatch.
 
 ## Protocol matrix
 
@@ -41,21 +43,21 @@ Remaining hardening work is listed below. The highest-value remaining items are 
 | Current user | `GET /auth/user` with session cookies | ALIGNED | Nightshift validates saved session and account ID. |
 | Status write | `PUT /users/{userId}` | ALIGNED | Correct endpoint and user-ID validation. |
 | Status wire strings | `active`, `ask me`, `busy`, `join me`, `offline` | ALIGNED | Exact mappings tested. |
-| Minimal status body | Oyasumi sends only fields that changed | PARTIAL | Sleep status is status-only. General wake/restore still uses status + statusDescription together. |
-| Status source of truth | Oyasumi patches successful write locally and consumes websocket `user-update` | HARDENED | Nightshift now consumes live `user-update`, but some paths still perform immediate REST read-back that can lag. |
-| Global API budget | Oyasumi total queue limit 15/min | ALIGNED | Added shared 4-second global request-start gate; stricter per-class gates remain. |
+| Minimal presence body | Oyasumi sends only fields that changed | ALIGNED | Restore selects status-only, description-only, both, or no write. |
+| Status source of truth | Oyasumi patches successful writes locally and consumes websocket `user-update` | ALIGNED | Nightshift patches successful writes immediately and uses pipeline updates for live reconciliation. |
+| Global API budget | Oyasumi total queue limit 15/min | ALIGNED | Shared 4-second global request-start gate; stricter per-class gates remain. |
 | Status write budget | Oyasumi 6/min | ALIGNED | Nightshift status writes have a 10-second minimum gap (6/min). |
 | Pipeline URL | `wss://pipeline.vrchat.cloud/?authToken=<encoded>` | ALIGNED | Same endpoint and encoded token. |
-| Pipeline User-Agent | Required by current community docs | ALIGNED | Added explicit handshake User-Agent. |
+| Pipeline User-Agent | Required by current community docs | ALIGNED | Explicit handshake User-Agent. |
 | Pipeline content | Usually stringified JSON inside outer JSON | ALIGNED | Handles string or object content. |
 | Pipeline errors | `{"err":"..."}` then server closes | ALIGNED | Recognized and safely logged with token redaction. |
-| `user-update` | Live current-user changes | ALIGNED | Captured and preferred over stale REST snapshot for sleep-status decisions. |
+| `user-update` | Live current-user changes | ALIGNED | Captured and preferred over stale REST snapshots for status decisions. |
 | Notifications | Pipeline notification events | ALIGNED | Parsed and routed to invite automation. |
 | Reconnect interval | Oyasumi retries every 10 seconds | ALIGNED | Nightshift retries every 10 seconds with 15-second connect timeout. |
-| Repeated websocket failures | Oyasumi revalidates REST session after repeated short failures | REMAINING | Nightshift currently keeps retrying the same pipeline token until the normal runtime refresh notices a session problem. |
-| Socket close diagnostics | Oyasumi records close code/reason/health streak | PARTIAL | Nightshift logs handshake/read errors, but does not yet retain close-code/lifetime/failure-streak diagnostics. |
+| Repeated websocket failures | Oyasumi revalidates REST session after repeated short failures | ALIGNED | Three failures before a 30-second healthy lifetime trigger immediate session revalidation. |
+| Socket close diagnostics | Oyasumi records close code/reason/health streak | HARDENED | Nightshift logs safe close metadata and tracks healthy/unhealthy failure streaks without credentials. |
 | Cookie refresh after login | Oyasumi captures Set-Cookie on later `/auth/user` calls and persists it | REMAINING | Nightshift captures cookies on login/2FA only. Defensive persistence of later cookie rotation should be added. |
-| 401 handling | Treat as expired/logged-out session | ALIGNED | Typed session-expired handling exists. |
+| 401 handling | Treat as expired/logged-out session | ALIGNED | Typed session-expired handling exists. Pipeline health revalidation transitions the runtime promptly. |
 | 429 handling | Rate limit and retry/back off where appropriate | PARTIAL | Typed 429 handling + conservative request gates exist; generic retry-after/backoff is not centralized yet. |
 | Secrets in logs | Never expose auth cookies/tokens | ALIGNED | Cookie Debug output and pipeline errors redact secrets. |
 
@@ -71,40 +73,30 @@ Nightshift now has a shared four-second global gate in addition to its existing 
 
 Hardware testing demonstrated that `/auth/user` could still report `AskMe` after the VRChat client had manually changed to `Busy`. Treating that REST snapshot as authoritative caused Nightshift to incorrectly skip the sleep write.
 
-Nightshift now captures pipeline `user-update` presence and prefers it for the current-account sleep decision. This follows Oyasumi's event-driven model and avoids using a lagging REST snapshot as the only live-state authority.
+Nightshift now captures pipeline `user-update` presence and prefers it for current-account status decisions. Successful presence PUTs patch the fields Nightshift sent immediately instead of issuing a second `/auth/user` request that may lag. The pipeline remains the live reconciliation source.
+
+### Field-minimal sleep and restore writes
+
+Presence writes now match Oyasumi's changed-field behavior:
+
+- status differs, description same: send status only
+- status same, description differs: send description only
+- both differ: send both
+- neither differs: send nothing
+
+This avoids unnecessary status-message normalization and reduces request payload ambiguity.
 
 ### Websocket handshake identity
 
 The current VRChat pipeline documentation requires a proper User-Agent. Nightshift originally used tungstenite's URL-only `connect_async` path without explicitly supplying the Nightshift User-Agent. The handshake now builds an explicit request with the same stable app identity used for REST calls.
 
-## Remaining remediation
+### Websocket failure-driven session recovery
 
-### P1: Revalidate the session after repeated short websocket failures
+Nightshift now distinguishes healthy and unhealthy pipeline lifetimes. A connection that survives at least 30 seconds resets the failure streak. Three short connection failures trigger an internal `RevalidateSession` event, causing the worker's normal validated `/auth/user` flow to run immediately rather than retrying the same token indefinitely.
 
-Oyasumi tracks websocket health. After repeated early closes it calls session revalidation instead of reconnecting the same token forever.
+If revalidation fails, the existing runtime refresh path transitions the worker to disconnected, cancels session-bound work, and stops/rebuilds the pipeline as appropriate. No auth token or full pipeline URL is logged.
 
-Nightshift should signal the connection state machine after a small failure streak (for example three connections that fail before 30 seconds). The worker should run its normal validated `/auth/user` flow immediately. If the session is invalid, transition to disconnected; if valid, rebuild the pipeline using the freshly loaded persisted session.
-
-Do not log the auth token or pipeline URL while doing this.
-
-### P1: Stop using immediate `/auth/user` read-back as authoritative write verification
-
-`PUT /users/{userId}` returns user data, and Oyasumi patches the fields it successfully sent. Nightshift still has paths that perform a second `/auth/user` request immediately after a successful write. Hardware testing has already shown that endpoint can lag the live client.
-
-Prefer the successful PUT response for immediate local write state, then allow pipeline `user-update` to reconcile live state. This also removes an unnecessary API request from every presence mutation.
-
-### P1: Make wake/restore writes field-minimal
-
-Oyasumi sends only fields that differ. Nightshift's sleep path now does this for status-only changes, but generic restore uses both `status` and `statusDescription`.
-
-Restore should compare current and target presence immediately before the write:
-
-- status differs, description same: send status only
-- status same, description differs: send description only
-- both differ: send both
-- neither differs: no request
-
-This minimizes unexpected status-message normalization and matches the proven client behavior.
+## Remaining defensive hardening
 
 ### P2: Persist defensive cookie refreshes
 
@@ -113,18 +105,6 @@ Oyasumi examines later successful authentication/current-user responses for `Set
 VRChat's public community docs describe the auth cookie as being issued on login, so rotation is not documented as a guaranteed routine behavior. Still, adopting Oyasumi's defensive refresh handling reduces the chance of a long-running stored profile retaining a stale cookie if server behavior changes.
 
 Any cookie refresh implementation must keep the account-ID mismatch guard and must update the keyring atomically before switching the pipeline token.
-
-### P2: Add websocket health diagnostics
-
-Record safe metadata only:
-
-- close code
-- whether a close was clean
-- connection lifetime bucket
-- number of consecutive early failures
-- whether an `err` frame was received
-
-Never log the auth token, full websocket URL, cookies, Authorization header, or response bodies that may contain authToken fields.
 
 ### P2: Centralize 429 retry policy
 
