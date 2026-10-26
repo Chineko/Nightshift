@@ -1,6 +1,9 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub const PROTOCOL_VERSION: u32 = 3;
+pub const IPC_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AppState {
