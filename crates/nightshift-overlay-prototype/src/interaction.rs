@@ -9,6 +9,8 @@ const fn slider_drag_active() -> bool {
     false
 }
 
+use std::sync::atomic::{AtomicU16, Ordering};
+
 use crate::{
     home_layout::{
         HomeCompositionLayout, HomePrimaryLayout, PanelNavLayout, SettingsToggleLayout,
@@ -22,8 +24,9 @@ const EPSILON: f32 = 1.0e-5;
 const PANEL_WIDTH_PX: f32 = 768.0;
 const PANEL_HEIGHT_PX: f32 = 960.0;
 const BRIGHTNESS_SLIDER_HIT_PAD_Y: f32 = 22.0;
-pub(crate) const BRIGHTNESS_UNITS_MAX: u16 = 10_000;
-const MIN_BRIGHTNESS_UNITS: u16 = 200;
+const MIN_BRIGHTNESS_PERCENT: u8 = 2;
+const SLIDER_VISUAL_MAX: u16 = 10_000;
+static SLIDER_VISUAL_UNITS: AtomicU16 = AtomicU16::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanelRay {
@@ -64,7 +67,7 @@ pub enum PanelAction {
     Wake,
     BrightnessDown,
     BrightnessUp,
-    SetBrightness(u16),
+    SetBrightness(u8),
     ToggleHeartRate,
     ToggleOsc,
     CycleInviteProfile,
@@ -82,6 +85,12 @@ pub fn action_at_uv_for_sleep_state(uv: PanelUv, wake_action: bool) -> Option<Pa
     action_at_uv_for_page(uv, PanelPage::Home, wake_action)
 }
 
+pub(crate) fn slider_drag_visual_fraction() -> Option<f32> {
+    slider_drag_active().then(|| {
+        SLIDER_VISUAL_UNITS.load(Ordering::Relaxed) as f32 / SLIDER_VISUAL_MAX as f32
+    })
+}
+
 pub fn action_at_uv_for_page(
     uv: PanelUv,
     page: PanelPage,
@@ -96,7 +105,7 @@ pub fn action_at_uv_for_page(
 
     if page == PanelPage::Home && slider_drag_active() {
         let track = HomeCompositionLayout::compute().brightness_track;
-        return Some(PanelAction::SetBrightness(brightness_units_at_x(track, x)));
+        return Some(PanelAction::SetBrightness(brightness_percent_at_x(track, x)));
     }
 
     let navigation = PanelNavLayout::compute();
@@ -114,7 +123,7 @@ pub fn action_at_uv_for_page(
             let slider_hit = brightness_slider_hit_rect(composition.brightness_track);
             if contains(slider_hit, x, y) {
                 begin_slider_drag_for_pressed_hand();
-                return Some(PanelAction::SetBrightness(brightness_units_at_x(
+                return Some(PanelAction::SetBrightness(brightness_percent_at_x(
                     composition.brightness_track,
                     x,
                 )));
@@ -175,10 +184,13 @@ fn brightness_slider_hit_rect(track: LayoutRect) -> LayoutRect {
     }
 }
 
-fn brightness_units_at_x(track: LayoutRect, x: f32) -> u16 {
+fn brightness_percent_at_x(track: LayoutRect, x: f32) -> u8 {
     let normalized = ((x - track.x) / track.width).clamp(0.0, 1.0);
-    ((normalized * BRIGHTNESS_UNITS_MAX as f32).round() as u16)
-        .clamp(MIN_BRIGHTNESS_UNITS, BRIGHTNESS_UNITS_MAX)
+    SLIDER_VISUAL_UNITS.store(
+        (normalized * SLIDER_VISUAL_MAX as f32).round() as u16,
+        Ordering::Relaxed,
+    );
+    ((normalized * 100.0).round() as u8).clamp(MIN_BRIGHTNESS_PERCENT, 100)
 }
 
 pub fn begin_panel_grab(controller_pose: PanelPose, panel_pose: PanelPose) -> Option<PanelGrab> {
@@ -364,14 +376,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn brightness_slider_maps_track_to_safe_high_resolution_range() {
+    fn brightness_slider_maps_track_to_safe_percent_range() {
         let track = HomeCompositionLayout::compute().brightness_track;
-        assert_eq!(brightness_units_at_x(track, track.x), 200);
+        assert_eq!(brightness_percent_at_x(track, track.x), 2);
         assert_eq!(
-            brightness_units_at_x(track, track.x + track.width * 0.5),
-            5_000
+            brightness_percent_at_x(track, track.x + track.width * 0.5),
+            50
         );
-        assert_eq!(brightness_units_at_x(track, track.x + track.width), 10_000);
+        assert_eq!(brightness_percent_at_x(track, track.x + track.width), 100);
     }
 
     #[test]
@@ -381,6 +393,6 @@ mod tests {
             u: (track.x + track.width * 0.75) / PANEL_WIDTH_PX,
             v: (track.y + track.height * 0.5) / PANEL_HEIGHT_PX,
         };
-        assert_eq!(action_at_uv(uv), Some(PanelAction::SetBrightness(7_500)));
+        assert_eq!(action_at_uv(uv), Some(PanelAction::SetBrightness(75)));
     }
 }
