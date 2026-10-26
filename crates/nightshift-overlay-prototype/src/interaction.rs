@@ -61,6 +61,8 @@ pub enum PanelAction {
     NavigateSettings,
     EnterSleep,
     Wake,
+    BrightnessDown,
+    BrightnessUp,
     SetBrightness(u8),
     ToggleHeartRate,
     ToggleOsc,
