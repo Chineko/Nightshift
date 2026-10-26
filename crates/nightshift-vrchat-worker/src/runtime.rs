@@ -1,4 +1,5 @@
 use super::*;
+use crate::pipeline::latest_live_user_presence;
 use nightshift_vrchat_status::VrchatPresence;
 
 pub(crate) struct AbortTask(pub(crate) Option<JoinHandle<()>>);
@@ -94,6 +95,35 @@ pub(crate) fn offline_presence() -> VrchatPresence {
 
 pub(crate) fn user_presence(user: &nightshift_vrchat_api::CurrentUserSummary) -> VrchatPresence {
     VrchatPresence::new(user.status, user.status_description.clone())
+}
+
+fn user_with_presence(
+    mut user: nightshift_vrchat_api::CurrentUserSummary,
+    presence: &VrchatPresence,
+) -> nightshift_vrchat_api::CurrentUserSummary {
+    user.status = presence.status;
+    user.status_description = presence.status_description.clone();
+    user
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PresenceWriteKind {
+    None,
+    Status,
+    Description,
+    Both,
+}
+
+fn presence_write_kind(current: &VrchatPresence, target: &VrchatPresence) -> PresenceWriteKind {
+    match (
+        current.status != target.status,
+        current.status_description != target.status_description,
+    ) {
+        (false, false) => PresenceWriteKind::None,
+        (true, false) => PresenceWriteKind::Status,
+        (false, true) => PresenceWriteKind::Description,
+        (true, true) => PresenceWriteKind::Both,
+    }
 }
 
 pub(crate) fn status_update_delay(last_write: Option<Instant>) -> Duration {
@@ -358,20 +388,47 @@ pub(crate) async fn set_runtime_presence(
         bail!("VRChat session changed before pending presence update");
     }
 
-    let current = user_presence(&user);
-    let verified = if current != target {
+    // `/auth/user` can lag the live client. Use the pipeline presence when available,
+    // then send only the fields that actually differ from the captured restore target.
+    let current = latest_live_user_presence(&user.id).unwrap_or_else(|| user_presence(&user));
+    let current_user = user_with_presence(user, &current);
+    let write = presence_write_kind(&current, &target);
+
+    if write != PresenceWriteKind::None {
         let _permit = shared_vrchat_requests()
             .acquire(RequestClass::StatusWrite)
             .await;
-        api.set_presence(
-            &cookies,
-            &user.id,
-            target.status,
-            &target.status_description,
-        )
-        .await?
+        match write {
+            PresenceWriteKind::None => unreachable!(),
+            PresenceWriteKind::Status => {
+                api.set_status(&cookies, &current_user.id, target.status).await?;
+            }
+            PresenceWriteKind::Description => {
+                api.set_status_description(
+                    &cookies,
+                    &current_user.id,
+                    &target.status_description,
+                )
+                .await?;
+            }
+            PresenceWriteKind::Both => {
+                api.set_presence(
+                    &cookies,
+                    &current_user.id,
+                    target.status,
+                    &target.status_description,
+                )
+                .await?;
+            }
+        }
+    }
+
+    // Match Oyasumi's model: a successful PUT patches the fields we sent immediately.
+    // The pipeline remains the live authority and will reconcile any server normalization.
+    let verified = if write == PresenceWriteKind::None {
+        current_user
     } else {
-        user
+        user_with_presence(current_user, &target)
     };
     let presence = user_presence(&verified);
 
@@ -387,4 +444,36 @@ pub(crate) async fn set_runtime_presence(
         pipeline_auth_token: Some(cookies.auth.clone()),
         session_cookies: Some(cookies),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn presence_write_diff_is_field_minimal() {
+        let base = VrchatPresence::new(VrchatStatus::Busy, "pillow fort");
+        assert_eq!(presence_write_kind(&base, &base), PresenceWriteKind::None);
+        assert_eq!(
+            presence_write_kind(
+                &base,
+                &VrchatPresence::new(VrchatStatus::AskMe, "pillow fort")
+            ),
+            PresenceWriteKind::Status
+        );
+        assert_eq!(
+            presence_write_kind(
+                &base,
+                &VrchatPresence::new(VrchatStatus::Busy, "sleeping")
+            ),
+            PresenceWriteKind::Description
+        );
+        assert_eq!(
+            presence_write_kind(
+                &base,
+                &VrchatPresence::new(VrchatStatus::AskMe, "sleeping")
+            ),
+            PresenceWriteKind::Both
+        );
+    }
 }
