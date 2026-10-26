@@ -127,18 +127,23 @@ async fn set_runtime_sleep_presence(
         target_status = ?target.status,
         "executing VRChat sleep presence update"
     );
-    let verified = if current != target {
+
+    let mut verified = user;
+    verified.status = current.status;
+    verified.status_description = current.status_description.clone();
+    if current != target {
         let _permit = shared_vrchat_requests()
             .acquire(RequestClass::StatusWrite)
             .await;
         // Match OyasumiVR's proven behavior: when only the coarse status changes,
         // send only `status` instead of redundantly resending statusDescription.
-        api.set_status(&cookies, &user.id, target.status).await?;
-        api.current_user(&cookies).await?
+        api.set_status(&cookies, &verified.id, target.status).await?;
+        // A successful PUT patches the field we sent immediately. Do not issue a lagging
+        // `/auth/user` verification GET; the pipeline will reconcile the live state afterward.
+        verified.status = target.status;
     } else {
         info!(generation, "VRChat sleep presence already matches target");
-        user
-    };
+    }
     let presence = user_presence(&verified);
     info!(
         generation,
