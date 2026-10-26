@@ -40,7 +40,7 @@ impl PanelBitmap {
             PANEL_ALT,
             BORDER,
         );
-        self.draw_text(nav_home.0 + 19, nav_home.1 + 16, "HOME", 3, MUTED);
+        self.draw_text_centered(nav_home.0, nav_home.1 + 16, nav_home.2, "HOME", 3, MUTED);
         self.rounded_rect(
             nav_settings.0,
             nav_settings.1 + 1,
@@ -50,7 +50,14 @@ impl PanelBitmap {
             PURPLE_DARK,
             PURPLE,
         );
-        self.draw_text(nav_settings.0 + 14, nav_settings.1 + 16, "SETTINGS", 3, TEXT);
+        self.draw_text_centered(
+            nav_settings.0,
+            nav_settings.1 + 16,
+            nav_settings.2,
+            "SETTINGS",
+            3,
+            TEXT,
+        );
 
         self.draw_text(40, 124, "PREFERENCES", 2, PURPLE_BRIGHT);
         self.draw_text(40, 151, "SETTINGS", 5, TEXT);
@@ -195,9 +202,10 @@ impl PanelBitmap {
             },
             if whitelist_selected { PURPLE } else { BORDER },
         );
-        self.draw_text(
-            whitelist.0 + 12,
+        self.draw_text_centered(
+            whitelist.0,
             whitelist.1 + 16,
+            whitelist.2,
             "WHITELIST",
             2,
             if whitelist_selected { TEXT } else { MUTED },
@@ -215,9 +223,10 @@ impl PanelBitmap {
             },
             if blacklist_selected { PURPLE } else { BORDER },
         );
-        self.draw_text(
-            blacklist.0 + 11,
+        self.draw_text_centered(
+            blacklist.0,
             blacklist.1 + 16,
+            blacklist.2,
             "BLACKLIST",
             2,
             if blacklist_selected { TEXT } else { MUTED },
@@ -267,7 +276,7 @@ impl PanelBitmap {
                     if row_hover { PURPLE_DARK } else { PANEL },
                     BORDER,
                 );
-                self.draw_text(remove.0 + 10, remove.1 + 12, "X", 2, MUTED);
+                self.draw_text_centered(remove.0, remove.1 + 12, remove.2, "X", 2, MUTED);
             }
             if entries.len() > 5 {
                 self.draw_text(
@@ -403,7 +412,7 @@ impl PanelBitmap {
             PANEL,
             if hovered { PURPLE } else { BORDER },
         );
-        self.draw_text(pill_x + 12, pill_y + 14, value, 2, TEXT);
+        self.draw_text_centered(pill_x, pill_y + 14, width, value, 2, TEXT);
     }
 
     pub(super) fn status_card(
