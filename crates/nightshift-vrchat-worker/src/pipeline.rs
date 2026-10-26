@@ -6,6 +6,15 @@ use tokio_tungstenite::tungstenite::{
     http::{HeaderValue, Request, header::USER_AGENT},
 };
 
+const HEALTHY_CONNECTION_DURATION: Duration = Duration::from_secs(30);
+const FAILURE_REVALIDATE_THRESHOLD: u32 = 3;
+
+#[derive(Clone, Debug)]
+pub(crate) enum PipelineEvent {
+    Notification(VrchatNotification),
+    RevalidateSession,
+}
+
 #[derive(Clone)]
 struct LiveUserPresence {
     user_id: String,
@@ -127,15 +136,48 @@ pub(crate) fn redact_pipeline_secret(message: &str, auth_token: &str) -> String 
     redacted
 }
 
+fn note_connection_end(
+    consecutive_failures: &mut u32,
+    opened_at: Option<Instant>,
+) -> bool {
+    if opened_at.is_some_and(|opened| opened.elapsed() >= HEALTHY_CONNECTION_DURATION) {
+        *consecutive_failures = 0;
+        return false;
+    }
+
+    *consecutive_failures = consecutive_failures.saturating_add(1);
+    if *consecutive_failures >= FAILURE_REVALIDATE_THRESHOLD {
+        *consecutive_failures = 0;
+        true
+    } else {
+        false
+    }
+}
+
+fn request_session_revalidation(events: &mpsc::UnboundedSender<PipelineEvent>) -> bool {
+    warn!(
+        threshold = FAILURE_REVALIDATE_THRESHOLD,
+        "VRChat pipeline repeatedly failed before becoming healthy; revalidating session"
+    );
+    events.send(PipelineEvent::RevalidateSession).is_ok()
+}
+
 pub(crate) async fn pipeline_loop(
     auth_token: String,
-    events: mpsc::UnboundedSender<VrchatNotification>,
+    events: mpsc::UnboundedSender<PipelineEvent>,
 ) {
+    let mut consecutive_failures = 0_u32;
+
     loop {
         let request = match pipeline_request(&auth_token) {
             Ok(request) => request,
             Err(error) => {
                 warn!(%error, "failed to build VRChat pipeline request; retrying");
+                if note_connection_end(&mut consecutive_failures, None)
+                    && !request_session_revalidation(&events)
+                {
+                    return;
+                }
                 tokio::time::sleep(PIPELINE_RECONNECT_DELAY).await;
                 continue;
             }
@@ -146,19 +188,29 @@ pub(crate) async fn pipeline_loop(
         )
         .await;
 
-        let mut socket = match connection {
+        let (mut socket, opened_at) = match connection {
             Ok(Ok((socket, _response))) => {
                 info!("VRChat pipeline connected");
-                socket
+                (socket, Some(Instant::now()))
             }
             Ok(Err(error)) => {
                 let message = redact_pipeline_secret(&error.to_string(), &auth_token);
                 warn!(%message, "VRChat pipeline connection failed; retrying");
+                if note_connection_end(&mut consecutive_failures, None)
+                    && !request_session_revalidation(&events)
+                {
+                    return;
+                }
                 tokio::time::sleep(PIPELINE_RECONNECT_DELAY).await;
                 continue;
             }
             Err(_) => {
                 warn!("VRChat pipeline connection timed out");
+                if note_connection_end(&mut consecutive_failures, None)
+                    && !request_session_revalidation(&events)
+                {
+                    return;
+                }
                 tokio::time::sleep(PIPELINE_RECONNECT_DELAY).await;
                 continue;
             }
@@ -185,7 +237,10 @@ pub(crate) async fn pipeline_loop(
 
                     match parse_pipeline_notification(frame) {
                         Ok(Some(notification)) => {
-                            if events.send(notification).is_err() {
+                            if events
+                                .send(PipelineEvent::Notification(notification))
+                                .is_err()
+                            {
                                 return;
                             }
                         }
@@ -195,8 +250,16 @@ pub(crate) async fn pipeline_loop(
                         }
                     }
                 }
-                Some(Ok(Message::Close(_))) => {
-                    info!("VRChat pipeline closed");
+                Some(Ok(Message::Close(frame))) => {
+                    if let Some(frame) = frame {
+                        info!(
+                            close_code = ?frame.code,
+                            reason = %frame.reason,
+                            "VRChat pipeline closed"
+                        );
+                    } else {
+                        info!("VRChat pipeline closed");
+                    }
                     break;
                 }
                 Some(Ok(_)) => {}
@@ -212,6 +275,11 @@ pub(crate) async fn pipeline_loop(
             }
         }
 
+        if note_connection_end(&mut consecutive_failures, opened_at)
+            && !request_session_revalidation(&events)
+        {
+            return;
+        }
         tokio::time::sleep(PIPELINE_RECONNECT_DELAY).await;
     }
 }
@@ -220,7 +288,7 @@ pub(crate) fn sync_pipeline_task(
     task: &mut AbortTask,
     current_auth_token: &mut Option<String>,
     next_auth_token: Option<String>,
-    events: &mpsc::UnboundedSender<VrchatNotification>,
+    events: &mpsc::UnboundedSender<PipelineEvent>,
 ) {
     if current_auth_token.as_deref() == next_auth_token.as_deref() {
         return;
@@ -235,5 +303,27 @@ pub(crate) fn sync_pipeline_task(
         task.replace(tokio::spawn(async move {
             pipeline_loop(auth_token, events).await;
         }));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unhealthy_pipeline_streak_requests_revalidation_on_third_failure() {
+        let mut failures = 0;
+        assert!(!note_connection_end(&mut failures, None));
+        assert!(!note_connection_end(&mut failures, None));
+        assert!(note_connection_end(&mut failures, None));
+        assert_eq!(failures, 0);
+    }
+
+    #[tokio::test]
+    async fn healthy_pipeline_resets_failure_streak() {
+        let mut failures = 2;
+        let opened_at = Instant::now() - HEALTHY_CONNECTION_DURATION - Duration::from_secs(1);
+        assert!(!note_connection_end(&mut failures, Some(opened_at)));
+        assert_eq!(failures, 0);
     }
 }
