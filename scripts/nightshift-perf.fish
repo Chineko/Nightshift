@@ -12,7 +12,7 @@ echo -e "# Nightshift performance report\n# started\t"(date --iso-8601=seconds)"
 
 function nightshift_perf_summary --argument-names output
     echo >> "$output"
-    echo -e "# summary\n# fields\tprocess\tsamples\tavg_cpu_percent\tpeak_cpu_percent\tavg_rss_mib\tpeak_rss_mib\tmax_threads\tmax_open_fds" >> "$output"
+    echo -e "# summary\n# fields\tkind\tprocess\tsamples\tavg_cpu_percent\tpeak_cpu_percent\tavg_rss_mib\tpeak_rss_mib\tmax_threads\tmax_open_fds" >> "$output"
     awk -F '\t' '
         $1 == "sample" {
             name=$4; count[name]++;
@@ -45,9 +45,16 @@ while true
             continue
         end
 
+        if test -L "/proc/$pid/exe"
+            set -l executable (readlink "/proc/$pid/exe" 2>/dev/null)
+            if test -n "$executable"
+                set process (basename "$executable")
+            end
+        end
+
         set -l fds 0
         if test -d "/proc/$pid/fd"
-            set fds (count /proc/$pid/fd/* 2>/dev/null)
+            set fds (find "/proc/$pid/fd" -mindepth 1 -maxdepth 1 2>/dev/null | count)
         end
 
         set -l rss_mib (awk -v kib="$rss_kib" 'BEGIN { printf "%.2f", kib / 1024.0 }')
