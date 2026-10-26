@@ -2,7 +2,11 @@ use anyhow::{Context, Result, anyhow};
 use ash::vk::{self, Handle};
 use openxr as xr;
 
-use crate::{interaction::PanelRay, placement::normalize_quaternion_xyzw};
+use crate::{
+    interaction::PanelRay,
+    placement::normalize_quaternion_xyzw,
+    swapchain_wait::{release_image, wait_image_bounded},
+};
 
 const LASER_TEXTURE_SIZE: u32 = 1;
 const LASER_THICKNESS_M: f32 = 0.002;
@@ -118,9 +122,7 @@ impl LaserRenderer {
             .swapchain
             .acquire_image()
             .context("acquiring laser image")?;
-        self.swapchain
-            .wait_image(xr::Duration::INFINITE)
-            .context("waiting for laser image")?;
+        wait_image_bounded(&self.swapchain, "waiting for laser image")?;
         let result = unsafe {
             (|| -> Result<()> {
                 let image = *self.images.get(image_index as usize).ok_or_else(|| {
@@ -187,10 +189,7 @@ impl LaserRenderer {
                 Ok(())
             })()
         };
-        let release = self
-            .swapchain
-            .release_image()
-            .context("releasing laser image");
+        let release = release_image(&self.swapchain, "releasing laser image");
         result?;
         release?;
         self.initialized = true;
