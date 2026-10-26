@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use anyhow::{Context, Result};
 use openxr as xr;
 
@@ -6,10 +8,55 @@ use crate::{
     placement::{PanelPose, normalize_quaternion_xyzw},
 };
 
+const LEFT_HAND_BIT: u8 = 1;
+const RIGHT_HAND_BIT: u8 = 2;
+
+static TRIGGER_DOWN_MASK: AtomicU8 = AtomicU8::new(0);
+static TRIGGER_JUST_PRESSED_MASK: AtomicU8 = AtomicU8::new(0);
+static SLIDER_DRAG_HAND: AtomicU8 = AtomicU8::new(0);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ControllerHand {
     Left,
     Right,
+}
+
+fn hand_bit(hand: ControllerHand) -> u8 {
+    match hand {
+        ControllerHand::Left => LEFT_HAND_BIT,
+        ControllerHand::Right => RIGHT_HAND_BIT,
+    }
+}
+
+pub fn begin_slider_drag_for_pressed_hand() -> bool {
+    let pressed = TRIGGER_JUST_PRESSED_MASK.load(Ordering::Relaxed);
+    let hand = if pressed & LEFT_HAND_BIT != 0 {
+        LEFT_HAND_BIT
+    } else if pressed & RIGHT_HAND_BIT != 0 {
+        RIGHT_HAND_BIT
+    } else {
+        0
+    };
+    if hand == 0 {
+        return false;
+    }
+    SLIDER_DRAG_HAND.store(hand, Ordering::Relaxed);
+    true
+}
+
+pub fn slider_drag_active() -> bool {
+    SLIDER_DRAG_HAND.load(Ordering::Relaxed) != 0
+}
+
+fn slider_drag_owned_by(hand: ControllerHand) -> bool {
+    SLIDER_DRAG_HAND.load(Ordering::Relaxed) == hand_bit(hand)
+}
+
+fn finish_trigger_sample_batch() {
+    let drag_hand = SLIDER_DRAG_HAND.load(Ordering::Relaxed);
+    if drag_hand != 0 && TRIGGER_DOWN_MASK.load(Ordering::Relaxed) & drag_hand == 0 {
+        SLIDER_DRAG_HAND.store(0, Ordering::Relaxed);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -18,6 +65,7 @@ pub struct PointerSample {
     pub ray: Option<PanelRay>,
     pub controller_pose: Option<PanelPose>,
     pub trigger_just_pressed: bool,
+    pub trigger_down: bool,
     pub grip_down: bool,
     pub grip_just_pressed: bool,
     pub grip_just_released: bool,
@@ -216,7 +264,10 @@ impl ControllerInput {
             .sync_actions(&[(&self.action_set).into()])
             .context("synchronizing Nightshift panel actions")?;
 
-        Ok([
+        TRIGGER_DOWN_MASK.store(0, Ordering::Relaxed);
+        TRIGGER_JUST_PRESSED_MASK.store(0, Ordering::Relaxed);
+
+        let samples = [
             sample_hand(
                 ControllerHand::Left,
                 &self.left_aim,
@@ -241,7 +292,9 @@ impl ControllerInput {
                 display_time,
                 base_space,
             )?,
-        ])
+        ];
+        finish_trigger_sample_batch();
+        Ok(samples)
     }
 }
 
@@ -264,9 +317,16 @@ fn sample_hand(
     let grab_state = grab
         .state(session, xr::Path::NULL)
         .context("reading controller grab action")?;
-    let trigger_just_pressed = trigger_state.is_active
-        && trigger_state.changed_since_last_sync
-        && trigger_state.current_state;
+    let trigger_down = trigger_state.is_active && trigger_state.current_state;
+    let trigger_edge = trigger_down && trigger_state.changed_since_last_sync;
+    let bit = hand_bit(hand);
+    if trigger_down {
+        TRIGGER_DOWN_MASK.fetch_or(bit, Ordering::Relaxed);
+    }
+    if trigger_edge {
+        TRIGGER_JUST_PRESSED_MASK.fetch_or(bit, Ordering::Relaxed);
+    }
+    let trigger_just_pressed = trigger_edge || (trigger_down && slider_drag_owned_by(hand));
     let grip_down = grab_state.is_active && grab_state.current_state;
     let grip_just_pressed =
         grab_state.is_active && grab_state.changed_since_last_sync && grab_state.current_state;
@@ -283,6 +343,7 @@ fn sample_hand(
         ray,
         controller_pose,
         trigger_just_pressed,
+        trigger_down,
         grip_down,
         grip_just_pressed,
         grip_just_released,
@@ -367,6 +428,7 @@ mod pointer_selection_tests {
             ray: None,
             controller_pose: None,
             trigger_just_pressed: false,
+            trigger_down: false,
             grip_down: false,
             grip_just_pressed: false,
             grip_just_released: false,
@@ -400,5 +462,20 @@ mod pointer_selection_tests {
             select_active_pointer_hand(&samples, [false, true], Some(ControllerHand::Left)),
             Some(ControllerHand::Right)
         );
+    }
+
+    #[test]
+    fn slider_drag_latches_pressed_hand_until_release() {
+        TRIGGER_JUST_PRESSED_MASK.store(LEFT_HAND_BIT, Ordering::Relaxed);
+        TRIGGER_DOWN_MASK.store(LEFT_HAND_BIT, Ordering::Relaxed);
+        SLIDER_DRAG_HAND.store(0, Ordering::Relaxed);
+        assert!(begin_slider_drag_for_pressed_hand());
+        assert!(slider_drag_owned_by(ControllerHand::Left));
+        finish_trigger_sample_batch();
+        assert!(slider_drag_active());
+
+        TRIGGER_DOWN_MASK.store(0, Ordering::Relaxed);
+        finish_trigger_sample_batch();
+        assert!(!slider_drag_active());
     }
 }
