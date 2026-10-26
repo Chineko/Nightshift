@@ -193,7 +193,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(80)).await;
 
         assert_eq!(generation, 13);
-        assert!(!status_task.is_pending());
+        assert!(!task.is_pending());
         assert!(!ran.load(std::sync::atomic::Ordering::Acquire));
     }
 }
