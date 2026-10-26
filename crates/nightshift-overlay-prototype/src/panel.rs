@@ -9,8 +9,8 @@ use crate::{
 
 pub const PANEL_TEXTURE_WIDTH: u32 = 768;
 pub const PANEL_TEXTURE_HEIGHT: u32 = 960;
-pub const PANEL_WIDTH_M: f32 = 0.62;
-pub const PANEL_HEIGHT_M: f32 = 0.775;
+pub const PANEL_WIDTH_M: f32 = 0.46;
+pub const PANEL_HEIGHT_M: f32 = 0.575;
 
 pub struct PanelRenderer {
     swapchain: xr::Swapchain<xr::Vulkan>,
