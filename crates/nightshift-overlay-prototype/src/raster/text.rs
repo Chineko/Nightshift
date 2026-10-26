@@ -61,3 +61,27 @@ pub(super) fn rasterize_text(
         );
     });
 }
+
+pub(super) fn measure_text_width(text: &str, scale: u32, max_width: u32) -> u32 {
+    let scale = scale.max(1) as f32;
+    let mut left = i32::MAX;
+    let mut right = i32::MIN;
+    TEXT_ENGINE.with(|engine| {
+        engine.borrow_mut().draw(
+            text,
+            7.0 * scale,
+            8.0 * scale,
+            max_width as f32,
+            [255, 255, 255, 255],
+            |x, _, width, _, _| {
+                left = left.min(x);
+                right = right.max(x.saturating_add(width as i32));
+            },
+        );
+    });
+    if left == i32::MAX || right <= left {
+        0
+    } else {
+        (right - left) as u32
+    }
+}
