@@ -79,6 +79,20 @@ Expected compositor behavior:
 - Moving your head does not uncover the full-screen dimmer.
 - Ctrl+C removes Nightshift's OpenXR layers cleanly.
 
+## OpenXR anti-hang hardware readiness check
+
+Run this check before treating swapchain-wait changes as headset-validated. Record the Nightshift commit, OpenXR runtime, headset, and whether VRChat/WayVR are running so failures can be reproduced.
+
+1. Launch the daemon and release overlay worker with the headset already connected. Confirm the dimmer, positioned panel, and controller laser/cursor all render and remain responsive.
+2. Exercise `overlay-show` and `overlay-hide` repeatedly while changing brightness. Confirm there are no multi-second stalls, frozen layers, or compositor instability.
+3. Leave the panel visible and move the controller across interactive targets. Confirm panel and laser swapchains continue updating while the dimmer is active.
+4. Interrupt the OpenXR lifecycle once by disconnecting/reconnecting the headset or stopping/restarting the compositor, whichever is normal for the test setup. The overlay may exit on session/runtime loss, but it must not remain hung indefinitely.
+5. If a swapchain wait is forced to time out, confirm the worker reports a label-specific `timed out waiting for OpenXR swapchain image` error after the bounded retry budget instead of freezing. The retry budget is eight waits of 250 ms each, and retries stay on the already acquired image.
+6. After any timeout, runtime loss, or deliberate Ctrl+C exit, start the overlay worker again. Confirm it reconnects cleanly and panel/dimmer rendering resumes without needing to restart the Nightshift daemon.
+7. Repeat a short show/hide/dim cycle after recovery and confirm VRChat/WayVR remain responsive and layer ordering is unchanged.
+
+Acceptance criteria: no indefinite swapchain wait, no acquire-on-retry behavior, no rendering or release before wait readiness, actionable error output on failure, clean process recovery, and unchanged normal rendering behavior.
+
 ## Automated checks
 
 CI runs:
