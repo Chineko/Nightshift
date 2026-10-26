@@ -111,7 +111,13 @@ async fn connect() -> Result<(
     .await?;
 
     let mut line = String::new();
-    if reader.read_line(&mut line).await? == 0 {
+    let read = tokio::time::timeout(
+        nightshift_protocol::IPC_HELLO_TIMEOUT,
+        reader.read_line(&mut line),
+    )
+    .await
+    .context("timed out waiting for daemon hello")??;
+    if read == 0 {
         bail!("daemon closed the socket during handshake");
     }
 
