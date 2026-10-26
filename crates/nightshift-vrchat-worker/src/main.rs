@@ -1,5 +1,6 @@
 mod connection;
 mod pipeline;
+mod presence;
 mod runtime;
 
 use std::{
@@ -48,6 +49,7 @@ const PIPELINE_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 use connection::*;
 use pipeline::*;
+use presence::*;
 use runtime::*;
 
 #[tokio::main]
