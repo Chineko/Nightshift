@@ -1,13 +1,19 @@
 use super::*;
-use crate::bridge::{Bridge, UiUpdate};
+use crate::{
+    bridge::{Bridge, UiUpdate},
+    widgets::{overlay_slider, pill_toggle},
+};
 use nightshift_ui::notifications::{toast_for_event, Toast, ToastQueue, ToastSeverity};
 
 const BG: Color32 = Color32::from_rgb(12, 13, 17);
 const PANEL: Color32 = Color32::from_rgb(23, 24, 30);
 const PANEL_ALT: Color32 = Color32::from_rgb(30, 31, 38);
+const BORDER: Color32 = Color32::from_rgb(48, 52, 66);
 const MUTED: Color32 = Color32::from_rgb(157, 159, 170);
 const PURPLE: Color32 = Color32::from_rgb(183, 141, 255);
+const PURPLE_DARK: Color32 = Color32::from_rgb(62, 50, 83);
 const AMBER: Color32 = Color32::from_rgb(245, 173, 70);
+const GREEN: Color32 = Color32::from_rgb(102, 220, 145);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -63,7 +69,6 @@ impl NightshiftApp {
 
     fn push_event_toast(&mut self, event: &StateEvent) {
         if let Some(toast) = toast_for_event(&self.state, event) {
-            // The sleep-edge toast gets one last wave before quiet mode closes the curtains.
             let sleeping = if matches!(event, StateEvent::SleepChanged(_)) {
                 false
             } else {
@@ -126,7 +131,8 @@ impl NightshiftApp {
 
     fn tick_toasts(&mut self) {
         let now = Instant::now();
-        self.toasts.tick(now.saturating_duration_since(self.toast_tick_at));
+        self.toasts
+            .tick(now.saturating_duration_since(self.toast_tick_at));
         self.toast_tick_at = now;
     }
 
@@ -136,11 +142,11 @@ impl NightshiftApp {
         }
 
         let mut dismiss = None;
-        egui::Area::new(egui::Id::new("nightshift_toasts"))
-            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
+        egui::Area::new("nightshift_toasts".into())
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 18.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
-                ui.set_width(320.0);
+                ui.set_width(340.0);
                 ui.vertical(|ui| {
                     for (index, toast) in self.toasts.visible().enumerate() {
                         let accent = match toast.severity {
@@ -152,12 +158,17 @@ impl NightshiftApp {
                         egui::Frame::new()
                             .fill(PANEL)
                             .stroke(Stroke::new(1.0, accent))
-                            .corner_radius(12)
-                            .inner_margin(12)
+                            .corner_radius(14)
+                            .inner_margin(14)
                             .show(ui, |ui| {
-                                ui.set_min_width(296.0);
+                                ui.set_min_width(310.0);
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new(&toast.title).strong().color(accent));
+                                    ui.label(
+                                        RichText::new(&toast.title)
+                                            .strong()
+                                            .size(16.0)
+                                            .color(accent),
+                                    );
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
@@ -167,7 +178,11 @@ impl NightshiftApp {
                                         },
                                     );
                                 });
-                                ui.label(RichText::new(&toast.message).color(MUTED));
+                                ui.label(
+                                    RichText::new(&toast.message)
+                                        .size(15.0)
+                                        .color(MUTED),
+                                );
                             });
                     }
                 });
@@ -192,26 +207,45 @@ impl NightshiftApp {
     }
 
     fn nav(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            ui.heading(RichText::new("NIGHTSHIFT").strong().size(20.0));
-            ui.add_space(28.0);
-            if ui.selectable_label(self.page == Page::Home, "Home").clicked() {
-                self.page = Page::Home;
-            }
-            if ui.selectable_label(self.page == Page::Settings, "Settings").clicked() {
-                self.page = Page::Settings;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let status = if self.daemon_connected { "Connected" } else { "Disconnected" };
-                let color = if self.daemon_connected { Color32::from_rgb(102, 220, 145) } else { MUTED };
-                ui.label(RichText::new(format!("● {status}")).color(color));
+        egui::Frame::new()
+            .fill(PANEL)
+            .stroke(Stroke::new(1.0, BORDER))
+            .corner_radius(18)
+            .inner_margin(egui::Margin::symmetric(18, 12))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("☾").size(23.0).color(PURPLE));
+                    ui.label(RichText::new("NIGHTSHIFT").strong().size(22.0));
+                    ui.add_space(20.0);
+                    if nav_button(ui, "HOME", self.page == Page::Home).clicked() {
+                        self.page = Page::Home;
+                    }
+                    if nav_button(ui, "SETTINGS", self.page == Page::Settings).clicked() {
+                        self.page = Page::Settings;
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let status = if self.daemon_connected {
+                            "LIVE"
+                        } else {
+                            "OFFLINE"
+                        };
+                        let color = if self.daemon_connected { GREEN } else { MUTED };
+                        ui.label(
+                            RichText::new(format!("●  {status}"))
+                                .strong()
+                                .size(14.0)
+                                .color(color),
+                        );
+                    });
+                });
             });
-        });
-        ui.separator();
     }
 
     fn sleep_card(&mut self, ui: &mut egui::Ui) {
-        let sleeping = matches!(self.state.sleep.phase, SleepPhase::Sleeping | SleepPhase::EnteringSleep);
+        let sleeping = matches!(
+            self.state.sleep.phase,
+            SleepPhase::Sleeping | SleepPhase::EnteringSleep
+        );
         let accent = if sleeping { PURPLE } else { AMBER };
         let title = match self.state.sleep.phase {
             SleepPhase::Awake => "Awake",
@@ -220,52 +254,110 @@ impl NightshiftApp {
             SleepPhase::Waking => "Waking up…",
         };
 
-        egui::Frame::new()
-            .fill(PANEL)
-            .stroke(Stroke::new(1.0, Color32::from_gray(48)))
-            .corner_radius(16)
-            .inner_margin(20)
-            .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.label(RichText::new(if sleeping { "☾  Sleep mode" } else { "☀  Sleep mode" }).color(accent).strong().size(18.0));
-                ui.add_space(12.0);
-                ui.label(RichText::new(title).size(26.0).strong());
-                ui.label(RichText::new(if sleeping {
+        overlay_card(ui, |ui| {
+            ui.label(
+                RichText::new(if sleeping {
+                    "☾  SLEEP MODE"
+                } else {
+                    "☀  SLEEP MODE"
+                })
+                .color(accent)
+                .strong()
+                .size(16.0),
+            );
+            ui.add_space(8.0);
+            ui.label(RichText::new(title).size(30.0).strong());
+            ui.label(
+                RichText::new(if sleeping {
                     "Your display is dimmed and sleep automation is active."
                 } else {
                     "Dimming, status and invite automation are ready."
-                }).color(MUTED));
-                ui.add_space(16.0);
+                })
+                .size(16.0)
+                .color(MUTED),
+            );
+            ui.add_space(16.0);
 
-                let button_text = if sleeping { "Wake up" } else { "Enter sleep mode" };
-                if ui.add_sized([ui.available_width(), 38.0], egui::Button::new(RichText::new(button_text).strong()).fill(accent)).clicked() {
-                    self.send_command(if sleeping { UiCommand::Wake } else { UiCommand::EnterSleep });
-                }
+            let button_text = if sleeping {
+                "WAKE UP"
+            } else {
+                "ENTER SLEEP MODE"
+            };
+            if ui
+                .add_sized(
+                    [ui.available_width(), 48.0],
+                    egui::Button::new(RichText::new(button_text).strong().size(16.0))
+                        .fill(PURPLE)
+                        .corner_radius(16),
+                )
+                .clicked()
+            {
+                self.send_command(if sleeping {
+                    UiCommand::Wake
+                } else {
+                    UiCommand::EnterSleep
+                });
+            }
 
-                ui.add_space(16.0);
-                ui.separator();
-                status_row(ui, "Current brightness", &format!("{}%", (self.state.brightness.current * 100.0).round() as u32));
-                status_row(ui, "Sleep target", &format!("{}%", (self.state.brightness.sleep_target * 100.0).round() as u32));
-                status_row(ui, "Invite policy", invite_profile_name(self.state.invites.profile));
-                status_row(ui, "Automation", if sleeping { "Active" } else { "Ready" });
-            });
+            ui.add_space(14.0);
+            ui.separator();
+            ui.add_space(6.0);
+            status_row(
+                ui,
+                "Current brightness",
+                &format!(
+                    "{}%",
+                    (self.state.brightness.current * 100.0).round() as u32
+                ),
+            );
+            status_row(
+                ui,
+                "Sleep target",
+                &format!(
+                    "{}%",
+                    (self.state.brightness.sleep_target * 100.0).round() as u32
+                ),
+            );
+            status_row(
+                ui,
+                "Invite policy",
+                invite_profile_name(self.state.invites.profile),
+            );
+            status_row(ui, "Automation", if sleeping { "Active" } else { "Ready" });
+        });
     }
 
     fn brightness_card(&mut self, ui: &mut egui::Ui) {
-        egui::Frame::new().fill(PANEL).corner_radius(16).inner_margin(20).show(ui, |ui| {
+        overlay_card(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Brightness").strong().size(17.0));
+                ui.vertical(|ui| {
+                    ui.label(RichText::new("BRIGHTNESS").strong().size(17.0));
+                    ui.label(
+                        RichText::new("OVERLAY DISPLAY LEVEL")
+                            .size(13.5)
+                            .color(MUTED),
+                    );
+                });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("{}%", (self.state.brightness.current * 100.0).round() as u32)).color(PURPLE).strong());
+                    ui.label(
+                        RichText::new(format!(
+                            "{}%",
+                            (self.state.brightness.current * 100.0).round() as u32
+                        ))
+                        .size(25.0)
+                        .strong(),
+                    );
                 });
             });
-            ui.add_space(8.0);
+            ui.add_space(12.0);
             let mut value = self.state.brightness.current;
-            let response = ui.add(egui::Slider::new(&mut value, 0.02..=1.0).show_value(false));
+            let response = overlay_slider(ui, &mut value, 0.02..=1.0);
 
             if response.changed() {
                 self.state.brightness.current = value;
-                if !response.drag_stopped() && self.brightness_send_at.elapsed() >= Duration::from_millis(40) {
+                if !response.drag_stopped()
+                    && self.brightness_send_at.elapsed() >= Duration::from_millis(24)
+                {
                     self.send_command(UiCommand::SetBrightness(value));
                     self.brightness_send_at = Instant::now();
                 }
@@ -275,8 +367,24 @@ impl NightshiftApp {
                 self.brightness_send_at = Instant::now();
             }
 
-            let sync = if self.state.brightness.manual_override { "Manual override" } else if self.state.brightness.transitioning { "Fading" } else { "Synced" };
-            ui.label(RichText::new(sync).color(MUTED).small());
+            ui.add_space(4.0);
+            let sync = if self.state.brightness.manual_override {
+                "MANUAL OVERRIDE"
+            } else if self.state.brightness.transitioning {
+                "FADING"
+            } else {
+                "SYNCED"
+            };
+            ui.label(
+                RichText::new(sync)
+                    .size(13.0)
+                    .strong()
+                    .color(if self.state.brightness.transitioning {
+                        AMBER
+                    } else {
+                        GREEN
+                    }),
+            );
         });
     }
 
@@ -288,47 +396,76 @@ impl NightshiftApp {
             .map(|bpm| format!("{bpm} BPM"))
             .unwrap_or_else(|| hr_provider_status_name(self.state.heart_rate.provider_status).into());
         ui.columns(2, |columns| {
-            small_card(&mut columns[0], "♥  Heart rate", &heart_rate);
-            small_card(&mut columns[1], "≋  OSC automation", if self.state.osc.enabled { "Running" } else { "Off" });
+            small_card(&mut columns[0], "♥  HEART RATE", &heart_rate);
+            small_card(
+                &mut columns[1],
+                "≋  OSC AUTOMATION",
+                if self.state.osc.enabled {
+                    "Running"
+                } else {
+                    "Off"
+                },
+            );
         });
-        ui.add_space(8.0);
+        ui.add_space(10.0);
         ui.columns(2, |columns| {
-            small_card(&mut columns[0], "●  VRChat status", vrchat_status_name(self.state.vrchat.status));
-            small_card(&mut columns[1], "◎  Invite rules", invite_profile_name(self.state.invites.profile));
+            small_card(
+                &mut columns[0],
+                "●  VRCHAT STATUS",
+                vrchat_status_name(self.state.vrchat.status),
+            );
+            small_card(
+                &mut columns[1],
+                "◎  INVITE RULES",
+                invite_profile_name(self.state.invites.profile),
+            );
         });
     }
 
     fn home(&mut self, ui: &mut egui::Ui) {
-        ui.label(RichText::new(self.greeting()).size(28.0).strong());
-        ui.label(RichText::new("Settle in. Nightshift is ready when you are.").color(MUTED));
+        ui.label(RichText::new("VR OVERLAY").size(14.0).strong().color(PURPLE));
+        ui.label(RichText::new(self.greeting()).size(32.0).strong());
+        ui.label(
+            RichText::new("Settle in. Nightshift is ready when you are.")
+                .size(16.0)
+                .color(MUTED),
+        );
         ui.add_space(20.0);
         self.sleep_card(ui);
-        ui.add_space(12.0);
+        ui.add_space(14.0);
         self.brightness_card(ui);
-        ui.add_space(16.0);
-        ui.label(RichText::new("At a glance").strong().size(18.0));
-        ui.add_space(8.0);
+        ui.add_space(18.0);
+        ui.label(RichText::new("AT A GLANCE").strong().size(18.0));
+        ui.add_space(10.0);
         self.glance_cards(ui);
     }
 
     fn heart_rate_settings(&mut self, ui: &mut egui::Ui) {
         let mut monitoring = self.state.heart_rate.enabled;
-        if ui.checkbox(&mut monitoring, "Heart-rate monitoring").changed() {
+        if pill_toggle(ui, "Heart-rate monitoring", &mut monitoring, true).changed() {
             self.send_command(UiCommand::SetHrMonitoring(monitoring));
         }
 
-        status_row(ui, "Provider", hr_provider_status_name(self.state.heart_rate.provider_status));
+        status_row(
+            ui,
+            "Provider",
+            hr_provider_status_name(self.state.heart_rate.provider_status),
+        );
         status_row(
             ui,
             "Connected device",
-            self.state.heart_rate.connected_device.as_deref().unwrap_or("—"),
+            self.state
+                .heart_rate
+                .connected_device
+                .as_deref()
+                .unwrap_or("—"),
         );
         if let Some(error) = self.state.heart_rate.last_error.as_deref() {
-            ui.label(RichText::new(error).color(AMBER).small());
+            ui.label(RichText::new(error).color(AMBER).size(14.0));
         }
 
-        ui.add_space(8.0);
-        ui.label("Discovered devices");
+        ui.add_space(10.0);
+        ui.label(RichText::new("Discovered devices").strong());
         let devices = self.state.heart_rate.available_devices.clone();
         if devices.is_empty() {
             let message = if self.state.heart_rate.provider_status == HrProviderStatus::Searching {
@@ -336,14 +473,15 @@ impl NightshiftApp {
             } else {
                 "No devices from the latest scan."
             };
-            ui.label(RichText::new(message).color(MUTED).small());
+            ui.label(RichText::new(message).color(MUTED).size(14.0));
         } else {
             for device in devices {
                 let label = match device.name.as_deref() {
                     Some(name) => format!("{name}  ·  {}", device.address),
                     None => device.address.clone(),
                 };
-                let selected = self.state.heart_rate.device_filter.as_deref() == Some(device.id.as_str());
+                let selected =
+                    self.state.heart_rate.device_filter.as_deref() == Some(device.id.as_str());
                 if ui.selectable_label(selected, label).clicked() {
                     self.hr_device_filter_draft = device.id.clone();
                     self.send_command(UiCommand::SetHrDeviceFilter(Some(device.id)));
@@ -351,8 +489,8 @@ impl NightshiftApp {
             }
         }
 
-        ui.add_space(8.0);
-        ui.label("Preferred BLE device");
+        ui.add_space(10.0);
+        ui.label(RichText::new("Preferred BLE device").strong());
         ui.horizontal(|ui| {
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.hr_device_filter_draft)
@@ -361,8 +499,12 @@ impl NightshiftApp {
             let canonical = self.state.heart_rate.device_filter.as_deref().unwrap_or("");
             let draft = self.hr_device_filter_draft.trim();
             let changed = draft != canonical;
-            if ui.add_enabled(changed, egui::Button::new("Apply")).clicked()
-                || (response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) && changed)
+            if ui
+                .add_enabled(changed, egui::Button::new("Apply"))
+                .clicked()
+                || (response.lost_focus()
+                    && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    && changed)
             {
                 self.send_command(UiCommand::SetHrDeviceFilter(
                     (!draft.is_empty()).then(|| draft.to_string()),
@@ -374,42 +516,37 @@ impl NightshiftApp {
             }
         });
         ui.label(
-            RichText::new("Choose a discovered device or use a name, Bluetooth address, or provider ID. Empty means auto-select.")
-                .color(MUTED)
-                .small(),
+            RichText::new(
+                "Choose a discovered device or use a name, Bluetooth address, or provider ID. Empty means auto-select.",
+            )
+            .color(MUTED)
+            .size(14.0),
         );
 
-        ui.add_space(8.0);
-        let mut threshold = self.state.heart_rate.threshold_bpm;
-        ui.label("Sleep threshold");
-        if ui
-            .add(egui::Slider::new(&mut threshold, 20..=240).suffix(" BPM"))
-            .changed()
-        {
-            self.send_command(UiCommand::SetHrThreshold(threshold));
+        ui.add_space(12.0);
+        let mut threshold = self.state.heart_rate.threshold_bpm as f32;
+        slider_label(ui, "Sleep threshold", format!("{:.0} BPM", threshold));
+        if overlay_slider(ui, &mut threshold, 20.0..=240.0).changed() {
+            self.send_command(UiCommand::SetHrThreshold(threshold.round() as u16));
         }
 
-        let mut calm = self.state.heart_rate.calm_period_seconds;
-        ui.label("Calm period below threshold");
-        if ui
-            .add(egui::Slider::new(&mut calm, 10..=3_600).suffix(" s"))
-            .changed()
-        {
-            self.send_command(UiCommand::SetHrCalmPeriod(calm));
+        let mut calm = self.state.heart_rate.calm_period_seconds as f32;
+        slider_label(ui, "Calm period below threshold", format!("{:.0} s", calm));
+        if overlay_slider(ui, &mut calm, 10.0..=3_600.0).changed() {
+            self.send_command(UiCommand::SetHrCalmPeriod(calm.round() as u64));
         }
 
-        let mut cooldown = self.state.heart_rate.cooldown_seconds;
-        ui.label("Manual-wake cooldown");
-        if ui
-            .add(egui::Slider::new(&mut cooldown, 0..=24 * 60 * 60).suffix(" s"))
-            .changed()
-        {
-            self.send_command(UiCommand::SetHrCooldown(cooldown));
+        let mut cooldown = self.state.heart_rate.cooldown_seconds as f32;
+        slider_label(ui, "Manual-wake cooldown", format!("{:.0} s", cooldown));
+        if overlay_slider(ui, &mut cooldown, 0.0..=(24 * 60 * 60) as f32).changed() {
+            self.send_command(UiCommand::SetHrCooldown(cooldown.round() as u64));
         }
         ui.label(
-            RichText::new("Changing HR tuning resets calm/retrigger progress but preserves the manual-wake safety cooldown.")
-                .color(MUTED)
-                .small(),
+            RichText::new(
+                "Changing HR tuning resets calm/retrigger progress but preserves the manual-wake safety cooldown.",
+            )
+            .color(MUTED)
+            .size(14.0),
         );
     }
 
@@ -433,13 +570,19 @@ impl NightshiftApp {
                 .unwrap_or("—"),
         );
 
-        ui.add_space(8.0);
+        ui.add_space(10.0);
         let visibility_label = if self.state.overlay.visible {
             "Hide overlay"
         } else {
             "Show overlay"
         };
-        if ui.button(visibility_label).clicked() {
+        if ui
+            .add_sized(
+                [160.0, 38.0],
+                egui::Button::new(visibility_label).corner_radius(12),
+            )
+            .clicked()
+        {
             self.send_command(if self.state.overlay.visible {
                 UiCommand::HideOverlay
             } else {
@@ -447,20 +590,17 @@ impl NightshiftApp {
             });
         }
 
-        ui.add_space(8.0);
+        ui.add_space(10.0);
         let mut distance = self.state.overlay.spawn_distance_m;
-        ui.label("Spawn distance");
-        if ui
-            .add(egui::Slider::new(&mut distance, 0.25..=5.0).suffix(" m"))
-            .changed()
-        {
+        slider_label(ui, "Spawn distance", format!("{distance:.2} m"));
+        if overlay_slider(ui, &mut distance, 0.25..=5.0).changed() {
             self.send_command(UiCommand::SetOverlaySpawnDistance(distance));
         }
 
         let mut mode = self.state.overlay.spawn_mode;
         let before = mode;
         ui.horizontal(|ui| {
-            ui.label("Spawn mode");
+            ui.label(RichText::new("Spawn mode").size(16.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 egui::ComboBox::from_id_salt("overlay_spawn_mode")
                     .selected_text(overlay_spawn_mode_name(mode))
@@ -479,55 +619,70 @@ impl NightshiftApp {
         }
 
         let mut laser_enabled = self.state.overlay.laser_enabled;
-        if ui.checkbox(&mut laser_enabled, "Show controller laser guide").changed() {
+        if pill_toggle(
+            ui,
+            "Show controller laser guide",
+            &mut laser_enabled,
+            true,
+        )
+        .changed()
+        {
             self.send_command(UiCommand::SetOverlayLaserEnabled(laser_enabled));
         }
         ui.label(
             RichText::new("The surface cursor stays visible when the laser guide is off.")
                 .color(MUTED)
-                .small(),
+                .size(14.0),
         );
-
         ui.label(
-            RichText::new("Placement settings are persisted by the daemon; runtime visibility stays session state.")
-                .color(MUTED)
-                .small(),
+            RichText::new(
+                "Placement settings are persisted by the daemon; runtime visibility stays session state.",
+            )
+            .color(MUTED)
+            .size(14.0),
         );
     }
 
     fn settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Advanced settings");
-        ui.label(RichText::new("Full Nightshift configuration lives here. The VR overlay keeps only quick, headset-friendly controls.").color(MUTED));
-        ui.add_space(16.0);
+        ui.label(RichText::new("DESKTOP CONTROL CENTER").size(14.0).strong().color(PURPLE));
+        ui.label(RichText::new("Settings").size(32.0).strong());
+        ui.label(
+            RichText::new(
+                "The same Nightshift controls as the VR panel, with the deeper tuning kept here.",
+            )
+            .size(16.0)
+            .color(MUTED),
+        );
+        ui.add_space(18.0);
 
-        setting_card(ui, "Sleep", |ui| {
+        setting_card(ui, "SLEEP", |ui| {
             let mut detection = self.state.sleep.detection_enabled;
-            if ui.checkbox(&mut detection, "Sleep detection").changed() {
+            if pill_toggle(ui, "Sleep detection", &mut detection, true).changed() {
                 self.send_command(UiCommand::SetSleepDetection(detection));
             }
+
             let mut target = self.state.brightness.sleep_target;
-            ui.label("Sleep brightness target");
-            if ui
-                .add(
-                    egui::Slider::new(&mut target, 0.02..=1.0)
-                        .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
-                )
-                .changed()
-            {
+            slider_label(
+                ui,
+                "Sleep brightness target",
+                format!("{:.0}%", target * 100.0),
+            );
+            if overlay_slider(ui, &mut target, 0.02..=1.0).changed() {
                 self.send_command(UiCommand::SetSleepBrightness(target));
             }
+
             let mut fade = self.state.settings.fade_duration_seconds;
-            ui.label("Fade duration");
-            if ui.add(egui::Slider::new(&mut fade, 0.0..=120.0).suffix(" s")).changed() {
+            slider_label(ui, "Fade duration", format!("{fade:.1} s"));
+            if overlay_slider(ui, &mut fade, 0.0..=120.0).changed() {
                 self.send_command(UiCommand::SetFadeDuration(fade));
             }
         });
 
-        ui.add_space(12.0);
-        setting_card(ui, "Heart rate", |ui| self.heart_rate_settings(ui));
+        ui.add_space(14.0);
+        setting_card(ui, "HEART RATE", |ui| self.heart_rate_settings(ui));
 
-        ui.add_space(12.0);
-        setting_card(ui, "VRChat", |ui| {
+        ui.add_space(14.0);
+        setting_card(ui, "VRCHAT", |ui| {
             let runtime_name = if self.state.vrchat.connected {
                 self.state.vrchat.display_name.as_deref()
             } else {
@@ -535,14 +690,18 @@ impl NightshiftApp {
             };
             self.vrchat_auth.render(ui, runtime_name);
 
-            ui.add_space(10.0);
+            ui.add_space(12.0);
             ui.separator();
-            ui.add_space(8.0);
+            ui.add_space(10.0);
 
             let mut status_automation = self.state.settings.vrchat_status_automation_enabled;
-            if ui
-                .checkbox(&mut status_automation, "Sleep/wake status automation")
-                .changed()
+            if pill_toggle(
+                ui,
+                "Sleep/wake status automation",
+                &mut status_automation,
+                true,
+            )
+            .changed()
             {
                 self.send_command(UiCommand::SetVrchatStatusAutomation(status_automation));
             }
@@ -551,7 +710,7 @@ impl NightshiftApp {
                     "Off by default. When enabled, Nightshift changes only your configured VRChat presence on sleep/wake edges.",
                 )
                 .color(MUTED)
-                .small(),
+                .size(14.0),
             );
 
             let mut sleep_status = self.state.settings.sleep_vrchat_status;
@@ -565,19 +724,15 @@ impl NightshiftApp {
             }
         });
 
-        ui.add_space(12.0);
-        setting_card(ui, "Automation", |ui| {
+        ui.add_space(14.0);
+        setting_card(ui, "AUTOMATION", |ui| {
             let mut osc = self.state.osc.enabled;
-            if ui.checkbox(&mut osc, "OSC automation").changed() {
+            if pill_toggle(ui, "OSC automation", &mut osc, true).changed() {
                 self.send_command(UiCommand::SetOscAutomation(osc));
             }
 
             let mut gogo = self.state.settings.gogo_automation_enabled;
-            let gogo_response = ui.add_enabled(
-                osc,
-                egui::Checkbox::new(&mut gogo, "GoGo Loco automation"),
-            );
-            if gogo_response.changed() {
+            if pill_toggle(ui, "GoGo Loco automation", &mut gogo, osc).changed() {
                 self.send_command(UiCommand::SetGogoAutomation(gogo));
             }
             ui.label(
@@ -587,30 +742,72 @@ impl NightshiftApp {
                     "Enable OSC automation first. GoGo automation remains off by default."
                 })
                 .color(MUTED)
-                .small(),
+                .size(14.0),
             );
         });
 
-        ui.add_space(12.0);
-        setting_card(ui, "Overlay", |ui| self.overlay_settings(ui));
+        ui.add_space(14.0);
+        setting_card(ui, "OVERLAY", |ui| self.overlay_settings(ui));
 
-        ui.add_space(12.0);
-        setting_card(ui, "Invite automation & access lists", |ui| {
+        ui.add_space(14.0);
+        setting_card(ui, "INVITE AUTOMATION & ACCESS LISTS", |ui| {
             let commands = self.invite_settings.render(ui, &self.state.invites);
             for command in commands {
                 self.send_command(command);
             }
         });
 
-        ui.add_space(12.0);
-        setting_card(ui, "Diagnostics", |ui| {
-            status_row(ui, "Daemon IPC", if self.daemon_connected { "Connected" } else { "Disconnected" });
-            status_row(ui, "Overlay runtime", if self.state.overlay.runtime_connected { "Connected" } else { "Disconnected" });
-            status_row(ui, "OSC runtime", if self.state.osc.connected { "Connected" } else { "Waiting" });
-            status_row(ui, "Heart-rate provider", hr_provider_status_name(self.state.heart_rate.provider_status));
-            status_row(ui, "VRChat", if self.state.vrchat.connected { "Connected" } else { "Offline" });
+        ui.add_space(14.0);
+        setting_card(ui, "DIAGNOSTICS", |ui| {
+            status_row(
+                ui,
+                "Daemon IPC",
+                if self.daemon_connected {
+                    "Connected"
+                } else {
+                    "Disconnected"
+                },
+            );
+            status_row(
+                ui,
+                "Overlay runtime",
+                if self.state.overlay.runtime_connected {
+                    "Connected"
+                } else {
+                    "Disconnected"
+                },
+            );
+            status_row(
+                ui,
+                "OSC runtime",
+                if self.state.osc.connected {
+                    "Connected"
+                } else {
+                    "Waiting"
+                },
+            );
+            status_row(
+                ui,
+                "Heart-rate provider",
+                hr_provider_status_name(self.state.heart_rate.provider_status),
+            );
+            status_row(
+                ui,
+                "VRChat",
+                if self.state.vrchat.connected {
+                    "Connected"
+                } else {
+                    "Offline"
+                },
+            );
             ui.add_space(6.0);
-            ui.label(RichText::new("Use this desktop page for device selection, thresholds, placement, laser behavior, automations, access lists, and runtime health.").color(MUTED).small());
+            ui.label(
+                RichText::new(
+                    "Device selection, thresholds, placement, automations, access lists, and runtime health all live here.",
+                )
+                .color(MUTED)
+                .size(14.0),
+            );
         });
     }
 }
@@ -628,49 +825,102 @@ impl eframe::App for NightshiftApp {
         ui.visuals_mut().dark_mode = true;
         ui.visuals_mut().panel_fill = BG;
         ui.visuals_mut().override_text_color = Some(Color32::from_rgb(238, 238, 242));
-        ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
         let ctx = ui.ctx().clone();
 
         egui::Frame::central_panel(ui.style())
             .fill(BG)
-            .inner_margin(24)
+            .inner_margin(28)
             .show(ui, |ui| {
                 self.nav(ui);
-                egui::ScrollArea::vertical().show(ui, |ui| match self.page {
-                    Page::Home => self.home(ui),
-                    Page::Settings => self.settings(ui),
-                });
+                ui.add_space(18.0);
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.page {
+                        Page::Home => self.home(ui),
+                        Page::Settings => self.settings(ui),
+                    });
             });
 
         self.render_toasts(&ctx);
     }
 }
 
+fn nav_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            RichText::new(label)
+                .strong()
+                .size(14.0)
+                .color(if selected { Color32::WHITE } else { MUTED }),
+        )
+        .fill(if selected { PURPLE_DARK } else { Color32::TRANSPARENT })
+        .stroke(Stroke::new(1.0, if selected { PURPLE } else { BORDER }))
+        .corner_radius(12),
+    )
+}
+
+fn overlay_card(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    egui::Frame::new()
+        .fill(PANEL)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(20)
+        .inner_margin(22)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            add_contents(ui);
+        });
+}
+
 fn status_row(ui: &mut egui::Ui, label: &str, value: &str) {
     ui.horizontal(|ui| {
-        ui.label(RichText::new(label).color(MUTED));
+        ui.label(RichText::new(label).size(15.0).color(MUTED));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(value).strong());
+            ui.label(RichText::new(value).size(15.0).strong());
+        });
+    });
+}
+
+fn slider_label(ui: &mut egui::Ui, label: &str, value: String) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).size(16.0).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(RichText::new(value).size(15.0).strong().color(PURPLE));
         });
     });
 }
 
 fn small_card(ui: &mut egui::Ui, title: &str, value: &str) {
-    egui::Frame::new().fill(PANEL_ALT).corner_radius(14).inner_margin(16).show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        ui.label(RichText::new(title).color(MUTED));
-        ui.add_space(6.0);
-        ui.label(RichText::new(value).strong().size(18.0));
-    });
+    egui::Frame::new()
+        .fill(PANEL_ALT)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(16)
+        .inner_margin(18)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new(title).size(13.5).strong().color(MUTED));
+            ui.add_space(7.0);
+            ui.label(RichText::new(value).strong().size(20.0));
+        });
 }
 
 fn setting_card(ui: &mut egui::Ui, title: &str, add_contents: impl FnOnce(&mut egui::Ui)) {
-    egui::Frame::new().fill(PANEL).corner_radius(16).inner_margin(20).show(ui, |ui| {
-        ui.set_min_width(ui.available_width());
-        ui.label(RichText::new(title).strong().size(18.0));
-        ui.add_space(10.0);
-        add_contents(ui);
-    });
+    egui::Frame::new()
+        .fill(PANEL)
+        .stroke(Stroke::new(1.0, BORDER))
+        .corner_radius(20)
+        .inner_margin(22)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).strong().size(18.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new("NIGHTSHIFT").size(11.5).strong().color(PURPLE));
+                });
+            });
+            ui.add_space(12.0);
+            add_contents(ui);
+        });
 }
 
 fn vrchat_status_picker(
@@ -681,7 +931,7 @@ fn vrchat_status_picker(
 ) -> bool {
     let before = *status;
     ui.horizontal(|ui| {
-        ui.label(label);
+        ui.label(RichText::new(label).size(16.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             egui::ComboBox::from_id_salt(id)
                 .selected_text(vrchat_status_name(*status))
