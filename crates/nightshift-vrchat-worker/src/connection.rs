@@ -110,7 +110,7 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
 
     let mut pipeline_task = AbortTask(None);
     let mut pipeline_auth_token: Option<String> = None;
-    let (pipeline_tx, mut pipeline_rx) = mpsc::unbounded_channel::<VrchatNotification>();
+    let (pipeline_tx, mut pipeline_rx) = mpsc::unbounded_channel::<PipelineEvent>();
 
     let mut invite_state = InviteState::default();
     let mut active_session: Option<SessionCookies> = None;
@@ -424,38 +424,79 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                     }
                 }
             }
-            Some(notification) = pipeline_rx.recv() => {
-                if !recent_invites.observe(&notification.id) {
-                    continue;
-                }
+            Some(pipeline_event) = pipeline_rx.recv() => {
+                match pipeline_event {
+                    PipelineEvent::RevalidateSession => {
+                        let RuntimeRefresh {
+                            report,
+                            presence,
+                            pipeline_auth_token: next_pipeline_auth_token,
+                            session_cookies: next_session,
+                        } = refresh_runtime(&api, &store).await;
+                        (vrchat_connected, _) = report_runtime(&report);
+                        current_presence = presence.unwrap_or_else(offline_presence);
+                        cancel_pending_status_on_disconnect(
+                            vrchat_connected,
+                            &mut status_generation,
+                            &mut status_task,
+                        );
+                        let session_changed = sync_invite_session(
+                            &mut active_session,
+                            next_session,
+                            &mut invite_tasks,
+                            &mut recent_invites,
+                        );
+                        cancel_pending_status_on_session_change(
+                            session_changed,
+                            &mut status_generation,
+                            &mut status_task,
+                        );
+                        if session_changed {
+                            captured_presence = None;
+                            capture_slot.clear();
+                        }
+                        sync_pipeline_task(
+                            &mut pipeline_task,
+                            &mut pipeline_auth_token,
+                            next_pipeline_auth_token,
+                            &pipeline_tx,
+                        );
+                        report_if_changed(&mut write_half, &mut last_report, report).await?;
+                    }
+                    PipelineEvent::Notification(notification) => {
+                        if !recent_invites.observe(&notification.id) {
+                            continue;
+                        }
 
-                info!(
-                    notification_id = %notification.id,
-                    sender_user_id = %notification.sender_user_id,
-                    sender_username = notification.sender_username.as_deref().unwrap_or("<unknown>"),
-                    kind = ?notification.kind,
-                    "received VRChat invite notification"
-                );
+                        info!(
+                            notification_id = %notification.id,
+                            sender_user_id = %notification.sender_user_id,
+                            sender_username = notification.sender_username.as_deref().unwrap_or("<unknown>"),
+                            kind = ?notification.kind,
+                            "received VRChat invite notification"
+                        );
 
-                if let Some(cookies) = active_session.clone() {
-                    let api = api.clone();
-                    let state = invite_state.clone();
-                    let instance_source = instance_source.clone();
-                    invite_tasks.spawn(async move {
-                        handle_invite_notification(
-                            api,
-                            cookies,
-                            state,
-                            instance_source,
-                            notification,
-                        )
-                        .await
-                    });
-                } else {
-                    warn!(
-                        notification_id = %notification.id,
-                        "ignored VRChat invite notification because no validated session is active"
-                    );
+                        if let Some(cookies) = active_session.clone() {
+                            let api = api.clone();
+                            let state = invite_state.clone();
+                            let instance_source = instance_source.clone();
+                            invite_tasks.spawn(async move {
+                                handle_invite_notification(
+                                    api,
+                                    cookies,
+                                    state,
+                                    instance_source,
+                                    notification,
+                                )
+                                .await
+                            });
+                        } else {
+                            warn!(
+                                notification_id = %notification.id,
+                                "ignored VRChat invite notification because no validated session is active"
+                            );
+                        }
+                    }
                 }
             }
             Some(join_result) = invite_tasks.join_next(), if !invite_tasks.is_empty() => {
