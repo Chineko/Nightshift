@@ -10,6 +10,7 @@ use nightshift_vrchat_auth::{FriendProfile, VrchatAuthService};
 
 use crate::{
     content::PanelContent,
+    home_layout::SettingsCompositionLayout,
     interaction::{PanelAction, PanelPage},
     raster::PanelBitmap,
 };
@@ -200,6 +201,9 @@ impl SocialAvatarRuntime {
             match update {
                 SocialUpdate::Profiles(profiles) => {
                     self.profiles.replace_profiles(profiles);
+                    // A successful metadata refresh starts a new bounded request window. Avatars
+                    // whose URL did not change stay decoded, while failed/moved URLs may retry.
+                    self.requested_images.clear();
                     self.last_error = None;
                 }
                 SocialUpdate::Avatar {
@@ -262,23 +266,26 @@ impl SocialAvatarRuntime {
             return;
         }
 
+        let rows = SettingsCompositionLayout::compute().social_rows;
         for (index, user_id) in content.social_entries().iter().take(5).enumerate() {
             let Some(profile) = self.profiles.profile(user_id) else {
                 continue;
             };
-            let y = 360 + index as u32 * 72;
+            let row = rows[index];
+            let x = row.x.round() as u32;
+            let y = row.y.round() as u32;
             let row_fill = if hover == Some(PanelAction::RemoveSocial(index as u8)) {
                 ROW_HOVER_FILL
             } else {
                 ROW_FILL
             };
 
-            fill_rect(bitmap, 550, y + 16, 120, 30, row_fill);
+            fill_rect(bitmap, x + 50, y + 16, 120, 30, row_fill);
             let label = compact_label(&profile.display_name, 9);
-            draw_text(bitmap, 552, y + 21, &label, 2, TEXT);
+            draw_text(bitmap, x + 52, y + 21, &label, 2, TEXT);
 
             if let Some(avatar) = profile.avatar.as_ref() {
-                draw_avatar(bitmap, 526, y + 30, 16, avatar);
+                draw_avatar(bitmap, x + 26, y + 30, 16, avatar);
             }
         }
     }
