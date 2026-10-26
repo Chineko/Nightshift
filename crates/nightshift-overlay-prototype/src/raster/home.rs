@@ -1,13 +1,10 @@
 use super::*;
-use crate::home_layout::{
-    HomeBrightnessLayout, HomeCompositionLayout, PanelChromeLayout, PanelNavLayout,
-};
+use crate::home_layout::{HomeCompositionLayout, PanelChromeLayout, PanelNavLayout};
 
 impl PanelBitmap {
     pub(super) fn draw_home(&mut self, content: &PanelContent, hover: Option<PanelAction>) {
         let chrome = PanelChromeLayout::compute();
         let home = HomeCompositionLayout::compute();
-        let brightness = HomeBrightnessLayout::compute();
         let nav = PanelNavLayout::compute();
         let header = pixel_rect(chrome.header);
         let brightness_panel = pixel_rect(home.brightness_panel);
@@ -16,8 +13,6 @@ impl PanelBitmap {
         let automation = pixel_rect(home.automation_panel);
         let primary = pixel_rect(home.primary_action);
         let connection = pixel_rect(home.connection_badge);
-        let down = pixel_rect(brightness.down);
-        let up = pixel_rect(brightness.up);
         let nav_home = pixel_rect(nav.home);
         let nav_settings = pixel_rect(nav.settings);
 
@@ -116,16 +111,6 @@ impl PanelBitmap {
         self.draw_circle(knob_x, brightness_track.1 + 3, 10, PURPLE_BRIGHT);
         self.draw_circle(knob_x, brightness_track.1 + 3, 5, TEXT);
 
-        let down_hover = hover == Some(PanelAction::BrightnessDown);
-        let up_hover = hover == Some(PanelAction::BrightnessUp);
-        if down_hover {
-            self.rounded_rect(down.0, down.1, down.2, down.3, 16, PURPLE_DARK, PURPLE_BRIGHT);
-        }
-        if up_hover {
-            self.rounded_rect(up.0, up.1, up.2, up.3, 16, PURPLE_DARK, PURPLE_BRIGHT);
-        }
-        self.draw_crescent(down.0 + 22, down.1 + 33, 10, MUTED, PANEL);
-        self.draw_sun(up.0 + 34, up.1 + 33, 8, MUTED);
         self.draw_line(
             brightness_panel.0 + 24,
             brightness_panel.1 + 191,
