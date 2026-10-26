@@ -2,7 +2,9 @@ use std::{
     env,
     fmt::Write as _,
     fs,
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -12,6 +14,8 @@ use nightshift_protocol::{AppState, OverlaySpawnMode, SleepPhase};
 const MAX_MANAGED_REPORTS: usize = 10;
 const REPORT_PREFIX: &str = "nightshift-debug-";
 const REPORT_SUFFIX: &str = ".txt";
+const MAX_TEMP_FILE_ATTEMPTS: usize = 16;
+static REPORT_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn write_debug_report(
     state: &AppState,
@@ -24,12 +28,12 @@ pub(crate) fn write_debug_report(
     };
 
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
+        create_report_dir(parent, managed)
             .with_context(|| format!("creating diagnostics directory {}", parent.display()))?;
     }
 
     let report = build_report(state)?;
-    fs::write(&path, report)
+    write_private_file(&path, report.as_bytes())
         .with_context(|| format!("writing Nightshift debug report to {}", path.display()))?;
 
     if managed && let Some(parent) = path.parent() {
@@ -38,6 +42,69 @@ pub(crate) fn write_debug_report(
     }
 
     Ok(path)
+}
+
+fn create_report_dir(parent: &Path, managed: bool) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    if managed {
+        builder.mode(0o700);
+    }
+    builder.create(parent)?;
+    if managed {
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// Write `bytes` to `path` through a private temporary sibling and atomically rename it into place.
+///
+/// `create_new` refuses existing files/symlinks. The final rename replaces a target symlink rather
+/// than following it. The process-local counter keeps concurrent report writers from fighting over
+/// one temp name; `create_new` remains the final authority if another process somehow collides.
+fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let file_name = path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "report path has no file name",
+        )
+    })?;
+
+    for _ in 0..MAX_TEMP_FILE_ATTEMPTS {
+        let nonce = REPORT_TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut temp_name = std::ffi::OsString::from(".");
+        temp_name.push(file_name);
+        temp_name.push(format!(".tmp-{}-{nonce}", std::process::id()));
+        let temp_path = path.with_file_name(temp_name);
+
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temp_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        };
+
+        let result = (|| {
+            std::io::Write::write_all(&mut file, bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temp_path, path)
+        })();
+
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        return result;
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not allocate a unique temporary debug-report file",
+    ))
 }
 
 fn default_report_path() -> Result<PathBuf> {
@@ -350,6 +417,23 @@ mod tests {
     use super::*;
     use nightshift_protocol::{RecentEvent, RecentEventKind};
 
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = env::temp_dir().join(format!(
+            "nightshift-diagnostics-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     #[test]
     fn parses_proc_status_values() {
         let status = "Name:\tnightshift\nVmRSS:\t  1234 kB\nThreads:\t4\n";
@@ -364,6 +448,59 @@ mod tests {
         assert!(!is_managed_report_name("nightshift-debug-not-a-time.txt"));
         assert!(!is_managed_report_name("my-nightshift-debug-123.txt"));
         assert!(!is_managed_report_name("nightshift-debug-123.log"));
+    }
+
+    #[test]
+    fn report_files_are_private_and_replace_existing_files() {
+        let dir = unique_temp_dir("private");
+        let path = dir.join("report.txt");
+        fs::write(&path, "old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_private_file(&path, b"new report").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new report");
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn report_write_does_not_follow_symlinks() {
+        let dir = unique_temp_dir("symlink");
+        let victim = dir.join("victim.txt");
+        fs::write(&victim, "keep me").unwrap();
+        let link = dir.join("report.txt");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+
+        write_private_file(&link, b"report").unwrap();
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "keep me");
+        assert!(!fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(&link).unwrap(), "report");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn managed_report_directory_is_private_but_requested_directory_is_untouched() {
+        let base = unique_temp_dir("dirs");
+
+        let managed = base.join("state").join("nightshift").join("diagnostics");
+        create_report_dir(&managed, true).unwrap();
+        assert_eq!(mode_of(&managed), 0o700);
+
+        let requested = base.join("shared");
+        fs::create_dir_all(&requested).unwrap();
+        fs::set_permissions(&requested, fs::Permissions::from_mode(0o755)).unwrap();
+        create_report_dir(&requested, false).unwrap();
+        assert_eq!(mode_of(&requested), 0o755);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn report_path_without_a_file_name_is_rejected() {
+        assert!(write_private_file(Path::new("/"), b"x").is_err());
     }
 
     #[test]

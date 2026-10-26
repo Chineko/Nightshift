@@ -167,20 +167,17 @@ impl VrchatApiClient {
         Ok((self.invite_sender_is_friend(cookies, user_id).await?, false))
     }
 
-    /// Check only whether the invite sender is a favorite friend.
+    /// Check whether the invite sender is a favorite friend using a fresh VRChat snapshot.
     ///
-    /// Favorite membership is cached briefly per authenticated VRChat session so a burst of invite
-    /// notifications does not repeatedly page through the complete favorites collection.
+    /// Favorite membership is policy input, so the short-lived cache is never authoritative here.
+    /// We still refresh the cache after the decision so diagnostics/tests can observe a bounded
+    /// per-session snapshot without allowing stale membership to auto-accept an invite.
     pub async fn invite_sender_is_favorite(
         &self,
         cookies: &SessionCookies,
         user_id: &str,
     ) -> Result<bool> {
         let user_id = validate_vrchat_user_id(user_id)?;
-        if let Some(is_favorite) = self.cached_favorite_contains(cookies, user_id) {
-            return Ok(is_favorite);
-        }
-
         let user_ids = self.fetch_favorite_friend_ids(cookies).await?;
         let is_favorite = user_ids.contains(user_id);
         let mut cache = self
@@ -192,6 +189,8 @@ impl VrchatApiClient {
             loaded_at: Instant::now(),
             user_ids,
         });
+        drop(cache);
+        debug_assert_eq!(self.cached_favorite_contains(cookies, user_id), Some(is_favorite));
         Ok(is_favorite)
     }
 
