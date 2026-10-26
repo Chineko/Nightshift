@@ -1,14 +1,17 @@
 use crate::{
     home_layout::{
-        HomeBrightnessLayout, HomePrimaryLayout, PanelNavLayout, SettingsToggleLayout,
-        SettingsValueLayout, SocialRemoveLayout, SocialTabsLayout, contains,
+        HomeBrightnessLayout, HomeCompositionLayout, HomePrimaryLayout, PanelNavLayout,
+        SettingsToggleLayout, SettingsValueLayout, SocialRemoveLayout, SocialTabsLayout, contains,
     },
+    layout::LayoutRect,
     placement::{PanelPose, normalize_quaternion_xyzw},
 };
 
 const EPSILON: f32 = 1.0e-5;
 const PANEL_WIDTH_PX: f32 = 768.0;
 const PANEL_HEIGHT_PX: f32 = 960.0;
+const BRIGHTNESS_SLIDER_HIT_PAD_Y: f32 = 22.0;
+const MIN_BRIGHTNESS_PERCENT: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PanelRay {
@@ -49,6 +52,7 @@ pub enum PanelAction {
     Wake,
     BrightnessDown,
     BrightnessUp,
+    SetBrightness(u8),
     ToggleHeartRate,
     ToggleOsc,
     CycleInviteProfile,
@@ -88,12 +92,20 @@ pub fn action_at_uv_for_page(
     match page {
         PanelPage::Home => {
             let brightness = HomeBrightnessLayout::compute();
+            let composition = HomeCompositionLayout::compute();
             let primary = HomePrimaryLayout::compute();
             if contains(brightness.down, x, y) {
                 return Some(PanelAction::BrightnessDown);
             }
             if contains(brightness.up, x, y) {
                 return Some(PanelAction::BrightnessUp);
+            }
+            let slider_hit = brightness_slider_hit_rect(composition.brightness_track);
+            if contains(slider_hit, x, y) {
+                return Some(PanelAction::SetBrightness(brightness_percent_at_x(
+                    composition.brightness_track,
+                    x,
+                )));
             }
             if contains(primary.action, x, y) {
                 return Some(if wake_action {
@@ -140,6 +152,20 @@ pub fn action_at_uv_for_page(
         }
     }
     None
+}
+
+fn brightness_slider_hit_rect(track: LayoutRect) -> LayoutRect {
+    LayoutRect {
+        x: track.x,
+        y: track.y - BRIGHTNESS_SLIDER_HIT_PAD_Y,
+        width: track.width,
+        height: track.height + BRIGHTNESS_SLIDER_HIT_PAD_Y * 2.0,
+    }
+}
+
+fn brightness_percent_at_x(track: LayoutRect, x: f32) -> u8 {
+    let normalized = ((x - track.x) / track.width).clamp(0.0, 1.0);
+    ((normalized * 100.0).round() as u8).clamp(MIN_BRIGHTNESS_PERCENT, 100)
 }
 
 pub fn begin_panel_grab(controller_pose: PanelPose, panel_pose: PanelPose) -> Option<PanelGrab> {
@@ -318,4 +344,30 @@ fn rotate(vector: [f32; 3], quaternion_xyzw: [f32; 4]) -> [f32; 3] {
         vector[1] + w * twice_cross[1] + cross_q_twice_cross[1],
         vector[2] + w * twice_cross[2] + cross_q_twice_cross[2],
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brightness_slider_maps_track_to_safe_percent_range() {
+        let track = HomeCompositionLayout::compute().brightness_track;
+        assert_eq!(brightness_percent_at_x(track, track.x), 2);
+        assert_eq!(
+            brightness_percent_at_x(track, track.x + track.width * 0.5),
+            50
+        );
+        assert_eq!(brightness_percent_at_x(track, track.x + track.width), 100);
+    }
+
+    #[test]
+    fn brightness_track_is_directly_interactive() {
+        let track = HomeCompositionLayout::compute().brightness_track;
+        let uv = PanelUv {
+            u: (track.x + track.width * 0.75) / PANEL_WIDTH_PX,
+            v: (track.y + track.height * 0.5) / PANEL_HEIGHT_PX,
+        };
+        assert_eq!(action_at_uv(uv), Some(PanelAction::SetBrightness(75)));
+    }
 }
