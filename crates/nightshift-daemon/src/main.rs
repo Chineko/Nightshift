@@ -5,7 +5,7 @@ mod state;
 use std::{
     env,
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -37,17 +37,45 @@ const VRCHAT_WORKER_RESTART_DELAY: Duration = Duration::from_secs(1);
 use ipc::*;
 use state::*;
 
-fn vrchat_worker_program() -> PathBuf {
+fn workspace_root() -> Option<PathBuf> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir.parent()?.parent()?;
+    root.join("Cargo.toml").is_file().then(|| root.to_path_buf())
+}
+
+fn vrchat_worker_command() -> (Command, String) {
+    // In a source checkout, always let Cargo rebuild the worker from the same tree as the daemon.
+    // Otherwise an old target/debug/nightshift-vrchat can survive a pull and quietly impersonate
+    // the current worker. Packaged builds fall back to the colocated executable or PATH.
+    if let Some(root) = workspace_root() {
+        let mut command = Command::new("cargo");
+        command
+            .current_dir(&root)
+            .args([
+                "run",
+                "-q",
+                "-p",
+                "nightshift-vrchat-worker",
+                "--bin",
+                "nightshift-vrchat",
+            ]);
+        return (command, format!("cargo worker from {}", root.display()));
+    }
+
     if let Ok(current_exe) = env::current_exe()
         && let Some(parent) = current_exe.parent()
     {
         let sibling = parent.join("nightshift-vrchat");
         if sibling.is_file() {
-            return sibling;
+            let command = Command::new(&sibling);
+            return (command, sibling.display().to_string());
         }
     }
 
-    PathBuf::from("nightshift-vrchat")
+    (
+        Command::new("nightshift-vrchat"),
+        "nightshift-vrchat from PATH".into(),
+    )
 }
 
 async fn supervise_vrchat_worker(vrchat_clients: Arc<AtomicUsize>) {
@@ -57,13 +85,12 @@ async fn supervise_vrchat_worker(vrchat_clients: Arc<AtomicUsize>) {
             continue;
         }
 
-        let program = vrchat_worker_program();
-        let mut command = Command::new(&program);
+        let (mut command, launch) = vrchat_worker_command();
         command.kill_on_drop(true);
 
         match command.spawn() {
             Ok(mut child) => {
-                info!(program = %program.display(), "started managed VRChat worker");
+                info!(%launch, "started managed VRChat worker");
                 match child.wait().await {
                     Ok(status) => {
                         warn!(%status, "managed VRChat worker exited; restarting");
@@ -76,7 +103,7 @@ async fn supervise_vrchat_worker(vrchat_clients: Arc<AtomicUsize>) {
             Err(error) => {
                 warn!(
                     %error,
-                    program = %program.display(),
+                    %launch,
                     "failed to start managed VRChat worker; build/install nightshift-vrchat and retrying"
                 );
             }
