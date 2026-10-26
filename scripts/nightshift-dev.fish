@@ -5,15 +5,17 @@ set -l root (realpath "$script_dir/..")
 set -l hydra
 set -l with_ui 1
 set -l with_hr 1
+set -l with_perf 0
 
 function nightshift_usage
-    echo "Usage: scripts/nightshift-dev.fish [--hydra] [--no-ui] [--no-hr] [--core] [--full]"
+    echo "Usage: scripts/nightshift-dev.fish [--hydra] [--perf] [--no-ui] [--no-hr] [--core] [--full]"
     echo
     echo "By default this builds and starts the full local Nightshift stack:"
     echo "  daemon + OSC + heart-rate + OpenXR overlay + desktop UI"
     echo "  VRChat worker is supervised automatically by the daemon"
     echo
     echo "  --hydra    Enable overlay Hydra diagnostics"
+    echo "  --perf     Sample Nightshift CPU/RAM/threads/FDs into a text report"
     echo "  --no-ui    Do not start the desktop UI"
     echo "  --no-hr    Do not start the BLE heart-rate worker"
     echo "  --core     Start only daemon + OSC + OpenXR overlay"
@@ -26,6 +28,8 @@ for arg in $argv
     switch $arg
         case --hydra-mode --hydra
             set hydra --hydra-mode
+        case --perf
+            set with_perf 1
         case --ui
             set with_ui 1
         case --hr
@@ -65,6 +69,16 @@ cargo build \
 cargo build --release -p nightshift-overlay; or exit $status
 
 set -g nightshift_children
+set -g nightshift_perf_pid
+set -g nightshift_perf_report
+
+function nightshift_stop_perf
+    if test -n "$nightshift_perf_pid"
+        kill $nightshift_perf_pid 2>/dev/null
+        wait $nightshift_perf_pid 2>/dev/null
+        set -g nightshift_perf_pid
+    end
+end
 
 function nightshift_cleanup --on-signal INT --on-signal TERM
     if test (count $nightshift_children) -gt 0
@@ -74,6 +88,7 @@ function nightshift_cleanup --on-signal INT --on-signal TERM
         wait $nightshift_children 2>/dev/null
         set -g nightshift_children
     end
+    nightshift_stop_perf
 end
 
 function nightshift_exit_cleanup --on-event fish_exit
@@ -81,6 +96,7 @@ function nightshift_exit_cleanup --on-event fish_exit
         kill $nightshift_children 2>/dev/null
         wait $nightshift_children 2>/dev/null
     end
+    nightshift_stop_perf
 end
 
 echo "Starting Nightshift daemon..."
@@ -115,6 +131,13 @@ if test $with_ui -eq 1
     set -a nightshift_children $last_pid
 end
 
+if test $with_perf -eq 1
+    set -g nightshift_perf_report "$root/target/nightshift-perf-"(date +%Y%m%d-%H%M%S)".txt"
+    echo "Starting Nightshift performance sampler..."
+    fish "$root/scripts/nightshift-perf.fish" "$nightshift_perf_report" &
+    set -g nightshift_perf_pid $last_pid
+end
+
 echo
 echo "Nightshift is running. Ctrl+C stops the whole local stack."
 if test $with_hr -eq 0
@@ -124,6 +147,9 @@ if test $with_ui -eq 0
     echo "  desktop UI: off"
 end
 echo "  VRChat worker: daemon-supervised"
+if test $with_perf -eq 1
+    echo "  performance report: $nightshift_perf_report"
+end
 echo "WayVR remains a separate process, because one hydra is enough."
 echo
 
