@@ -66,6 +66,12 @@ pub(crate) fn schedule_sleep_status_update(
     capture_original: bool,
 ) {
     let delay = status_update_delay(last_write);
+    info!(
+        generation,
+        target_status = ?sleep_status,
+        delay_ms = delay.as_millis(),
+        "scheduling VRChat sleep presence update"
+    );
     task.replace(tokio::spawn(async move {
         tokio::time::sleep(delay).await;
         let result = set_runtime_sleep_presence(
@@ -109,6 +115,12 @@ async fn set_runtime_sleep_presence(
     tokio::task::yield_now().await;
 
     let target = sleep_target(&current, sleep_status);
+    info!(
+        generation,
+        current_status = ?current.status,
+        target_status = ?target.status,
+        "executing VRChat sleep presence update"
+    );
     let verified = if current != target {
         let _permit = shared_vrchat_requests()
             .acquire(RequestClass::StatusWrite)
@@ -121,9 +133,16 @@ async fn set_runtime_sleep_presence(
         )
         .await?
     } else {
+        info!(generation, "VRChat sleep presence already matches target");
         user
     };
     let presence = user_presence(&verified);
+    info!(
+        generation,
+        requested_status = ?target.status,
+        verified_status = ?presence.status,
+        "VRChat sleep presence update completed"
+    );
 
     Ok(RuntimeRefresh {
         report: WorkerReport::VrchatRuntime {
