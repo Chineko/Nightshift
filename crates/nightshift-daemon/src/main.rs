@@ -24,6 +24,7 @@ use nightshift_protocol::{
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     net::{UnixListener, UnixStream},
+    process::Command,
     sync::{Mutex, broadcast, mpsc, watch},
 };
 use tracing::{info, warn};
@@ -31,9 +32,59 @@ use tracing::{info, warn};
 const CONFIG_WRITE_DEBOUNCE: Duration = Duration::from_millis(250);
 const MAX_HR_DISCOVERED_DEVICES: usize = 32;
 const MAX_IPC_LINE_BYTES: usize = 64 * 1024;
+const VRCHAT_WORKER_RESTART_DELAY: Duration = Duration::from_secs(1);
 
 use ipc::*;
 use state::*;
+
+fn vrchat_worker_program() -> PathBuf {
+    if let Ok(current_exe) = env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let sibling = parent.join("nightshift-vrchat");
+        if sibling.is_file() {
+            return sibling;
+        }
+    }
+
+    PathBuf::from("nightshift-vrchat")
+}
+
+async fn supervise_vrchat_worker(vrchat_clients: Arc<AtomicUsize>) {
+    loop {
+        if vrchat_clients.load(Ordering::Acquire) > 0 {
+            tokio::time::sleep(VRCHAT_WORKER_RESTART_DELAY).await;
+            continue;
+        }
+
+        let program = vrchat_worker_program();
+        let mut command = Command::new(&program);
+        command.kill_on_drop(true);
+
+        match command.spawn() {
+            Ok(mut child) => {
+                info!(program = %program.display(), "started managed VRChat worker");
+                match child.wait().await {
+                    Ok(status) => {
+                        warn!(%status, "managed VRChat worker exited; restarting");
+                    }
+                    Err(error) => {
+                        warn!(%error, "failed while waiting for managed VRChat worker; restarting");
+                    }
+                }
+            }
+            Err(error) => {
+                warn!(
+                    %error,
+                    program = %program.display(),
+                    "failed to start managed VRChat worker; build/install nightshift-vrchat and retrying"
+                );
+            }
+        }
+
+        tokio::time::sleep(VRCHAT_WORKER_RESTART_DELAY).await;
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
@@ -90,6 +141,7 @@ async fn main() -> Result<()> {
         }
     }
     let store = StateStore::new(initial_state);
+    let vrchat_supervisor = tokio::spawn(supervise_vrchat_worker(store.vrchat_clients.clone()));
 
     let run_result: Result<()> = async {
         loop {
@@ -120,6 +172,9 @@ async fn main() -> Result<()> {
         Ok(())
     }
     .await;
+
+    vrchat_supervisor.abort();
+    let _ = vrchat_supervisor.await;
 
     if let Err(error) = store.flush_config().await {
         warn!(%error, "failed to flush Nightshift settings during shutdown");
