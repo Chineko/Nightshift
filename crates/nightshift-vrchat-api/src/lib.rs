@@ -158,6 +158,11 @@ struct ApiError {
 }
 
 #[derive(Debug, Deserialize)]
+struct ApiErrorResponse {
+    error: Option<ApiError>,
+}
+
+#[derive(Debug, Deserialize)]
 struct VerifyTwoFactorResponse {
     verified: Option<bool>,
 }
@@ -369,12 +374,20 @@ impl VrchatApiClient {
             .await
             .context("updating VRChat status")?;
 
-        if let Some(error) = api_status_error(response.status(), "updating status") {
+        let response_status = response.status();
+        if let Some(error) = api_status_error(response_status, "updating status") {
             return Err(error.into());
         }
-        response
-            .error_for_status()
-            .context("VRChat status update failed")?;
+        if !response_status.is_success() {
+            let detail = response
+                .json::<ApiErrorResponse>()
+                .await
+                .ok()
+                .and_then(|body| body.error)
+                .and_then(|error| error.message)
+                .unwrap_or_else(|| "VRChat returned no error detail".into());
+            bail!("VRChat status update failed with HTTP {response_status}: {detail}");
+        }
         Ok(())
     }
 
@@ -398,12 +411,20 @@ impl VrchatApiClient {
             .await
             .context("updating VRChat presence")?;
 
-        if let Some(error) = api_status_error(response.status(), "updating presence") {
+        let response_status = response.status();
+        if let Some(error) = api_status_error(response_status, "updating presence") {
             return Err(error.into());
         }
-        response
-            .error_for_status()
-            .context("VRChat presence update failed")?;
+        if !response_status.is_success() {
+            let detail = response
+                .json::<ApiErrorResponse>()
+                .await
+                .ok()
+                .and_then(|body| body.error)
+                .and_then(|error| error.message)
+                .unwrap_or_else(|| "VRChat returned no error detail".into());
+            bail!("VRChat presence update failed with HTTP {response_status}: {detail}");
+        }
 
         // VRChat may normalize presence text. Trust the read-back, not our wishful thinking.
         self.current_user(cookies).await
