@@ -1,7 +1,10 @@
 use super::*;
-use crate::runtime::{
-    AbortTask, RuntimeRefresh, StatusTaskResult, session_cookies, status_update_delay, user_presence,
-    validated_user,
+use crate::{
+    pipeline::latest_live_user_presence,
+    runtime::{
+        AbortTask, RuntimeRefresh, StatusTaskResult, session_cookies, status_update_delay,
+        user_presence, validated_user,
+    },
 };
 use nightshift_vrchat_status::VrchatPresence;
 
@@ -105,7 +108,10 @@ async fn set_runtime_sleep_presence(
         bail!("VRChat session changed before pending presence update");
     }
 
-    let current = user_presence(&user);
+    // The REST current-user snapshot can lag behind the live VRChat client. Prefer the
+    // authenticated pipeline's current-user update when available so manual status changes are
+    // not mistaken for an already-matching target.
+    let current = latest_live_user_presence(&user.id).unwrap_or_else(|| user_presence(&user));
     if capture_original {
         capture_slot.store_once(generation, current.clone());
     }
