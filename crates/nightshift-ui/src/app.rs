@@ -142,7 +142,7 @@ impl NightshiftApp {
         }
 
         let mut dismiss = None;
-        egui::Area::new("nightshift_toasts".into())
+        egui::Area::new(egui::Id::unique("nightshift_toasts"))
             .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-18.0, 18.0))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
