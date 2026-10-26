@@ -178,6 +178,12 @@ struct StatusChangeBody<'a> {
 }
 
 #[derive(Debug, Serialize)]
+struct StatusDescriptionChangeBody<'a> {
+    #[serde(rename = "statusDescription")]
+    status_description: &'a str,
+}
+
+#[derive(Debug, Serialize)]
 struct PresenceChangeBody<'a> {
     status: &'a str,
     #[serde(rename = "statusDescription")]
@@ -374,21 +380,26 @@ impl VrchatApiClient {
             .await
             .context("updating VRChat status")?;
 
-        let response_status = response.status();
-        if let Some(error) = api_status_error(response_status, "updating status") {
-            return Err(error.into());
-        }
-        if !response_status.is_success() {
-            let detail = response
-                .json::<ApiErrorResponse>()
-                .await
-                .ok()
-                .and_then(|body| body.error)
-                .and_then(|error| error.message)
-                .unwrap_or_else(|| "VRChat returned no error detail".into());
-            bail!("VRChat status update failed with HTTP {response_status}: {detail}");
-        }
-        Ok(())
+        ensure_presence_write_succeeded(response, "updating status").await
+    }
+
+    pub async fn set_status_description(
+        &self,
+        cookies: &SessionCookies,
+        user_id: &str,
+        status_description: &str,
+    ) -> Result<()> {
+        let user_id = validate_vrchat_user_id(user_id)?;
+        let response = self
+            .http
+            .put(format!("{BASE_URL}/users/{user_id}"))
+            .header(COOKIE, cookies.cookie_header())
+            .json(&StatusDescriptionChangeBody { status_description })
+            .send()
+            .await
+            .context("updating VRChat status description")?;
+
+        ensure_presence_write_succeeded(response, "updating status description").await
     }
 
     pub async fn set_presence(
@@ -397,7 +408,7 @@ impl VrchatApiClient {
         user_id: &str,
         status: VrchatStatus,
         status_description: &str,
-    ) -> Result<CurrentUserSummary> {
+    ) -> Result<()> {
         let user_id = validate_vrchat_user_id(user_id)?;
         let response = self
             .http
@@ -411,24 +422,29 @@ impl VrchatApiClient {
             .await
             .context("updating VRChat presence")?;
 
-        let response_status = response.status();
-        if let Some(error) = api_status_error(response_status, "updating presence") {
-            return Err(error.into());
-        }
-        if !response_status.is_success() {
-            let detail = response
-                .json::<ApiErrorResponse>()
-                .await
-                .ok()
-                .and_then(|body| body.error)
-                .and_then(|error| error.message)
-                .unwrap_or_else(|| "VRChat returned no error detail".into());
-            bail!("VRChat presence update failed with HTTP {response_status}: {detail}");
-        }
-
-        // VRChat may normalize presence text. Trust the read-back, not our wishful thinking.
-        self.current_user(cookies).await
+        ensure_presence_write_succeeded(response, "updating presence").await
     }
+}
+
+async fn ensure_presence_write_succeeded(
+    response: reqwest::Response,
+    operation: &'static str,
+) -> Result<()> {
+    let response_status = response.status();
+    if let Some(error) = api_status_error(response_status, operation) {
+        return Err(error.into());
+    }
+    if !response_status.is_success() {
+        let detail = response
+            .json::<ApiErrorResponse>()
+            .await
+            .ok()
+            .and_then(|body| body.error)
+            .and_then(|error| error.message)
+            .unwrap_or_else(|| "VRChat returned no error detail".into());
+        bail!("VRChat presence update failed with HTTP {response_status}: {detail}");
+    }
+    Ok(())
 }
 
 impl Default for VrchatApiClient {
@@ -653,6 +669,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(user.status_description, "Sleeping in VR 🌙");
+    }
+
+    #[test]
+    fn status_write_uses_only_status_field() {
+        let body = StatusChangeBody { status: "ask me" };
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::json!({"status": "ask me"})
+        );
+    }
+
+    #[test]
+    fn status_description_write_uses_only_description_field() {
+        let body = StatusDescriptionChangeBody {
+            status_description: "Sleeping in VR 🌙",
+        };
+        assert_eq!(
+            serde_json::to_value(body).unwrap(),
+            serde_json::json!({"statusDescription": "Sleeping in VR 🌙"})
+        );
     }
 
     #[test]
