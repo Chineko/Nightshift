@@ -1,5 +1,15 @@
+#[cfg(not(test))]
+use crate::controller_input::{begin_slider_drag_for_pressed_hand, slider_drag_active};
+#[cfg(test)]
+fn begin_slider_drag_for_pressed_hand() -> bool {
+    false
+}
+#[cfg(test)]
+const fn slider_drag_active() -> bool {
+    false
+}
+
 use crate::{
-    controller_input::{begin_slider_drag_for_pressed_hand, slider_drag_active},
     home_layout::{
         HomeBrightnessLayout, HomeCompositionLayout, HomePrimaryLayout, PanelNavLayout,
         SettingsToggleLayout, SettingsValueLayout, SocialRemoveLayout, SocialTabsLayout, contains,
