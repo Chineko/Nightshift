@@ -1,4 +1,5 @@
 use crate::{
+    controller_input::{begin_slider_drag_for_pressed_hand, slider_drag_active},
     home_layout::{
         HomeBrightnessLayout, HomeCompositionLayout, HomePrimaryLayout, PanelNavLayout,
         SettingsToggleLayout, SettingsValueLayout, SocialRemoveLayout, SocialTabsLayout, contains,
@@ -81,6 +82,15 @@ pub fn action_at_uv_for_page(
 
     let x = uv.u * PANEL_WIDTH_PX;
     let y = uv.v * PANEL_HEIGHT_PX;
+
+    // Once a trigger press starts on the slider, keep ownership until release. During
+    // that drag the slider wins over every other control, so a wide VR hand motion
+    // cannot accidentally navigate or press the giant sleep button.
+    if page == PanelPage::Home && slider_drag_active() {
+        let track = HomeCompositionLayout::compute().brightness_track;
+        return Some(PanelAction::SetBrightness(brightness_percent_at_x(track, x)));
+    }
+
     let navigation = PanelNavLayout::compute();
     if contains(navigation.home, x, y) {
         return Some(PanelAction::NavigateHome);
@@ -102,6 +112,7 @@ pub fn action_at_uv_for_page(
             }
             let slider_hit = brightness_slider_hit_rect(composition.brightness_track);
             if contains(slider_hit, x, y) {
+                begin_slider_drag_for_pressed_hand();
                 return Some(PanelAction::SetBrightness(brightness_percent_at_x(
                     composition.brightness_track,
                     x,
