@@ -1,5 +1,6 @@
 use super::*;
 use crate::bridge::{Bridge, UiUpdate};
+use nightshift_ui::notifications::{toast_for_event, Toast, ToastQueue, ToastSeverity};
 
 const BG: Color32 = Color32::from_rgb(12, 13, 17);
 const PANEL: Color32 = Color32::from_rgb(23, 24, 30);
@@ -23,6 +24,8 @@ pub(crate) struct NightshiftApp {
     invite_settings: InviteSettingsUi,
     brightness_send_at: Instant,
     hr_device_filter_draft: String,
+    toasts: ToastQueue,
+    toast_tick_at: Instant,
 }
 
 impl NightshiftApp {
@@ -36,12 +39,37 @@ impl NightshiftApp {
             invite_settings: InviteSettingsUi::default(),
             brightness_send_at: Instant::now() - Duration::from_secs(1),
             hr_device_filter_draft: String::new(),
+            toasts: ToastQueue::default(),
+            toast_tick_at: Instant::now(),
         }
     }
 
     fn send_command(&self, command: UiCommand) {
         if self.daemon_connected {
             self.bridge.send(command);
+        }
+    }
+
+    fn sleeping(&self) -> bool {
+        matches!(
+            self.state.sleep.phase,
+            SleepPhase::EnteringSleep | SleepPhase::Sleeping
+        )
+    }
+
+    fn push_toast(&mut self, toast: Toast) {
+        self.toasts.push(toast, self.sleeping());
+    }
+
+    fn push_event_toast(&mut self, event: &StateEvent) {
+        if let Some(toast) = toast_for_event(&self.state, event) {
+            // The sleep-edge toast gets one last wave before quiet mode closes the curtains.
+            let sleeping = if matches!(event, StateEvent::SleepChanged(_)) {
+                false
+            } else {
+                self.sleeping()
+            };
+            self.toasts.push(toast, sleeping);
         }
     }
 
@@ -54,11 +82,24 @@ impl NightshiftApp {
         self.vrchat_auth.drain_updates();
         while let Ok(update) = self.bridge.updates.try_recv() {
             match update {
-                UiUpdate::Connected(connected) => self.daemon_connected = connected,
+                UiUpdate::Connected(connected) => {
+                    if self.daemon_connected && !connected {
+                        self.push_toast(Toast::error(
+                            "Nightshift disconnected",
+                            "Desktop controls are waiting for the daemon to reconnect.",
+                        ));
+                    }
+                    self.daemon_connected = connected;
+                }
                 UiUpdate::Message(ServerMessage::FullState { state }) => self.set_full_state(state),
-                UiUpdate::Message(ServerMessage::Event { event }) => self.apply_event(event),
+                UiUpdate::Message(ServerMessage::Event { event }) => {
+                    self.push_event_toast(&event);
+                    self.apply_event(event);
+                }
                 UiUpdate::Message(ServerMessage::Hello { .. }) => {}
-                UiUpdate::Message(ServerMessage::Error { .. }) => {}
+                UiUpdate::Message(ServerMessage::Error { message }) => {
+                    self.push_toast(Toast::error("Nightshift", message));
+                }
             }
         }
     }
@@ -80,6 +121,60 @@ impl NightshiftApp {
             StateEvent::OverlayChanged(state) => self.state.overlay = state,
             StateEvent::SettingsChanged(state) => self.state.settings = state,
             StateEvent::ConnectionChanged(state) => self.state.connection = state,
+        }
+    }
+
+    fn tick_toasts(&mut self) {
+        let now = Instant::now();
+        self.toasts.tick(now.saturating_duration_since(self.toast_tick_at));
+        self.toast_tick_at = now;
+    }
+
+    fn render_toasts(&mut self, ctx: &egui::Context) {
+        if self.toasts.is_empty() {
+            return;
+        }
+
+        let mut dismiss = None;
+        egui::Area::new(egui::Id::new("nightshift_toasts"))
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-16.0, 16.0))
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                ui.set_width(320.0);
+                ui.vertical(|ui| {
+                    for (index, toast) in self.toasts.visible().enumerate() {
+                        let accent = match toast.severity {
+                            ToastSeverity::Info => PURPLE,
+                            ToastSeverity::Warning => AMBER,
+                            ToastSeverity::Error => Color32::from_rgb(238, 106, 106),
+                        };
+
+                        egui::Frame::new()
+                            .fill(PANEL)
+                            .stroke(Stroke::new(1.0, accent))
+                            .corner_radius(12)
+                            .inner_margin(12)
+                            .show(ui, |ui| {
+                                ui.set_min_width(296.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&toast.title).strong().color(accent));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.small_button("×").clicked() {
+                                                dismiss = Some(index);
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.label(RichText::new(&toast.message).color(MUTED));
+                            });
+                    }
+                });
+            });
+
+        if let Some(index) = dismiss {
+            self.toasts.dismiss(index);
         }
     }
 
@@ -521,8 +616,12 @@ impl NightshiftApp {
 }
 
 impl eframe::App for NightshiftApp {
-    fn logic(&mut self, _ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_updates();
+        self.tick_toasts();
+        if !self.toasts.is_empty() {
+            ctx.request_repaint_after(Duration::from_millis(100));
+        }
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -530,6 +629,7 @@ impl eframe::App for NightshiftApp {
         ui.visuals_mut().panel_fill = BG;
         ui.visuals_mut().override_text_color = Some(Color32::from_rgb(238, 238, 242));
         ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+        let ctx = ui.ctx().clone();
 
         egui::Frame::central_panel(ui.style())
             .fill(BG)
@@ -541,6 +641,8 @@ impl eframe::App for NightshiftApp {
                     Page::Settings => self.settings(ui),
                 });
             });
+
+        self.render_toasts(&ctx);
     }
 }
 

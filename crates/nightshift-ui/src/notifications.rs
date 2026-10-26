@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, time::Duration};
 
-use nightshift_protocol::{AppState, SleepPhase, StateEvent};
+use nightshift_protocol::{AppState, InviteActionKind, SleepPhase, StateEvent};
 
 const MAX_TOASTS: usize = 4;
 
@@ -81,6 +81,27 @@ pub fn toast_for_event(previous: &AppState, event: &StateEvent) -> Option<Toast>
                 "Presence and invite automation are ready.",
             ))
         }
+        StateEvent::InvitesChanged(state)
+            if state.last_error != previous.invites.last_error && state.last_error.is_some() =>
+        {
+            Some(Toast::error(
+                "Invite automation",
+                state.last_error.as_deref().unwrap_or("Invite handling failed."),
+            ))
+        }
+        StateEvent::InvitesChanged(state)
+            if state.last_action != previous.invites.last_action && state.last_action.is_some() =>
+        {
+            let action = state.last_action.as_ref()?;
+            let person = action.display_name.as_deref().unwrap_or("VRChat user");
+            let message = match action.kind {
+                InviteActionKind::Accepted => format!("Accepted invite from {person}."),
+                InviteActionKind::Declined => format!("Declined invite from {person}."),
+                InviteActionKind::Ignored => format!("Ignored invite from {person}."),
+                InviteActionKind::Asked => format!("Asked before handling invite from {person}."),
+            };
+            Some(Toast::info("Invite automation", message))
+        }
         _ => None,
     }
 }
@@ -137,6 +158,7 @@ impl ToastQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nightshift_protocol::InviteAction;
 
     #[test]
     fn queue_is_bounded_and_keeps_newest_toasts() {
@@ -205,5 +227,18 @@ mod tests {
 
         let toast = toast_for_event(&previous, &StateEvent::VrchatChanged(disconnected)).unwrap();
         assert_eq!(toast.severity, ToastSeverity::Warning);
+    }
+
+    #[test]
+    fn invite_actions_are_notified_only_when_the_action_changes() {
+        let previous = AppState::default();
+        let mut invites = previous.invites.clone();
+        invites.last_action = Some(InviteAction {
+            kind: InviteActionKind::Accepted,
+            display_name: Some("Sleepy Friend".into()),
+        });
+
+        let toast = toast_for_event(&previous, &StateEvent::InvitesChanged(invites)).unwrap();
+        assert!(toast.message.contains("Sleepy Friend"));
     }
 }
