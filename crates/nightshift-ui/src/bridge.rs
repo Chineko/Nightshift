@@ -87,9 +87,14 @@ async fn connection_loop(
         }
 
         let mut line = String::new();
-        match reader.read_line(&mut line).await {
-            Ok(0) | Err(_) => continue,
-            Ok(_) => match serde_json::from_str::<ServerMessage>(line.trim_end()) {
+        match tokio::time::timeout(
+            nightshift_protocol::IPC_HELLO_TIMEOUT,
+            reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => continue,
+            Ok(Ok(_)) => match serde_json::from_str::<ServerMessage>(line.trim_end()) {
                 Ok(ServerMessage::Hello { protocol, .. }) if protocol == PROTOCOL_VERSION => {}
                 Ok(ServerMessage::Error { .. }) | Ok(_) | Err(_) => continue,
             },
