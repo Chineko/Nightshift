@@ -19,6 +19,7 @@ impl PanelBitmap {
         let down = pixel_rect(brightness.down);
         let up = pixel_rect(brightness.up);
         let nav_home = pixel_rect(nav.home);
+        let nav_settings = pixel_rect(nav.settings);
 
         self.rounded_rect(header.0, header.1, header.2, header.3, 18, PANEL, BORDER);
         self.rounded_rect(header.0 + 20, header.1 + 16, 44, 44, 13, PURPLE_DARK, PURPLE);
@@ -33,8 +34,15 @@ impl PanelBitmap {
             PURPLE_DARK,
             BORDER,
         );
-        self.draw_text(nav_home.0 + 19, nav_home.1 + 16, "HOME", 3, TEXT);
-        self.draw_text(620, 54, "SETTINGS", 3, MUTED);
+        self.draw_text_centered(nav_home.0, nav_home.1 + 16, nav_home.2, "HOME", 3, TEXT);
+        self.draw_text_centered(
+            nav_settings.0,
+            nav_settings.1 + 16,
+            nav_settings.2,
+            "SETTINGS",
+            3,
+            MUTED,
+        );
 
         self.draw_text(48, 124, "VR OVERLAY", 2, PURPLE_BRIGHT);
         self.draw_text(48, 151, "GOOD EVENING.", 5, TEXT);
@@ -236,9 +244,7 @@ impl PanelBitmap {
             if hovered { PURPLE_BRIGHT } else { PURPLE },
         );
         let label = content.primary_action_label();
-        let label_width = label.chars().count() as u32 * 18;
-        let label_x = 397_u32.saturating_sub(label_width / 2).max(290);
-        self.draw_text(label_x, primary.1 + 25, label, 3, TEXT);
+        self.draw_text_centered(primary.0 + 238, primary.1 + 25, primary.2 - 278, label, 3, TEXT);
 
         self.draw_text(271, 935, "NIGHTSHIFT OVERLAY  V1.4.2", 1, MUTED);
     }
