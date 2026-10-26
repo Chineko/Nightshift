@@ -2,7 +2,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use ash::vk::{self, Handle};
 use openxr as xr;
 
-use crate::placement::PanelPose;
+use crate::{
+    placement::PanelPose,
+    swapchain_wait::{release_image, wait_image_bounded},
+};
 
 pub const PANEL_TEXTURE_WIDTH: u32 = 768;
 pub const PANEL_TEXTURE_HEIGHT: u32 = 960;
@@ -77,9 +80,7 @@ impl PanelRenderer {
             .swapchain
             .acquire_image()
             .context("acquiring positioned panel image")?;
-        self.swapchain
-            .wait_image(xr::Duration::INFINITE)
-            .context("waiting for positioned panel image")?;
+        wait_image_bounded(&self.swapchain, "waiting for positioned panel image")?;
 
         let render_result = (|| -> Result<()> {
             let image = self.image(image_index)?;
@@ -123,10 +124,7 @@ impl PanelRenderer {
 
         // Once OpenXR has handed us a waited image, it goes back even if the GPU path
         // trips over its own shoelaces. Starving the compositor is poor goblin etiquette.
-        let release_result = self
-            .swapchain
-            .release_image()
-            .context("releasing positioned panel image");
+        let release_result = release_image(&self.swapchain, "releasing positioned panel image");
         render_result?;
         release_result?;
         self.initialized = true;
@@ -150,9 +148,10 @@ impl PanelRenderer {
             .swapchain
             .acquire_image()
             .context("acquiring positioned panel image for upload")?;
-        self.swapchain
-            .wait_image(xr::Duration::INFINITE)
-            .context("waiting for positioned panel image for upload")?;
+        wait_image_bounded(
+            &self.swapchain,
+            "waiting for positioned panel image for upload",
+        )?;
 
         let upload_result = (|| -> Result<()> {
             let image = self.image(image_index)?;
@@ -277,10 +276,10 @@ impl PanelRenderer {
         })();
 
         // Same rule as initialization: a waited swapchain image always goes home.
-        let release_result = self
-            .swapchain
-            .release_image()
-            .context("releasing uploaded positioned panel image");
+        let release_result = release_image(
+            &self.swapchain,
+            "releasing uploaded positioned panel image",
+        );
         upload_result?;
         release_result?;
         self.initialized = true;
