@@ -1,4 +1,21 @@
 use super::*;
+use tokio_tungstenite::tungstenite::{
+    client::IntoClientRequest,
+    http::{HeaderValue, Request, header::USER_AGENT},
+};
+
+fn pipeline_request(auth_token: &str) -> Result<Request<()>> {
+    let mut request = pipeline_url(auth_token)
+        .into_client_request()
+        .context("building VRChat pipeline request")?;
+    let user_agent = HeaderValue::from_str(&format!(
+        "Nightshift/{} (https://github.com/Chineko/Nightshift)",
+        env!("CARGO_PKG_VERSION")
+    ))
+    .context("building VRChat pipeline user agent")?;
+    request.headers_mut().insert(USER_AGENT, user_agent);
+    Ok(request)
+}
 
 pub(crate) fn pipeline_error_message(frame: &str) -> Option<String> {
     let value: Value = serde_json::from_str(frame).ok()?;
@@ -31,10 +48,17 @@ pub(crate) async fn pipeline_loop(
     events: mpsc::UnboundedSender<VrchatNotification>,
 ) {
     loop {
-        let url = pipeline_url(&auth_token);
+        let request = match pipeline_request(&auth_token) {
+            Ok(request) => request,
+            Err(error) => {
+                warn!(%error, "failed to build VRChat pipeline request; retrying");
+                tokio::time::sleep(PIPELINE_RECONNECT_DELAY).await;
+                continue;
+            }
+        };
         let connection = tokio::time::timeout(
             PIPELINE_CONNECT_TIMEOUT,
-            connect_async(url.as_str()),
+            connect_async(request),
         )
         .await;
 
@@ -43,10 +67,9 @@ pub(crate) async fn pipeline_loop(
                 info!("VRChat pipeline connected");
                 socket
             }
-            Ok(Err(_)) => {
-                // Do not log the websocket error object: depending on the implementation/error
-                // variant it may retain request details containing the authToken query parameter.
-                warn!("VRChat pipeline connection failed; retrying");
+            Ok(Err(error)) => {
+                let message = redact_pipeline_secret(&error.to_string(), &auth_token);
+                warn!(%message, "VRChat pipeline connection failed; retrying");
                 tokio::time::sleep(PIPELINE_RECONNECT_DELAY).await;
                 continue;
             }
@@ -84,9 +107,9 @@ pub(crate) async fn pipeline_loop(
                     break;
                 }
                 Some(Ok(_)) => {}
-                Some(Err(_)) => {
-                    // Keep websocket internals out of logs for the same reason as connect errors.
-                    warn!("VRChat pipeline read failed; reconnecting");
+                Some(Err(error)) => {
+                    let message = redact_pipeline_secret(&error.to_string(), &auth_token);
+                    warn!(%message, "VRChat pipeline read failed; reconnecting");
                     break;
                 }
                 None => {
