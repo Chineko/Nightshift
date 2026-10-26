@@ -107,6 +107,7 @@ pub struct VrchatAuthUi {
     password: String,
     code: String,
     pending: Option<PendingAuth>,
+    authenticated_name: Option<String>,
     busy: bool,
     message: Option<(String, bool)>,
 }
@@ -119,6 +120,7 @@ impl VrchatAuthUi {
             password: String::new(),
             code: String::new(),
             pending: None,
+            authenticated_name: None,
             busy: false,
             message: None,
         }
@@ -135,6 +137,7 @@ impl VrchatAuthUi {
                 }
                 AuthUpdate::Authenticated(display_name) => {
                     self.pending = None;
+                    self.authenticated_name = Some(display_name.clone());
                     self.password.clear();
                     self.code.clear();
                     self.message = Some((
@@ -144,6 +147,7 @@ impl VrchatAuthUi {
                 }
                 AuthUpdate::SessionCleared => {
                     self.pending = None;
+                    self.authenticated_name = None;
                     self.password.clear();
                     self.code.clear();
                     self.message = Some(("Stored VRChat session removed.".into(), true));
@@ -154,8 +158,9 @@ impl VrchatAuthUi {
     }
 
     pub fn render(&mut self, ui: &mut egui::Ui, runtime_name: Option<&str>) {
-        if let Some(name) = runtime_name {
-            ui.label(RichText::new(format!("Runtime connected as {name}")).strong());
+        let connected_name = runtime_name.or(self.authenticated_name.as_deref());
+        if let Some(name) = connected_name {
+            ui.label(RichText::new(format!("Connected as {name}")).strong());
         } else {
             ui.label(RichText::new("VRChat runtime not connected").color(MUTED));
         }
@@ -191,7 +196,7 @@ impl VrchatAuthUi {
                     self.message = None;
                 }
             });
-        } else {
+        } else if connected_name.is_none() {
             ui.label("Username or email");
             ui.add(egui::TextEdit::singleline(&mut self.username).hint_text("VRChat account"));
             ui.label("Password");
@@ -212,6 +217,8 @@ impl VrchatAuthUi {
             {
                 self.login();
             }
+        } else {
+            ui.label(RichText::new("VRChat session is stored and ready for the runtime worker.").color(MUTED));
         }
 
         if self.busy {
