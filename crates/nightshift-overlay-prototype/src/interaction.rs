@@ -11,8 +11,8 @@ const fn slider_drag_active() -> bool {
 
 use crate::{
     home_layout::{
-        HomeBrightnessLayout, HomeCompositionLayout, HomePrimaryLayout, PanelNavLayout,
-        SettingsToggleLayout, SettingsValueLayout, SocialRemoveLayout, SocialTabsLayout, contains,
+        HomeCompositionLayout, HomePrimaryLayout, PanelNavLayout, SettingsToggleLayout,
+        SettingsValueLayout, SocialRemoveLayout, SocialTabsLayout, contains,
     },
     layout::LayoutRect,
     placement::{PanelPose, normalize_quaternion_xyzw},
@@ -61,8 +61,6 @@ pub enum PanelAction {
     NavigateSettings,
     EnterSleep,
     Wake,
-    BrightnessDown,
-    BrightnessUp,
     SetBrightness(u8),
     ToggleHeartRate,
     ToggleOsc,
@@ -111,15 +109,8 @@ pub fn action_at_uv_for_page(
 
     match page {
         PanelPage::Home => {
-            let brightness = HomeBrightnessLayout::compute();
             let composition = HomeCompositionLayout::compute();
             let primary = HomePrimaryLayout::compute();
-            if contains(brightness.down, x, y) {
-                return Some(PanelAction::BrightnessDown);
-            }
-            if contains(brightness.up, x, y) {
-                return Some(PanelAction::BrightnessUp);
-            }
             let slider_hit = brightness_slider_hit_rect(composition.brightness_track);
             if contains(slider_hit, x, y) {
                 begin_slider_drag_for_pressed_hand();
