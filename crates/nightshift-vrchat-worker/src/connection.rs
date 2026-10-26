@@ -64,13 +64,37 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
     )
     .await?;
 
+    let mut line = String::new();
+    let read = tokio::time::timeout(
+        nightshift_protocol::IPC_HELLO_TIMEOUT,
+        reader.read_line(&mut line),
+    )
+    .await
+    .context("timed out waiting for daemon hello")??;
+    if read == 0 {
+        bail!("daemon closed the socket during handshake");
+    }
+    match serde_json::from_str::<ServerMessage>(line.trim_end())
+        .context("decoding daemon hello")?
+    {
+        ServerMessage::Hello { protocol, .. } if protocol == PROTOCOL_VERSION => {
+            info!(protocol, "Nightshift VRChat worker connected to daemon");
+        }
+        ServerMessage::Hello { protocol, .. } => bail!(
+            "daemon protocol mismatch: vrchat={}, daemon={protocol}",
+            PROTOCOL_VERSION
+        ),
+        ServerMessage::Error { message } => bail!("daemon rejected connection: {message}"),
+        _ => bail!("daemon returned an unexpected handshake response"),
+    }
+    line.clear();
+
     let api = VrchatApiClient::new()?;
     let store = VrchatSessionStore::default();
     let mut last_report: Option<WorkerReport> = None;
     let mut interval = tokio::time::interval(REFRESH_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     interval.reset();
-    let mut line = String::new();
     let mut state_synchronized = false;
 
     let mut sleeping = false;
@@ -126,15 +150,7 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                 line.clear();
 
                 match message {
-                    ServerMessage::Hello { protocol, .. } => {
-                        if protocol != PROTOCOL_VERSION {
-                            bail!(
-                                "daemon protocol mismatch: vrchat={}, daemon={protocol}",
-                                PROTOCOL_VERSION
-                            );
-                        }
-                        info!(protocol, "Nightshift VRChat worker connected to daemon");
-                    }
+                    ServerMessage::Hello { .. } => bail!("daemon repeated IPC hello after handshake"),
                     ServerMessage::FullState { state } => {
                         // Snapshot is synchronization, not a fresh Sleep/Wake edge.
                         sleeping = sleeping_phase(state.sleep.phase);
