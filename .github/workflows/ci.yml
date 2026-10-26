@@ -32,6 +32,7 @@ jobs:
       - name: Validate dev launcher
         run: |
           fish -n scripts/nightshift-dev.fish
+          fish -n scripts/nightshift-perf.fish
           fish scripts/nightshift-dev.fish --help > /dev/null
 
       # Continuity note for future maintainers, assistants, and suspiciously organized goblins:
