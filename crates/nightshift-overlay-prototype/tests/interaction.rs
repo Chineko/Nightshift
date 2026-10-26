@@ -107,15 +107,17 @@ fn invalid_geometry_fails_closed() {
 }
 
 #[test]
-fn dashboard_regions_map_to_brightness_and_stateful_primary_action() {
+fn dashboard_regions_map_to_brightness_slider_and_stateful_primary_action() {
     assert_eq!(
-        action_at_uv(PanelUv { u: 0.11, v: 0.39 }),
-        Some(PanelAction::BrightnessDown)
+        action_at_uv(PanelUv { u: 0.12, v: 0.39 }),
+        Some(PanelAction::SetBrightness(2))
     );
     assert_eq!(
-        action_at_uv(PanelUv { u: 0.89, v: 0.39 }),
-        Some(PanelAction::BrightnessUp)
+        action_at_uv(PanelUv { u: 0.88, v: 0.39 }),
+        Some(PanelAction::SetBrightness(100))
     );
+    assert_eq!(action_at_uv(PanelUv { u: 0.11, v: 0.39 }), None);
+    assert_eq!(action_at_uv(PanelUv { u: 0.89, v: 0.39 }), None);
 
     let primary = PanelUv { u: 0.5, v: 0.91 };
     assert_eq!(
