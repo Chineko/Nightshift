@@ -4,6 +4,8 @@ Nightshift is a lightweight Linux-native VRChat sleep companion designed for Que
 
 The project is intentionally split so Nightshift can run on its own and coexist with WayVR as an optional companion rather than depending on it.
 
+The current canonical development branch is `prototype/integrated-mvp`. Until the repository default branch is moved to the canonical line, contributors should branch from and compare against `prototype/integrated-mvp` rather than assuming the default branch is current.
+
 ## Current architecture
 
 The workspace is intentionally split into small policy, transport, worker, and UI crates:
@@ -108,7 +110,8 @@ Nightshift is designed around event-driven updates:
 - no blocking work on the UI thread
 - deduplicated backend state broadcasts
 - brightness slider IPC is rate-limited while dragging
-- VRChat favorite-friend membership is cached briefly per authenticated session to avoid repeatedly paging the favorites API during invite bursts
+- invite policy decisions use a fresh VRChat favorite-friend snapshot; stale presentation caches are never authoritative for accept/decline policy
+- friend/profile presentation metadata and decoded thumbnails may be cached within the current authenticated session, with session changes invalidating stale presentation data
 - positioned-panel texture initialization happens once and the HMD VIEW pose is only located when a new panel spawn pose is needed
 - remembered panel poses are reported only when they change rather than once per rendered frame
 - external integrations should use events where possible and the lowest practical polling frequency otherwise
