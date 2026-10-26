@@ -250,6 +250,19 @@ where
     }
 }
 
+async fn read_ipc_line_with_timeout<R>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+    timeout: Duration,
+) -> Result<Option<String>>
+where
+    R: AsyncRead + Unpin,
+{
+    tokio::time::timeout(timeout, read_ipc_line(reader, buffer))
+        .await
+        .context("timed out waiting for IPC hello")?
+}
+
 enum ClientStep {
     Continue,
     Resync,
@@ -260,7 +273,13 @@ pub(crate) async fn handle_client(stream: UnixStream, store: StateStore) -> Resu
     let (mut read_half, mut write_half) = stream.into_split();
     let mut read_buffer = Vec::with_capacity(4096);
 
-    let Some(line) = read_ipc_line(&mut read_half, &mut read_buffer).await? else {
+    let Some(line) = read_ipc_line_with_timeout(
+        &mut read_half,
+        &mut read_buffer,
+        nightshift_protocol::IPC_HELLO_TIMEOUT,
+    )
+    .await?
+    else {
         return Ok(());
     };
 
@@ -481,4 +500,23 @@ pub(crate) async fn handle_client(stream: UnixStream, store: StateStore) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stalled_hello_reader_times_out() {
+        let (_writer, mut reader) = tokio::io::duplex(16);
+        let mut buffer = Vec::new();
+        let error = read_ipc_line_with_timeout(
+            &mut reader,
+            &mut buffer,
+            Duration::from_millis(10),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out waiting for IPC hello"));
+    }
 }
