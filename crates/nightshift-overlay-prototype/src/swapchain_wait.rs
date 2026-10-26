@@ -9,7 +9,7 @@ pub(crate) fn wait_image_bounded(
     label: &str,
 ) -> Result<()> {
     let info = xr::sys::SwapchainImageWaitInfo {
-        ty: xr::sys::SwapchainImageWaitInfo::TYPE,
+        ty: xr::sys::StructureType::SWAPCHAIN_IMAGE_WAIT_INFO,
         next: std::ptr::null_mut(),
         timeout: WAIT_SLICE,
     };
