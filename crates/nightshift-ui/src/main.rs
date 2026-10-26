@@ -39,7 +39,7 @@ fn main() -> eframe::Result {
         "Nightshift",
         options,
         Box::new(|cc| {
-            let mut style = (*cc.egui_ctx.style()).clone();
+            let mut style = (*cc.egui_ctx.style_of(egui::Theme::Dark)).clone();
             style
                 .text_styles
                 .insert(TextStyle::Body, FontId::proportional(16.0));
@@ -55,7 +55,7 @@ fn main() -> eframe::Result {
             style.spacing.interact_size.y = 34.0;
             style.spacing.item_spacing = egui::vec2(10.0, 10.0);
             style.visuals.slider_trailing_fill = true;
-            cc.egui_ctx.set_style(style);
+            cc.egui_ctx.set_style_of(egui::Theme::Dark, style);
             Ok(Box::new(NightshiftApp::new(cc.egui_ctx.clone())))
         }),
     )
