@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::ops::RangeInclusive;
 
 use eframe::egui::{self, Color32, Response, RichText, Sense, Stroke};
@@ -19,13 +21,21 @@ pub(crate) fn pill_toggle(
     ui.horizontal(|ui| {
         ui.add_enabled(
             enabled,
-            egui::Label::new(RichText::new(label).size(16.0).color(if enabled { TEXT } else { MUTED })),
+            egui::Label::new(
+                RichText::new(label)
+                    .size(16.0)
+                    .color(if enabled { TEXT } else { MUTED }),
+            ),
         );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let desired = egui::vec2(52.0, 30.0);
             let (rect, mut response) = ui.allocate_exact_size(
                 desired,
-                if enabled { Sense::click() } else { Sense::hover() },
+                if enabled {
+                    Sense::click()
+                } else {
+                    Sense::hover()
+                },
             );
             if enabled && response.clicked() {
                 *value = !*value;
@@ -39,7 +49,8 @@ pub(crate) fn pill_toggle(
             } else {
                 Stroke::new(1.0, TRACK)
             };
-            ui.painter().rect(rect, radius, fill, stroke, egui::StrokeKind::Inside);
+            ui.painter()
+                .rect(rect, radius, fill, stroke, egui::StrokeKind::Inside);
 
             let knob_radius = 10.0;
             let knob_x = if *value {
@@ -98,30 +109,4 @@ pub(crate) fn overlay_slider(
     ui.painter().circle_filled(knob, 5.0, TEXT);
 
     response
-}
-
-pub(crate) fn overlay_slider_u32(
-    ui: &mut egui::Ui,
-    value: &mut u32,
-    range: RangeInclusive<u32>,
-) -> Response {
-    let min = *range.start();
-    let max = *range.end();
-    let mut floating = *value as f32;
-    let mut response = overlay_slider(ui, &mut floating, min as f32..=max as f32);
-    let next = floating.round().clamp(min as f32, max as f32) as u32;
-    if next != *value {
-        *value = next;
-        response.mark_changed();
-    }
-    response
-}
-
-pub(crate) fn value_row(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(label).size(15.0).color(MUTED));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.label(RichText::new(value.into()).size(15.0).strong());
-        });
-    });
 }
