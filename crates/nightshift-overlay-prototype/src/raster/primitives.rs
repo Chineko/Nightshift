@@ -119,12 +119,34 @@ impl PanelBitmap {
     }
 
     pub(super) fn draw_sun(&mut self, cx: u32, cy: u32, radius: u32, color: [u8; 4]) {
-        self.draw_circle(cx, cy, radius / 2, color);
-        let r = radius + 6;
-        self.fill_rect(cx.saturating_sub(1), cy.saturating_sub(r), 3, 6, color);
-        self.fill_rect(cx.saturating_sub(1), cy + r.saturating_sub(5), 3, 6, color);
-        self.fill_rect(cx.saturating_sub(r), cy.saturating_sub(1), 6, 3, color);
-        self.fill_rect(cx + r.saturating_sub(5), cy.saturating_sub(1), 6, 3, color);
+        // A proper little sun instead of the old angry four-way compass. Eight short
+        // radial rays keep the silhouette readable after OpenXR scales the panel down.
+        let core_radius = (radius * 3 / 5).max(3);
+        self.draw_circle(cx, cy, core_radius, color);
+
+        const DIRECTIONS: [(f32, f32); 8] = [
+            (0.0, -1.0),
+            (0.707_106_77, -0.707_106_77),
+            (1.0, 0.0),
+            (0.707_106_77, 0.707_106_77),
+            (0.0, 1.0),
+            (-0.707_106_77, 0.707_106_77),
+            (-1.0, 0.0),
+            (-0.707_106_77, -0.707_106_77),
+        ];
+        let ray_start = core_radius as f32 + 3.0;
+        let ray_end = radius as f32 + 6.0;
+        let ray_dot_radius = (radius / 7).max(1);
+
+        for (dx, dy) in DIRECTIONS {
+            for step in 0..=2 {
+                let t = step as f32 / 2.0;
+                let distance = ray_start + (ray_end - ray_start) * t;
+                let x = (cx as f32 + dx * distance).round().max(0.0) as u32;
+                let y = (cy as f32 + dy * distance).round().max(0.0) as u32;
+                self.draw_circle(x, y, ray_dot_radius, color);
+            }
+        }
     }
 
     pub(super) fn draw_lightning(&mut self, cx: u32, cy: u32, color: [u8; 4]) {
