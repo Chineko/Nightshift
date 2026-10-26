@@ -91,6 +91,9 @@ fn panel_command(
         PanelAction::BrightnessUp => Some(UiCommand::SetBrightness(sanitize_brightness(
             current_brightness + 0.1,
         ))),
+        PanelAction::SetBrightness(percent) => Some(UiCommand::SetBrightness(sanitize_brightness(
+            percent as f32 / 100.0,
+        ))),
         PanelAction::ToggleHeartRate => {
             Some(UiCommand::SetHrMonitoring(!content.heart_rate_enabled))
         }
