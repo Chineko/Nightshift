@@ -1,10 +1,6 @@
 use super::*;
-use crate::{
-    pipeline::latest_live_user_presence,
-    runtime::{
-        AbortTask, RuntimeRefresh, StatusTaskResult, session_cookies, status_update_delay,
-        validated_user,
-    },
+use crate::runtime::{
+    AbortTask, RuntimeRefresh, StatusTaskResult, session_cookies, status_update_delay, validated_user,
 };
 
 pub(crate) fn cancel_status_edge(
@@ -78,15 +74,6 @@ async fn set_runtime_status(
         // Deliberately send the configured status even when the last observed status already
         // matches. Sleep/wake edges are commands, not cache reconciliation.
         api.set_status(&cookies, &user.id, target_status).await?;
-    }
-
-    if let Some(live) = latest_live_user_presence(&user.id) {
-        info!(
-            generation,
-            observed_status = ?live.status,
-            requested_status = ?target_status,
-            "VRChat pipeline status after accepted update"
-        );
     }
 
     info!(

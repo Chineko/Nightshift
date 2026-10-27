@@ -112,7 +112,9 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                 match message {
                     ServerMessage::Hello { .. } => bail!("daemon repeated IPC hello after handshake"),
                     ServerMessage::FullState { state } => {
-                        // Snapshot is synchronization, not a fresh sleep/wake edge.
+                        // Snapshot synchronization must not force the awake status. If the worker
+                        // attaches while sleep mode is already active, however, reconcile the
+                        // configured sleep status because there will be no new sleep edge.
                         sleeping = sleeping_phase(state.sleep.phase);
                         automation = status_config(&state.settings);
                         sync_invite_state(&mut invite_state, state.invites, &mut invite_tasks);
@@ -142,6 +144,18 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                                 next_pipeline_auth_token,
                                 &pipeline_tx,
                             );
+                            if sleeping && automation.enabled && vrchat_connected {
+                                schedule_status_update(
+                                    &mut status_task,
+                                    status_tx.clone(),
+                                    api.clone(),
+                                    store.clone(),
+                                    automation.sleep_status,
+                                    active_session.clone(),
+                                    last_status_write,
+                                    status_generation,
+                                );
+                            }
                             report_if_changed(&mut write_half, &mut last_report, report).await?;
                         }
                     }
@@ -158,16 +172,16 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                                     &mut status_task,
                                 );
 
-                                // Settings describe the desired status for the current mode.
-                                // Reconcile immediately when the policy changes instead of waiting
-                                // for another sleep/wake edge.
-                                if automation.enabled && vrchat_connected {
+                                // A changed sleep target should take effect while already sleeping.
+                                // While awake, wait for an actual wake edge instead of overwriting a
+                                // manually chosen VRChat status merely because settings changed.
+                                if sleeping && automation.enabled && vrchat_connected {
                                     schedule_status_update(
                                         &mut status_task,
                                         status_tx.clone(),
                                         api.clone(),
                                         store.clone(),
-                                        status_for_mode(automation, sleeping),
+                                        automation.sleep_status,
                                         active_session.clone(),
                                         last_status_write,
                                         status_generation,
@@ -176,6 +190,7 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                             }
                         }
                         StateEvent::VrchatChanged(state) => {
+                            let was_connected = vrchat_connected;
                             vrchat_connected = state.connected;
                             cancel_pending_status_on_disconnect(
                                 vrchat_connected,
@@ -194,6 +209,19 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                                     &mut pipeline_auth_token,
                                     None,
                                     &pipeline_tx,
+                                );
+                            } else if !was_connected && sleeping && automation.enabled {
+                                // Reconnecting while already asleep has no fresh sleep edge, so
+                                // restore the desired sleep-mode status for the active session.
+                                schedule_status_update(
+                                    &mut status_task,
+                                    status_tx.clone(),
+                                    api.clone(),
+                                    store.clone(),
+                                    automation.sleep_status,
+                                    active_session.clone(),
+                                    last_status_write,
+                                    status_generation,
                                 );
                             }
                         }
@@ -258,6 +286,18 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                     next_pipeline_auth_token,
                     &pipeline_tx,
                 );
+                if session_changed && sleeping && automation.enabled && vrchat_connected {
+                    schedule_status_update(
+                        &mut status_task,
+                        status_tx.clone(),
+                        api.clone(),
+                        store.clone(),
+                        automation.sleep_status,
+                        active_session.clone(),
+                        last_status_write,
+                        status_generation,
+                    );
+                }
                 report_if_changed(&mut write_half, &mut last_report, report).await?;
             }
             Some(task_result) = status_rx.recv() => {
@@ -329,6 +369,18 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                             next_pipeline_auth_token,
                             &pipeline_tx,
                         );
+                        if session_changed && sleeping && automation.enabled && vrchat_connected {
+                            schedule_status_update(
+                                &mut status_task,
+                                status_tx.clone(),
+                                api.clone(),
+                                store.clone(),
+                                automation.sleep_status,
+                                active_session.clone(),
+                                last_status_write,
+                                status_generation,
+                            );
+                        }
                         report_if_changed(&mut write_half, &mut last_report, report).await?;
                     }
                     PipelineEvent::Notification(notification) => {
