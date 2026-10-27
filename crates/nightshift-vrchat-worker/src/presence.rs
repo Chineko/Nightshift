@@ -3,46 +3,9 @@ use crate::{
     pipeline::latest_live_user_presence,
     runtime::{
         AbortTask, RuntimeRefresh, StatusTaskResult, session_cookies, status_update_delay,
-        user_presence, validated_user,
+        validated_user,
     },
 };
-use nightshift_vrchat_status::VrchatPresence;
-
-const LIVE_STATUS_CONFIRM_TIMEOUT: Duration = Duration::from_secs(2);
-const LIVE_STATUS_CONFIRM_POLL: Duration = Duration::from_millis(100);
-const LIVE_STATUS_SETTLE_DURATION: Duration = Duration::from_secs(2);
-
-#[derive(Clone, Default)]
-pub(crate) struct PresenceCaptureSlot(Arc<Mutex<Option<(u64, VrchatPresence)>>>);
-
-impl PresenceCaptureSlot {
-    pub(crate) fn store_once(&self, generation: u64, presence: VrchatPresence) {
-        let Ok(mut slot) = self.0.lock() else {
-            return;
-        };
-        if slot.is_none() {
-            *slot = Some((generation, presence));
-        }
-    }
-
-    pub(crate) fn take(&self, generation: u64) -> Option<VrchatPresence> {
-        let Ok(mut slot) = self.0.lock() else {
-            return None;
-        };
-        match slot.as_ref() {
-            Some((stored_generation, _)) if *stored_generation == generation => {
-                slot.take().map(|(_, presence)| presence)
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn clear(&self) {
-        if let Ok(mut slot) = self.0.lock() {
-            *slot = None;
-        }
-    }
-}
 
 pub(crate) fn cancel_status_edge(
     edge: bool,
@@ -55,212 +18,91 @@ pub(crate) fn cancel_status_edge(
     }
 }
 
-pub(crate) fn sleep_target(current: &VrchatPresence, status: VrchatStatus) -> VrchatPresence {
-    // Coarse automation gets to change the coarse status. User-authored text stays user-authored.
-    VrchatPresence::new(status, current.status_description.clone())
-}
-
-pub(crate) fn schedule_sleep_status_update(
+pub(crate) fn schedule_status_update(
     task: &mut AbortTask,
     result_tx: mpsc::UnboundedSender<StatusTaskResult>,
     api: VrchatApiClient,
     store: VrchatSessionStore,
-    sleep_status: VrchatStatus,
+    target_status: VrchatStatus,
     expected_session: Option<SessionCookies>,
     last_write: Option<Instant>,
     generation: u64,
-    capture_slot: PresenceCaptureSlot,
-    capture_original: bool,
 ) {
     let delay = status_update_delay(last_write);
     info!(
         generation,
-        target_status = ?sleep_status,
+        target_status = ?target_status,
         delay_ms = delay.as_millis(),
-        "scheduling VRChat sleep presence update"
+        "scheduling VRChat status update"
     );
     task.replace(tokio::spawn(async move {
         tokio::time::sleep(delay).await;
-        let result = set_runtime_sleep_presence(
+        let result = set_runtime_status(
             api,
             store,
-            sleep_status,
+            target_status,
             expected_session,
-            capture_slot,
             generation,
-            capture_original,
         )
         .await;
         let _ = result_tx.send(StatusTaskResult { generation, result });
     }));
 }
 
-async fn wait_for_live_status(user_id: &str, target_status: VrchatStatus) -> Option<VrchatPresence> {
-    let deadline = tokio::time::Instant::now() + LIVE_STATUS_CONFIRM_TIMEOUT;
-    loop {
-        if let Some(presence) = latest_live_user_presence(user_id)
-            && presence.status == target_status
-        {
-            return Some(presence);
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return None;
-        }
-        tokio::time::sleep(LIVE_STATUS_CONFIRM_POLL).await;
-    }
-}
-
-async fn wait_for_settled_live_status(
-    user_id: &str,
-    target_status: VrchatStatus,
-) -> Option<VrchatPresence> {
-    tokio::time::sleep(LIVE_STATUS_SETTLE_DURATION).await;
-    latest_live_user_presence(user_id).filter(|presence| presence.status == target_status)
-}
-
-async fn set_runtime_sleep_presence(
+async fn set_runtime_status(
     api: VrchatApiClient,
     store: VrchatSessionStore,
-    sleep_status: VrchatStatus,
+    target_status: VrchatStatus,
     expected_session: Option<SessionCookies>,
-    capture_slot: PresenceCaptureSlot,
     generation: u64,
-    capture_original: bool,
 ) -> Result<RuntimeRefresh> {
     let Some((session, user)) = validated_user(&api, &store).await? else {
         bail!("no VRChat session is stored");
     };
     let cookies = session_cookies(&session);
     if expected_session.as_ref() != Some(&cookies) {
-        bail!("VRChat session changed before pending presence update");
+        bail!("VRChat session changed before pending status update");
     }
 
-    // The REST current-user snapshot can lag behind the live VRChat client. Prefer the
-    // authenticated pipeline's current-user update when available so manual status changes are
-    // not mistaken for an already-matching target.
-    let current = latest_live_user_presence(&user.id).unwrap_or_else(|| user_presence(&user));
-    if capture_original {
-        capture_slot.store_once(generation, current.clone());
-    }
-
-    // Cancellation point after capture, before mutation. A quick wake can now grab the return
-    // ticket and abort this task without the sleep write escaping from the basement.
-    tokio::task::yield_now().await;
-
-    let target = sleep_target(&current, sleep_status);
     info!(
         generation,
-        current_status = ?current.status,
-        target_status = ?target.status,
-        "executing VRChat sleep presence update"
+        current_status = ?user.status,
+        target_status = ?target_status,
+        "sending VRChat status update"
     );
 
-    let mut verified = user;
-    verified.status = current.status;
-    verified.status_description = current.status_description.clone();
-    if current != target {
-        {
-            let _permit = shared_vrchat_requests()
-                .acquire(RequestClass::StatusWrite)
-                .await;
-            // Send the complete presence in one request. A status-only PUT can be observed briefly
-            // on the pipeline while the running VRChat client still reasserts its local presence.
-            api.set_presence(
-                &cookies,
-                &verified.id,
-                target.status,
-                &target.status_description,
-            )
-            .await?;
-        }
+    {
+        let _permit = shared_vrchat_requests()
+            .acquire(RequestClass::StatusWrite)
+            .await;
+        // Deliberately send the configured status even when the last observed status already
+        // matches. Sleep/wake edges are commands, not cache reconciliation.
+        api.set_status(&cookies, &user.id, target_status).await?;
+    }
 
-        let first_confirmation = wait_for_live_status(&verified.id, target.status).await;
-        if first_confirmation.is_none() {
-            warn!(
-                generation,
-                requested_status = ?target.status,
-                "VRChat accepted presence PUT but pipeline did not confirm it; retrying once"
-            );
-            {
-                let _permit = shared_vrchat_requests()
-                    .acquire(RequestClass::StatusWrite)
-                    .await;
-                api.set_presence(
-                    &cookies,
-                    &verified.id,
-                    target.status,
-                    &target.status_description,
-                )
-                .await?;
-            }
-        }
-
-        let Some(mut live) = first_confirmation.or_else(|| latest_live_user_presence(&verified.id))
-            .filter(|presence| presence.status == target.status)
-            .or(wait_for_live_status(&verified.id, target.status).await)
-        else {
-            bail!(
-                "VRChat accepted sleep presence writes but the live pipeline never confirmed {:?}",
-                target.status
-            );
-        };
-
-        if let Some(settled) = wait_for_settled_live_status(&verified.id, target.status).await {
-            live = settled;
-        } else {
-            warn!(
-                generation,
-                requested_status = ?target.status,
-                "VRChat sleep status reverted after confirmation; reasserting full presence"
-            );
-            {
-                let _permit = shared_vrchat_requests()
-                    .acquire(RequestClass::StatusWrite)
-                    .await;
-                api.set_presence(
-                    &cookies,
-                    &verified.id,
-                    target.status,
-                    &target.status_description,
-                )
-                .await?;
-            }
-            let Some(settled) = wait_for_live_status(&verified.id, target.status).await else {
-                bail!(
-                    "VRChat sleep status reverted and could not be re-applied as {:?}",
-                    target.status
-                );
-            };
-            live = settled;
-        }
-
-        verified.status = live.status;
-        verified.status_description = live.status_description;
+    if let Some(live) = latest_live_user_presence(&user.id) {
         info!(
             generation,
-            confirmed_status = ?verified.status,
-            "VRChat pipeline confirmed stable sleep status update"
+            observed_status = ?live.status,
+            requested_status = ?target_status,
+            "VRChat pipeline status after accepted update"
         );
-    } else {
-        info!(generation, "VRChat sleep presence already matches target");
     }
-    let presence = user_presence(&verified);
+
     info!(
         generation,
-        requested_status = ?target.status,
-        confirmed_status = ?presence.status,
-        "VRChat sleep presence update completed"
+        requested_status = ?target_status,
+        "VRChat status update accepted"
     );
 
     Ok(RuntimeRefresh {
         report: WorkerReport::VrchatRuntime {
             connected: true,
-            display_name: Some(verified.display_name),
-            status: presence.status,
+            display_name: Some(user.display_name),
+            status: target_status,
             last_invite_action: None,
             invite_error: None,
         },
-        presence: Some(presence),
         pipeline_auth_token: Some(cookies.auth.clone()),
         session_cookies: Some(cookies),
     })
@@ -269,26 +111,6 @@ async fn set_runtime_sleep_presence(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn sleep_target_preserves_user_status_text() {
-        let current = VrchatPresence::new(VrchatStatus::Active, "Building pillow fort");
-        assert_eq!(
-            sleep_target(&current, VrchatStatus::AskMe),
-            VrchatPresence::new(VrchatStatus::AskMe, "Building pillow fort")
-        );
-    }
-
-    #[test]
-    fn capture_slot_is_generation_scoped_and_one_shot() {
-        let slot = PresenceCaptureSlot::default();
-        let captured = VrchatPresence::new(VrchatStatus::Busy, "Do not disturb");
-        slot.store_once(7, captured.clone());
-        slot.store_once(8, VrchatPresence::new(VrchatStatus::Active, "wrong"));
-        assert_eq!(slot.take(8), None);
-        assert_eq!(slot.take(7), Some(captured));
-        assert_eq!(slot.take(7), None);
-    }
 
     #[tokio::test]
     async fn every_sleep_wake_edge_invalidates_pending_work() {

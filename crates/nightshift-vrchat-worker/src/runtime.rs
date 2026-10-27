@@ -1,6 +1,4 @@
 use super::*;
-use crate::pipeline::latest_live_user_presence;
-use nightshift_vrchat_status::VrchatPresence;
 
 pub(crate) struct AbortTask(pub(crate) Option<JoinHandle<()>>);
 
@@ -29,7 +27,6 @@ impl Drop for AbortTask {
 
 pub(crate) struct RuntimeRefresh {
     pub(crate) report: WorkerReport,
-    pub(crate) presence: Option<VrchatPresence>,
     pub(crate) pipeline_auth_token: Option<String>,
     pub(crate) session_cookies: Option<SessionCookies>,
 }
@@ -59,7 +56,6 @@ pub(crate) fn disconnected_report() -> WorkerReport {
 pub(crate) fn disconnected_refresh() -> RuntimeRefresh {
     RuntimeRefresh {
         report: disconnected_report(),
-        presence: None,
         pipeline_auth_token: None,
         session_cookies: None,
     }
@@ -80,49 +76,23 @@ pub(crate) fn status_config(settings: &nightshift_protocol::SettingsState) -> St
     }
 }
 
+pub(crate) fn status_for_mode(
+    automation: StatusAutomationConfig,
+    sleeping: bool,
+) -> VrchatStatus {
+    if sleeping {
+        automation.sleep_status
+    } else {
+        automation.wake_status
+    }
+}
+
 pub(crate) fn report_runtime(report: &WorkerReport) -> (bool, VrchatStatus) {
     match report {
         WorkerReport::VrchatRuntime {
             connected, status, ..
         } => (*connected, *status),
         _ => (false, VrchatStatus::Offline),
-    }
-}
-
-pub(crate) fn offline_presence() -> VrchatPresence {
-    VrchatPresence::new(VrchatStatus::Offline, "")
-}
-
-pub(crate) fn user_presence(user: &nightshift_vrchat_api::CurrentUserSummary) -> VrchatPresence {
-    VrchatPresence::new(user.status, user.status_description.clone())
-}
-
-fn user_with_presence(
-    mut user: nightshift_vrchat_api::CurrentUserSummary,
-    presence: &VrchatPresence,
-) -> nightshift_vrchat_api::CurrentUserSummary {
-    user.status = presence.status;
-    user.status_description = presence.status_description.clone();
-    user
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PresenceWriteKind {
-    None,
-    Status,
-    Description,
-    Both,
-}
-
-fn presence_write_kind(current: &VrchatPresence, target: &VrchatPresence) -> PresenceWriteKind {
-    match (
-        current.status != target.status,
-        current.status_description != target.status_description,
-    ) {
-        (false, false) => PresenceWriteKind::None,
-        (true, false) => PresenceWriteKind::Status,
-        (false, true) => PresenceWriteKind::Description,
-        (true, true) => PresenceWriteKind::Both,
     }
 }
 
@@ -150,7 +120,7 @@ pub(crate) fn cancel_pending_status_on_session_change(
     status_task: &mut AbortTask,
 ) {
     if changed && status_task.is_pending() {
-        // A sleep edge belongs to the account that observed it. Do not mail it to the next tenant.
+        // A sleep/wake edge belongs to the account that observed it. Do not mail it to the next tenant.
         *status_generation = status_generation.wrapping_add(1);
         status_task.abort();
     }
@@ -357,93 +327,18 @@ pub(crate) async fn refresh_runtime(
         }
     };
     let cookies = session_cookies(&session);
-    let presence = user_presence(&user);
 
     RuntimeRefresh {
         report: WorkerReport::VrchatRuntime {
             connected: true,
             display_name: Some(user.display_name),
-            status: presence.status,
+            status: user.status,
             last_invite_action: None,
             invite_error: None,
         },
-        presence: Some(presence),
         pipeline_auth_token: Some(cookies.auth.clone()),
         session_cookies: Some(cookies),
     }
-}
-
-pub(crate) async fn set_runtime_presence(
-    api: VrchatApiClient,
-    store: VrchatSessionStore,
-    target: VrchatPresence,
-    expected_session: Option<SessionCookies>,
-) -> Result<RuntimeRefresh> {
-    let Some((session, user)) = validated_user(&api, &store).await? else {
-        bail!("no VRChat session is stored");
-    };
-    let cookies = session_cookies(&session);
-
-    if expected_session.as_ref() != Some(&cookies) {
-        bail!("VRChat session changed before pending presence update");
-    }
-
-    // `/auth/user` can lag the live client. Use the pipeline presence when available,
-    // then send only the fields that actually differ from the captured restore target.
-    let current = latest_live_user_presence(&user.id).unwrap_or_else(|| user_presence(&user));
-    let current_user = user_with_presence(user, &current);
-    let write = presence_write_kind(&current, &target);
-
-    if write != PresenceWriteKind::None {
-        let _permit = shared_vrchat_requests()
-            .acquire(RequestClass::StatusWrite)
-            .await;
-        match write {
-            PresenceWriteKind::None => unreachable!(),
-            PresenceWriteKind::Status => {
-                api.set_status(&cookies, &current_user.id, target.status).await?;
-            }
-            PresenceWriteKind::Description => {
-                api.set_status_description(
-                    &cookies,
-                    &current_user.id,
-                    &target.status_description,
-                )
-                .await?;
-            }
-            PresenceWriteKind::Both => {
-                api.set_presence(
-                    &cookies,
-                    &current_user.id,
-                    target.status,
-                    &target.status_description,
-                )
-                .await?;
-            }
-        }
-    }
-
-    // Match Oyasumi's model: a successful PUT patches the fields we sent immediately.
-    // The pipeline remains the live authority and will reconcile any server normalization.
-    let verified = if write == PresenceWriteKind::None {
-        current_user
-    } else {
-        user_with_presence(current_user, &target)
-    };
-    let presence = user_presence(&verified);
-
-    Ok(RuntimeRefresh {
-        report: WorkerReport::VrchatRuntime {
-            connected: true,
-            display_name: Some(verified.display_name),
-            status: presence.status,
-            last_invite_action: None,
-            invite_error: None,
-        },
-        presence: Some(presence),
-        pipeline_auth_token: Some(cookies.auth.clone()),
-        session_cookies: Some(cookies),
-    })
 }
 
 #[cfg(test)]
@@ -451,29 +346,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn presence_write_diff_is_field_minimal() {
-        let base = VrchatPresence::new(VrchatStatus::Busy, "pillow fort");
-        assert_eq!(presence_write_kind(&base, &base), PresenceWriteKind::None);
-        assert_eq!(
-            presence_write_kind(
-                &base,
-                &VrchatPresence::new(VrchatStatus::AskMe, "pillow fort")
-            ),
-            PresenceWriteKind::Status
-        );
-        assert_eq!(
-            presence_write_kind(
-                &base,
-                &VrchatPresence::new(VrchatStatus::Busy, "sleeping")
-            ),
-            PresenceWriteKind::Description
-        );
-        assert_eq!(
-            presence_write_kind(
-                &base,
-                &VrchatPresence::new(VrchatStatus::AskMe, "sleeping")
-            ),
-            PresenceWriteKind::Both
-        );
+    fn status_policy_selects_configured_sleep_and_wake_targets() {
+        let automation = StatusAutomationConfig {
+            enabled: true,
+            sleep_status: VrchatStatus::AskMe,
+            wake_status: VrchatStatus::Active,
+        };
+        assert_eq!(status_for_mode(automation, true), VrchatStatus::AskMe);
+        assert_eq!(status_for_mode(automation, false), VrchatStatus::Active);
     }
 }

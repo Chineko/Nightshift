@@ -32,24 +32,6 @@ pub(crate) async fn report_if_changed(
     Ok(())
 }
 
-pub(crate) fn schedule_status_update(
-    task: &mut AbortTask,
-    result_tx: mpsc::UnboundedSender<StatusTaskResult>,
-    api: VrchatApiClient,
-    store: VrchatSessionStore,
-    target: nightshift_vrchat_status::VrchatPresence,
-    expected_session: Option<SessionCookies>,
-    last_write: Option<Instant>,
-    generation: u64,
-) {
-    let delay = status_update_delay(last_write);
-    task.replace(tokio::spawn(async move {
-        tokio::time::sleep(delay).await;
-        let result = set_runtime_presence(api, store, target, expected_session).await;
-        let _ = result_tx.send(StatusTaskResult { generation, result });
-    }));
-}
-
 pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -99,9 +81,6 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
 
     let mut sleeping = false;
     let mut vrchat_connected = false;
-    let mut current_presence = offline_presence();
-    let mut captured_presence: Option<nightshift_vrchat_status::VrchatPresence> = None;
-    let capture_slot = PresenceCaptureSlot::default();
     let mut automation = StatusAutomationConfig::default();
     let mut last_status_write: Option<Instant> = None;
     let mut status_generation = 0_u64;
@@ -122,26 +101,7 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
         tokio::select! {
             read = reader.read_line(&mut line) => {
                 if read.context("reading daemon IPC")? == 0 {
-                    let old_generation = status_generation;
                     status_task.abort();
-                    if let Some(fresh_capture) = capture_slot.take(old_generation)
-                        && captured_presence.is_none()
-                    {
-                        captured_presence = Some(fresh_capture);
-                    }
-                    status_generation = status_generation.wrapping_add(1);
-
-                    if let Some(target) = captured_presence.take()
-                        && let Err(error) = set_runtime_presence(
-                            api.clone(),
-                            store.clone(),
-                            target,
-                            active_session.clone(),
-                        )
-                        .await
-                    {
-                        warn!(%error, "failed to restore VRChat presence while worker was exiting");
-                    }
                     bail!("daemon closed the socket");
                 }
 
@@ -152,7 +112,7 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                 match message {
                     ServerMessage::Hello { .. } => bail!("daemon repeated IPC hello after handshake"),
                     ServerMessage::FullState { state } => {
-                        // Snapshot is synchronization, not a fresh Sleep/Wake edge.
+                        // Snapshot is synchronization, not a fresh sleep/wake edge.
                         sleeping = sleeping_phase(state.sleep.phase);
                         automation = status_config(&state.settings);
                         sync_invite_state(&mut invite_state, state.invites, &mut invite_tasks);
@@ -161,12 +121,10 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                             state_synchronized = true;
                             let RuntimeRefresh {
                                 report,
-                                presence,
                                 pipeline_auth_token: next_pipeline_auth_token,
                                 session_cookies: next_session,
                             } = refresh_runtime(&api, &store).await;
                             (vrchat_connected, _) = report_runtime(&report);
-                            current_presence = presence.unwrap_or_else(offline_presence);
                             let session_changed = sync_invite_session(
                                 &mut active_session,
                                 next_session,
@@ -178,10 +136,6 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                                 &mut status_generation,
                                 &mut status_task,
                             );
-                            if session_changed {
-                                captured_presence = None;
-                                capture_slot.clear();
-                            }
                             sync_pipeline_task(
                                 &mut pipeline_task,
                                 &mut pipeline_auth_token,
@@ -194,77 +148,47 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                     ServerMessage::Event { event } => match event {
                         StateEvent::SettingsChanged(settings) => {
                             let previous = automation;
-                            let pending = status_task.is_pending();
                             automation = status_config(&settings);
 
-                            if pending && automation != previous {
-                                let old_generation = status_generation;
-                                if let Some(fresh_capture) = capture_slot.take(old_generation)
-                                    && captured_presence.is_none()
-                                {
-                                    captured_presence = Some(fresh_capture);
-                                }
-                                cancel_status_edge(true, &mut status_generation, &mut status_task);
+                            if automation != previous {
+                                let pending = status_task.is_pending();
+                                cancel_status_edge(
+                                    pending,
+                                    &mut status_generation,
+                                    &mut status_task,
+                                );
 
-                                if sleeping && automation.enabled && vrchat_connected {
-                                    schedule_sleep_status_update(
-                                        &mut status_task,
-                                        status_tx.clone(),
-                                        api.clone(),
-                                        store.clone(),
-                                        automation.sleep_status,
-                                        active_session.clone(),
-                                        last_status_write,
-                                        status_generation,
-                                        capture_slot.clone(),
-                                        captured_presence.is_none(),
-                                    );
-                                } else if vrchat_connected
-                                    && let Some(target) = captured_presence.clone()
-                                {
+                                // Settings describe the desired status for the current mode.
+                                // Reconcile immediately when the policy changes instead of waiting
+                                // for another sleep/wake edge.
+                                if automation.enabled && vrchat_connected {
                                     schedule_status_update(
                                         &mut status_task,
                                         status_tx.clone(),
                                         api.clone(),
                                         store.clone(),
-                                        target,
+                                        status_for_mode(automation, sleeping),
                                         active_session.clone(),
                                         last_status_write,
                                         status_generation,
                                     );
                                 }
                             }
-                            if !automation.enabled && !sleeping && !status_task.is_pending() {
-                                captured_presence = None;
-                                capture_slot.clear();
-                            }
                         }
                         StateEvent::VrchatChanged(state) => {
                             vrchat_connected = state.connected;
-                            current_presence.status = if state.connected {
-                                state.status
-                            } else {
-                                VrchatStatus::Offline
-                            };
-                            if !state.connected {
-                                current_presence.status_description.clear();
-                            }
                             cancel_pending_status_on_disconnect(
                                 vrchat_connected,
                                 &mut status_generation,
                                 &mut status_task,
                             );
                             if !vrchat_connected {
-                                capture_slot.clear();
-                                let session_changed = sync_invite_session(
+                                sync_invite_session(
                                     &mut active_session,
                                     None,
                                     &mut invite_tasks,
                                     &mut recent_invites,
                                 );
-                                if session_changed {
-                                    captured_presence = None;
-                                }
                                 sync_pipeline_task(
                                     &mut pipeline_task,
                                     &mut pipeline_auth_token,
@@ -276,52 +200,23 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                         StateEvent::SleepChanged(state) => {
                             let next_sleeping = sleeping_phase(state.phase);
                             let edge = next_sleeping != sleeping;
-                            if edge {
-                                let old_generation = status_generation;
-                                if let Some(fresh_capture) = capture_slot.take(old_generation)
-                                    && captured_presence.is_none()
-                                {
-                                    captured_presence = Some(fresh_capture);
-                                }
-                                cancel_status_edge(true, &mut status_generation, &mut status_task);
-                                sleeping = next_sleeping;
+                            sleeping = next_sleeping;
 
-                                if sleeping && automation.enabled && vrchat_connected {
-                                    schedule_sleep_status_update(
+                            if edge {
+                                cancel_status_edge(true, &mut status_generation, &mut status_task);
+
+                                if automation.enabled && vrchat_connected {
+                                    schedule_status_update(
                                         &mut status_task,
                                         status_tx.clone(),
                                         api.clone(),
                                         store.clone(),
-                                        automation.sleep_status,
+                                        status_for_mode(automation, sleeping),
                                         active_session.clone(),
                                         last_status_write,
                                         status_generation,
-                                        capture_slot.clone(),
-                                        captured_presence.is_none(),
                                     );
-                                } else if !sleeping && vrchat_connected {
-                                    if let Some(target) = captured_presence.clone() {
-                                        // Always schedule the restore. The writer fresh-checks VRChat and
-                                        // skips the API mutation when the server already matches.
-                                        schedule_status_update(
-                                            &mut status_task,
-                                            status_tx.clone(),
-                                            api.clone(),
-                                            store.clone(),
-                                            target,
-                                            active_session.clone(),
-                                            last_status_write,
-                                            status_generation,
-                                        );
-                                    } else {
-                                        capture_slot.clear();
-                                    }
-                                } else if !sleeping {
-                                    captured_presence = None;
-                                    capture_slot.clear();
                                 }
-                            } else {
-                                sleeping = next_sleeping;
                             }
                         }
                         StateEvent::InvitesChanged(state) => {
@@ -337,12 +232,10 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
             _ = interval.tick(), if state_synchronized => {
                 let RuntimeRefresh {
                     report,
-                    presence,
                     pipeline_auth_token: next_pipeline_auth_token,
                     session_cookies: next_session,
                 } = refresh_runtime(&api, &store).await;
                 (vrchat_connected, _) = report_runtime(&report);
-                current_presence = presence.unwrap_or_else(offline_presence);
                 cancel_pending_status_on_disconnect(
                     vrchat_connected,
                     &mut status_generation,
@@ -359,10 +252,6 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                     &mut status_generation,
                     &mut status_task,
                 );
-                if session_changed {
-                    captured_presence = None;
-                    capture_slot.clear();
-                }
                 sync_pipeline_task(
                     &mut pipeline_task,
                     &mut pipeline_auth_token,
@@ -375,23 +264,16 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                 if task_result.generation != status_generation {
                     continue;
                 }
-                if let Some(fresh_capture) = capture_slot.take(task_result.generation)
-                    && captured_presence.is_none()
-                {
-                    captured_presence = Some(fresh_capture);
-                }
                 status_task.0 = None;
                 match task_result.result {
                     Ok(refresh) => {
                         last_status_write = Some(Instant::now());
                         let RuntimeRefresh {
                             report,
-                            presence,
                             pipeline_auth_token: next_pipeline_auth_token,
                             session_cookies: next_session,
                         } = refresh;
                         (vrchat_connected, _) = report_runtime(&report);
-                        current_presence = presence.unwrap_or_else(offline_presence);
                         let session_changed = sync_invite_session(
                             &mut active_session,
                             next_session,
@@ -403,14 +285,6 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                             &mut status_generation,
                             &mut status_task,
                         );
-                        if session_changed {
-                            captured_presence = None;
-                            capture_slot.clear();
-                        } else if !sleeping {
-                            // A successful awake write is the verified restore. Ticket punched; goblin goes home.
-                            captured_presence = None;
-                            capture_slot.clear();
-                        }
                         sync_pipeline_task(
                             &mut pipeline_task,
                             &mut pipeline_auth_token,
@@ -420,7 +294,7 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                         report_if_changed(&mut write_half, &mut last_report, report).await?;
                     }
                     Err(error) => {
-                        warn!(%error, "VRChat sleep/wake presence update failed");
+                        warn!(%error, "VRChat sleep/wake status update failed");
                     }
                 }
             }
@@ -429,12 +303,10 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                     PipelineEvent::RevalidateSession => {
                         let RuntimeRefresh {
                             report,
-                            presence,
                             pipeline_auth_token: next_pipeline_auth_token,
                             session_cookies: next_session,
                         } = refresh_runtime(&api, &store).await;
                         (vrchat_connected, _) = report_runtime(&report);
-                        current_presence = presence.unwrap_or_else(offline_presence);
                         cancel_pending_status_on_disconnect(
                             vrchat_connected,
                             &mut status_generation,
@@ -451,10 +323,6 @@ pub(crate) async fn run_connection(stream: UnixStream) -> Result<()> {
                             &mut status_generation,
                             &mut status_task,
                         );
-                        if session_changed {
-                            captured_presence = None;
-                            capture_slot.clear();
-                        }
                         sync_pipeline_task(
                             &mut pipeline_task,
                             &mut pipeline_auth_token,
